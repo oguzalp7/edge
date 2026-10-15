@@ -148,27 +148,35 @@ python3 tools/brigade/cli.py register /path/to/repo --role qa_engineer --convers
 # 3. View registered stations
 python3 tools/brigade/cli.py stations /path/to/repo
 
-# 4. Inspect Treehouse worktree pool
-python3 tools/brigade/cli.py worktree /path/to/repo
+# 4. Treehouse Worktree Yönetimi
+python3 tools/brigade/cli.py worktree /path/to/repo                              # Havuz durumunu göster
+python3 tools/brigade/cli.py worktree /path/to/repo --action lease --branch feat/my-feat  # İzole slot kirala
+python3 tools/brigade/cli.py worktree /path/to/repo --action return --force     # Worktree'yi havuza iade et
 
-# 5. Triage next high-priority debt item (leases isolated Treehouse worktree)
+# 5. Dikey Dilim Başlat (Feature / Refactor için otomatik Treehouse Worktree kiralar)
+python3 tools/brigade/cli.py start-slice /path/to/repo --name staff-allocation --track feature
+
+# 6. Radar Bilet Triage (Mevcut borç defterinden bilet alır ve worktree kiralar)
 python3 tools/brigade/cli.py triage /path/to/repo --track core
 
-# 6. Inspect active ticket (includes living negative constraints alert block)
+# 7. Aktif İstasyon Prompt Payload'unu İncele (Negatif kısıtlar ve worktree yolu içerir)
 python3 tools/brigade/cli.py ticket /path/to/repo --prompt
 
-# 7. Advance state machine through deterministic guards
+# 8. Durum Makinesini İlerlet (Deterministik kapıları çalıştırır)
 python3 tools/brigade/cli.py advance /path/to/repo
 
-# 8. View rich state dashboard (displays active worktree and escalation status)
+# 9. Dikey Dilimi Tamamla (development Dalına Fast-Forward Merge & Worktree İadesi)
+python3 tools/brigade/cli.py finish-slice /path/to/repo
+
+# 10. Zengin Durum Kartını İncele (Aktif worktree ve eskalasyon durumunu gösterir)
 python3 tools/brigade/cli.py status /path/to/repo
 
-# 9. Emergency Button: Escalate ambiguous decision to Captain
+# 11. Acil Durum Butonu: Kaptana Eskalasyon
 python3 tools/brigade/cli.py escalate /path/to/repo --reason "Need schema column clarification"
 
-# 10. Release escalated ticket with binding decision
+# 12. Eskalasyonu Kaptan Kararıyla Çöz
 python3 tools/brigade/cli.py release /path/to/repo --decision "Use 'user_display_name' field"
 
-# 11. Emergency Button: Abort cycle, record negative constraint, and force-release worktree
+# 13. Acil Durum Butonu: İptal Et, Negatif Kuralı Kaydet ve Worktree'yi Zorla İade Et
 python3 tools/brigade/cli.py abort /path/to/repo --reason "Deadlock under concurrency" --constraint "DO NOT use raw queries without transaction context"
 ```

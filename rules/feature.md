@@ -42,13 +42,16 @@ Bu doküman, `edge` eklentisi bünyesinde **Yeni Davranış & Feature Ekleme** o
 [SEAM_ARCHITECT] ──────────────────────► [KIRMIZI TEST GATE: vitest FAIL (Kırmızı)]
        │
        ▼
+[TREEHOUSE WORKTREE GATE] ─────────────► [İzole Worktree Kiralandı: slot-N]
+       │
+       ▼
 [CODER WORKER]   ──────────────────────► [YEŞİL TEST GATE: vitest PASS (0) & tsc (0)]
        │
        ▼
 [EXAMINERS]      ──────────────────────► [REVIEW GATE: 0 Critical Findings]
        │
        ▼
-[EXPEDITER]      ──────────────────────► [STAGING: git merge --squash]
+[EXPEDITER]      ──────────────────────► [STAGING: git merge --ff-only into development & return worktree]
 ```
 
 ### 🛑 2.1 Visual Approval Gate İnvaryantları (No-Bypass Kuralı)
@@ -63,6 +66,14 @@ Bu doküman, `edge` eklentisi bünyesinde **Yeni Davranış & Feature Ekleme** o
 3. **Orkestratör Yeşil Alan İnvaryantı:** Orkestratör prototip revizyonlarıyla bağlamını kirletmez. Yalnızca insan tarafından onaylanmış (`session_ended: true`) nihai paketi teslim aldığında bir sonraki istasyona (`seam_architect`) geçiş izni verir.
 4. **Çoklu Prototip / Mock Seçimi (Variants):**
    Kullanıcı birden fazla mock/tasarım istediğinde, `SPEC_WRITER` varyantları hazırlar. Kullanıcı Lavish Editor üzerinden seçimini tamamlamadan `SEAM_ARCHITECT` veya `CODER` istasyonuna geçiş KESİNLİKLE YASAKTIR.
+
+### 🛑 2.2 Deterministik Treehouse Worktree İzolasyon Kapısı (Zero-Touch Invariant)
+1. **Kırmızı Test Sonrası Zorunlu Worktree Açma:** `SEAM_ARCHITECT` sözleşmeleri ve kırmızı testleri oluşturduktan sonra, `CODER` koda dokunmadan ÖNCE İSTİSNASIZ olarak Treehouse üzerinden izole bir worktree kiralanır:
+   ```bash
+   python3 tools/brigade/cli.py start-slice /home/oguz/<project> --name <feature-name> --track feature
+   ```
+2. **CODER Yalnızca Worktree İçinde Çalışır:** `CODER` ajanı ana repo çalışma dizininde (`/home/oguz/<project>`) tek bir dosya dahi değiştiremez. Tüm kod yazımı, derleme ve yeşil test doğrulaması kiralık worktree (`/home/oguz/.treehouse/pool/slot-N/...`) içinde icra edilir.
+3. **Senkronizasyon & İade:** `EXAMINERS` incelemesi tamamlandığında `EXPEDITER` `python3 tools/brigade/cli.py finish-slice <repo>` çalıştırarak worktree branch'ini ana depodaki `development` dalına fast-forward (`git merge --ff-only`) birleştirir ve worktree slotunu Treehouse havuzuna iade eder.
 
 
 ---

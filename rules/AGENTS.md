@@ -14,6 +14,23 @@ Bu kurallar, `edge` eklentisini kullanan tüm çalışma alanlarında geçerli e
 
 ---
 
+## 🌳 0.1 Zero-Touch Primary Working Tree & Treehouse Worktree İnvaryantı
+> [!CRITICAL]
+> **Ana Repo Çalışma Ağacına Doğrudan Kod Yazma Yasağı (Zero-Touch Primary Invariant):**
+> İster Feature ister Refactor operasyonu olsun; **kırmızı testleri geçmek için üretim koduna dokunmadan önce (`CODER`)** veya **ameliyat başlatılmadan önce (`SURGEON`)**, İSTİSNASIZ olarak Treehouse üzerinden izole bir worktree kiralanmalıdır:
+> ```bash
+> # Yöntem 1 (Önerilen - Brigade Slice):
+> python3 tools/brigade/cli.py start-slice /home/oguz/<project> --name <slice-adi> --track <feature|core|ui>
+>
+> # Yöntem 2 (Doğrudan Treehouse CLI):
+> treehouse get --lease -b feat/<slice-adi>
+> ```
+> - Ana repo dizini (`/home/oguz/<project>`) sadece koordinasyon, biletleme ve git branch takibi içindir; doğrudan üretim kodu mutasyonuyla KİRLETİLEMEZ.
+> - Tüm dosya düzenleme (`write_to_file`, `replace_file_content`), `tsc` derleme ve test koşturma işlemleri kiralık worktree (`/home/oguz/.treehouse/pool/slot-N/...`) içinde icra edilir.
+> - Doğrulama ve inceleme tamamlandığında `python3 tools/brigade/cli.py finish-slice <repo>` ile ana repodaki `development` dalına fast-forward (`git merge --ff-only`) birleştirilir ve worktree havuza iade edilir.
+
+---
+
 ## 🧭 1. AXI-First Araç Hiyerarşisi ve Fallback Protokolü
 
 Ajanlar çevre birimleriyle (Git, Tarayıcı, Görev Listesi) etkileşime girerken token tasarrufu ve determinizm adına aşağıdaki öncelik sırasını takip etmekle yükümlüdür:

@@ -43,9 +43,9 @@ suggested_skills:
      3. **Yalnızca Yoksa Aç ve Kaydet:** Hedef rolde ajan henüz yoksa `invoke_subagent` çağır ve dönen `conversationId`'yi hemen `python3 tools/brigade/cli.py register <repo> --role <role> --conversation-id <id>` ile `.edge/brigade.json`'a kaydet.
      4. **Kanonik İstasyon Zorunluluğu (Ad-Hoc Rol Yasağı):** Asla `Database Operator`, `Quality Worker` gibi ad-hoc roller türetme. Tüm sistem operasyonlarını, migration ve test koşumlarını `EXPEDITER`'a, araştırmaları `RESEARCHER`'a, refaktörleri `SURGEON`'a delege et.
    - **İş Akışı Zincirleri:**
-     - **Feature İşi:** `SPEC_WRITER` $\rightarrow$ `SEAM_ARCHITECT` (Kırmızı Test) $\rightarrow$ `CODER` (Yeşil Test) $\rightarrow$ `EXAMINERS` $\rightarrow$ `QA_ENGINEER` $\rightarrow$ `EXPEDITER`.
-     - **Refactor İşi:** `SURGEON` $\rightarrow$ `EXAMINERS` $\rightarrow$ `EXPEDITER`.
-     - **Bug-Fix İşi:** `RESEARCHER` (RCA) $\rightarrow$ `SEAM_ARCHITECT` (Karakterizasyon Testi) $\rightarrow$ `CODER` $\rightarrow$ `EXAMINERS` $\rightarrow$ `QA_ENGINEER`.
+     - **Feature İşi:** `SPEC_WRITER` $\rightarrow$ `SEAM_ARCHITECT` (Kırmızı Test) $\rightarrow$ **[TREEHOUSE WORKTREE GATE]** $\rightarrow$ `CODER` (Worktree'de Yeşil Test) $\rightarrow$ `EXAMINERS` $\rightarrow$ `QA_ENGINEER` $\rightarrow$ `EXPEDITER` (`finish-slice`).
+     - **Refactor İşi:** **[TREEHOUSE WORKTREE GATE]** $\rightarrow$ `SURGEON` (Worktree'de Cerrahi) $\rightarrow$ `EXAMINERS` $\rightarrow$ `EXPEDITER` (`finish-slice`).
+     - **Bug-Fix İşi:** `RESEARCHER` (RCA) $\rightarrow$ `SEAM_ARCHITECT` (Karakterizasyon Testi) $\rightarrow$ **[TREEHOUSE WORKTREE GATE]** $\rightarrow$ `CODER` $\rightarrow$ `EXAMINERS` $\rightarrow$ `QA_ENGINEER` $\rightarrow$ `EXPEDITER`.
      - **QA / E2E Doğrulama:** `QA_ENGINEER` (`chrome-devtools-axi` + Fast-Forward Codegen Replay + Scraper Anomaly Journaling).
 
 5. **Bağlam Isısı & Güvenli Duraklatma (Context Heat Sentinel):**
@@ -69,10 +69,16 @@ python tools/brigade/cli.py register <repo_path> --role standards_examiner --con
 python tools/brigade/cli.py register <repo_path> --role spec_examiner --conversation-id <id>
 python tools/brigade/cli.py register <repo_path> --role qa_engineer --conversation-id <id>
 
-# 3. İşi İlerlet (Deterministik Kapılar Geçişi Yönetir)
+# 3. Dikey Dilimi Başlat (Deterministik Olarak Treehouse Worktree Kiralar)
+python tools/brigade/cli.py start-slice <repo_path> --name <slice-adi> --track feature
+
+# 4. İşi İlerlet (Deterministik Kapılar Geçişi Yönetir)
 python tools/brigade/cli.py advance <repo_path>
 
-# 4. Güvenli Duraklatma (Bağlam Isısı Sebebiyle)
+# 5. Dikey Dilimi Tamamla (development Dalına Fast-Forward Merge & Worktree İadesi)
+python tools/brigade/cli.py finish-slice <repo_path>
+
+# 6. Güvenli Duraklatma (Bağlam Isısı Sebebiyle)
 python tools/brigade/cli.py pause <repo_path> --reason CONTEXT_LIMIT_YELLOW
 ```
 
@@ -80,6 +86,7 @@ python tools/brigade/cli.py pause <repo_path> --reason CONTEXT_LIMIT_YELLOW
 
 ## 🚫 Negatif Kısıtlar (Anti-Patterns)
 
+* ❌ **Asla Ana Çalışma Ağacında Kodlama / Cerrahi Yapma (Zero-Touch Primary Invariant):** Kırmızı testler tamamlandıktan sonra `CODER`'a iş devredilmeden veya `SURGEON` çalıştırılmadan önce MUTLAKA Treehouse worktree kiralanmalıdır (`start-slice` veya `treehouse get --lease`). Ana repoda doğrudan üretim kodu değiştirmek KESİNLİKLE YASAKTIR.
 * ❌ **Asla Orkestratör Bağlamında Kod Üretme:** Cerrahiyi ve kodlamayı istasyon ajanlarına (`coder`, `surgeon`) bırak.
 * ❌ **Asla Mükerrer İstasyon Ajanı Doğurma (Anti-Graveyard):** İlgili rolde aktif veya kayıtlı bir istasyon varsa `invoke_subagent` çağırma; `send_message(Recipient: <id>)` ile iletişimi sürdür.
 * ❌ **Asla Ad-Hoc Persona / Rol Türetme:** `Database Operator`, `Quality Worker` gibi keyfi roller açma; yalnızca 9 kanonik Brigade istasyonunu kullan.
