@@ -215,6 +215,46 @@ class TestFsmEscalationAndAbort(unittest.TestCase):
         self.assertEqual(len(constraints), 1)
         self.assertEqual(constraints[0], "DO NOT rewrite action using async generators; use standard promises.")
 
+    @patch("tools.brigade.fsm.is_treehouse_installed", return_value=True)
+    @patch("tools.brigade.fsm.acquire_worktree")
+    @patch("tools.brigade.fsm.return_worktree")
+    def test_start_slice_and_finish_slice(self, mock_return, mock_acquire, mock_installed):
+        mock_acquire.return_value = (True, "/tmp/mock-slot-42", "")
+        mock_return.return_value = (True, "Returned")
+
+        # Fake git repo
+        (self.repo_path / ".git").mkdir()
+
+        # 1. Start slice
+        fsm = BrigadeFSM(self.repo_path)
+        ok, ticket, msg = fsm.start_slice(
+            name="staff-allocation",
+            track="feature",
+            target_file="src/core/modules/staff/allocation.ts",
+            domain="staff",
+        )
+        self.assertTrue(ok)
+        self.assertIsNotNone(ticket)
+        self.assertEqual(ticket.track, "feature")
+        self.assertEqual(ticket.domain, "staff")
+        self.assertEqual(ticket.branch_name, "feat/staff-allocation")
+        self.assertEqual(ticket.worktree_path, "/tmp/mock-slot-42")
+        self.assertEqual(fsm.state.current_state, CycleState.SURGERY)
+        self.assertEqual(fsm.state.active_worktree, "/tmp/mock-slot-42")
+
+        # Ensure flight recorder was initialized
+        recorder = FlightRecorder(self.repo_path, ticket.ticket_id)
+        self.assertEqual(recorder.data["domain"], "staff")
+        self.assertEqual(recorder.data["worktree_path"], "/tmp/mock-slot-42")
+
+        # 2. Finish slice
+        with patch.object(fsm, "guard_staging_to_completed", return_value=(True, "Merged cleanly", {})):
+            fin_ok, fin_msg = fsm.finish_slice()
+            self.assertTrue(fin_ok)
+            self.assertEqual(fsm.state.current_state, CycleState.IDLE)
+            self.assertIsNone(fsm.state.active_ticket)
+            self.assertIsNone(fsm.state.active_worktree)
+
 
 if __name__ == "__main__":
     unittest.main()
