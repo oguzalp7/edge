@@ -225,8 +225,14 @@ class TestFsmEscalationAndAbort(unittest.TestCase):
         # Fake git repo
         (self.repo_path / ".git").mkdir()
 
-        # 1. Start slice
+        # Reset to IDLE
         fsm = BrigadeFSM(self.repo_path)
+        fsm.state.active_ticket = None
+        fsm.state.active_worktree = None
+        fsm.state.current_state = CycleState.IDLE
+        fsm.save()
+
+        # 1. Start slice
         ok, ticket, msg = fsm.start_slice(
             name="staff-allocation",
             track="feature",
