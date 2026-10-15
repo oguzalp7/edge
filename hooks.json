@@ -1,0 +1,35 @@
+﻿{
+  "edge-orchestrator-guard": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "wsl python3 /mnt/c/Users/oguz_/.gemini/config/plugins/edge/tools/brigade/orchestrator_guard.py pre_tool",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "wsl python3 /mnt/c/Users/oguz_/.gemini/config/plugins/edge/tools/brigade/orchestrator_guard.py post_tool",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "wsl python3 /mnt/c/Users/oguz_/.gemini/config/plugins/edge/tools/brigade/orchestrator_guard.py pre_invocation",
+        "timeout": 10
+      }
+    ]
+  }
+}

@@ -1,0 +1,94 @@
+from typing import List
+from .models import FileMetrics, RiskCategory, IssueTag, AuditSummary
+
+class HealthScorer:
+    @staticmethod
+    def score_file(m: FileMetrics) -> FileMetrics:
+        score = 0.0
+        tags: List[IssueTag] = []
+        recs: List[str] = []
+
+        # 1. SLOC Penalty
+        if m.sloc > 800:
+            score += 45.0
+            tags.append(IssueTag.GOD_FILE)
+            recs.append(f"Massive file ({m.sloc} SLOC). Depletes agent attention; decompose into 3-4 cohesive submodules.")
+        elif m.sloc > 400:
+            score += 25.0
+            tags.append(IssueTag.GOD_FILE)
+            recs.append(f"High line count ({m.sloc} SLOC). Slicing recommended to reach < 200 SLOC clean boundary.")
+        elif m.sloc > 250:
+            score += 12.0
+            recs.append(f"Approaching bloat boundary ({m.sloc} SLOC). Plan refactoring before adding new features.")
+
+        # 2. Complexity Penalty
+        if m.complexity_score > 35:
+            score += 25.0
+            tags.append(IssueTag.HIGH_COMPLEXITY)
+            recs.append(f"High cyclomatic complexity ({m.complexity_score} decision points). Flatten nested control flows.")
+        elif m.complexity_score > 20:
+            score += 12.0
+            tags.append(IssueTag.HIGH_COMPLEXITY)
+
+        # 3. Indent Nesting Penalty
+        if m.max_indent_level >= 5:
+            score += 15.0
+            tags.append(IssueTag.DEEP_NESTING)
+            recs.append(f"Deep indentation nesting (level {m.max_indent_level}). Apply early returns and guard clauses.")
+        elif m.max_indent_level == 4:
+            score += 5.0
+
+        # 4. Shallow Module Penalty (Ousterhout - Interface vs Body)
+        if m.public_exports > 10 and m.sloc > 250:
+            score += 15.0
+            tags.append(IssueTag.SHALLOW_MODULE)
+            recs.append(f"Shallow module warning: Leaking {m.public_exports} public exports. Encapsulate behind a unified facade/interface.")
+        elif m.public_exports > 15:
+            score += 10.0
+            tags.append(IssueTag.SHALLOW_MODULE)
+
+        # 5. Long Functions (God Functions)
+        long_funcs = [f for f in m.functions if f.sloc > 50]
+        if long_funcs:
+            score += 10.0
+            tags.append(IssueTag.GOD_FUNCTION)
+            names = ", ".join([f.name for f in long_funcs[:3]])
+            recs.append(f"Excessive function length ({names} > 50 lines). Extract pure calculations into helper utilities.")
+
+        # 6. Test Seam Coverage
+        if not m.has_test_seam and m.sloc > 120:
+            score += 15.0
+            tags.append(IssueTag.MISSING_TEST_SEAM)
+            recs.append("Missing companion test seam. Pin existing behavior with tests before attempting refactoring.")
+
+        # Final Score Cap & Categorization
+        m.risk_score = min(100.0, round(score, 1))
+        m.issue_tags = tags
+        m.slicing_recommendations = recs
+
+        if m.risk_score >= 60.0:
+            m.risk_category = RiskCategory.CRITICAL
+        elif m.risk_score >= 35.0:
+            m.risk_category = RiskCategory.HOTSPOT
+        elif m.risk_score >= 18.0:
+            m.risk_category = RiskCategory.ATTENTION
+        else:
+            m.risk_category = RiskCategory.CLEAN
+
+        return m
+
+    @staticmethod
+    def calculate_summary(summary: AuditSummary) -> AuditSummary:
+        if not summary.file_results:
+            summary.overall_health_score = 100.0
+            return summary
+
+        total_risk = sum(f.risk_score for f in summary.file_results)
+        avg_risk = total_risk / len(summary.file_results)
+        summary.overall_health_score = max(0.0, round(100.0 - avg_risk, 1))
+
+        summary.critical_hotspots = sum(1 for f in summary.file_results if f.risk_category == RiskCategory.CRITICAL)
+        summary.attention_files = sum(1 for f in summary.file_results if f.risk_category in (RiskCategory.HOTSPOT, RiskCategory.ATTENTION))
+        summary.clean_files = sum(1 for f in summary.file_results if f.risk_category == RiskCategory.CLEAN)
+
+        return summary

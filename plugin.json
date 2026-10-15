@@ -1,0 +1,6 @@
+{
+  "name": "edge",
+  "description": "Deterministic codebase health, architectural quality gate, and autonomous refactoring suite (Edge Harness).",
+  "version": "0.1.0",
+  "disabled": false
+}
