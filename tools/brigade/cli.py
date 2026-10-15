@@ -443,6 +443,63 @@ def cmd_release(args: argparse.Namespace) -> int:
 def cmd_worktree(args: argparse.Namespace) -> int:
     repo_path = normalize_target_path(args.repo)
     fsm = BrigadeFSM(repo_path)
+    action = getattr(args, "action", "status")
+
+    if action == "lease":
+        branch = getattr(args, "branch", None)
+        if not branch:
+            if fsm.state.active_ticket:
+                branch = fsm.state.active_ticket.branch_name
+            else:
+                print("❌ --branch is required to lease a worktree when no active ticket is present.")
+                return 1
+        
+        holder = getattr(args, "holder", "edge-brigade")
+        ok, wt_path, err = acquire_worktree(fsm.target_repo, branch_name=branch, lease_holder=holder)
+        if not ok:
+            print(f"❌ Failed to acquire Treehouse worktree: {err}")
+            return 1
+        
+        fsm.state.active_worktree = wt_path
+        if fsm.state.active_ticket:
+            fsm.state.active_ticket.worktree_path = wt_path
+        fsm.save()
+
+        print("\n=======================================================")
+        print("🌳  TREEHOUSE WORKTREE LEASED")
+        print("=======================================================")
+        print(f"Repository:      {fsm.target_repo}")
+        print(f"Branch:          {branch}")
+        print(f"Worktree Path:   {wt_path}")
+        print("=======================================================")
+        print(f"\n👉 ZERO-TOUCH INVARIANT: Execute all file edits & tests inside:\n   cd {wt_path}\n")
+        return 0
+
+    elif action == "return":
+        path_to_return = getattr(args, "path", None) or fsm.state.active_worktree
+        if not path_to_return:
+            if fsm.state.active_ticket and fsm.state.active_ticket.worktree_path:
+                path_to_return = fsm.state.active_ticket.worktree_path
+            else:
+                print("❌ No active worktree recorded to return. Specify --path.")
+                return 1
+
+        force = getattr(args, "force", False)
+        ok, msg = return_worktree(fsm.target_repo, path_to_return, force=force)
+        if not ok:
+            print(f"❌ Failed to return worktree: {msg}")
+            return 1
+
+        if fsm.state.active_worktree == path_to_return:
+            fsm.state.active_worktree = None
+        if fsm.state.active_ticket and fsm.state.active_ticket.worktree_path == path_to_return:
+            fsm.state.active_ticket.worktree_path = None
+        fsm.save()
+
+        print(f"✅ Worktree at '{path_to_return}' returned to Treehouse pool.")
+        return 0
+
+    # default: status
     print("\n=======================================================")
     print("🌳  TREEHOUSE WORKTREE STATUS")
     print("=======================================================")
@@ -455,6 +512,56 @@ def cmd_worktree(args: argparse.Namespace) -> int:
         print(out)
     else:
         print(f"\n⚠️ Could not query Treehouse status: {err}")
+    print("=======================================================\n")
+    return 0
+
+
+def cmd_start_slice(args: argparse.Namespace) -> int:
+    repo_path = normalize_target_path(args.repo)
+    fsm = BrigadeFSM(repo_path)
+    
+    ok, ticket, msg = fsm.start_slice(
+        name=args.name,
+        track=getattr(args, "track", "feature"),
+        target_file=getattr(args, "target_file", ""),
+        domain=getattr(args, "domain", ""),
+        test_seam_command=getattr(args, "test_cmd", "npm run test:unit"),
+        allow_schema_migration=getattr(args, "allow_migration", True),
+        auto_lease_worktree=True,
+    )
+    if not ok:
+        print(f"❌ {msg}")
+        return 1
+
+    print("\n=======================================================")
+    print("🚀  EDGE BRIGADE — VERTICAL SLICE INITIATED")
+    print("=======================================================")
+    print(f"Ticket ID:       {ticket.ticket_id}")
+    print(f"Track:           {ticket.track.upper()}")
+    print(f"Domain:          {ticket.domain}")
+    print(f"Branch:          {ticket.branch_name}")
+    print(f"Target File:     {ticket.target_file}")
+    print(f"Test Seam:       {ticket.test_seam_command}")
+    print(f"Worktree Path:   {ticket.worktree_path or 'Primary (no treehouse)'}")
+    print("=======================================================")
+    if ticket.worktree_path:
+        print(f"\n🛡️ ZERO-TOUCH INVARIANT: Coder/Surgeon MUST work strictly inside:")
+        print(f"   cd {ticket.worktree_path}\n")
+    return 0
+
+
+def cmd_finish_slice(args: argparse.Namespace) -> int:
+    repo_path = normalize_target_path(args.repo)
+    fsm = BrigadeFSM(repo_path)
+    ok, msg = fsm.finish_slice()
+    if not ok:
+        print(f"❌ {msg}")
+        return 1
+
+    print("\n=======================================================")
+    print("✅  EDGE BRIGADE — VERTICAL SLICE FINISHED")
+    print("=======================================================")
+    print(msg)
     print("=======================================================\n")
     return 0
 
@@ -754,8 +861,27 @@ def main() -> int:
     p_rel.add_argument("--decision", required=True, help="Captain's binding decision")
 
     # worktree
-    p_wt = subparsers.add_parser("worktree", help="Inspect Treehouse worktree pool status")
+    p_wt = subparsers.add_parser("worktree", help="Inspect or manage Treehouse worktree pool")
     p_wt.add_argument("repo", nargs="?", default=".", help="Path to target repository (default: .)")
+    p_wt.add_argument("--action", choices=["status", "lease", "return"], default="status", help="Worktree action (default: status)")
+    p_wt.add_argument("--branch", help="Branch name for lease")
+    p_wt.add_argument("--path", help="Worktree path for return")
+    p_wt.add_argument("--force", action="store_true", help="Force return worktree")
+    p_wt.add_argument("--holder", default="edge-brigade", help="Lease holder tag")
+
+    # start-slice
+    p_start = subparsers.add_parser("start-slice", help="Initiate a feature or refactor slice with an isolated Treehouse worktree")
+    p_start.add_argument("repo", help="Path to target repository")
+    p_start.add_argument("--name", required=True, help="Slice/feature name (e.g. staff-allocation, bundle-modal)")
+    p_start.add_argument("--track", default="feature", choices=["feature", "core", "ui"], help="Slice track")
+    p_start.add_argument("--target-file", default="", help="Primary target file (optional)")
+    p_start.add_argument("--domain", default="", help="Domain module (e.g. bookings, staff)")
+    p_start.add_argument("--test-cmd", default="npm run test:unit", help="Test seam command")
+    p_start.add_argument("--allow-migration", action="store_true", default=True, help="Allow schema migrations")
+
+    # finish-slice
+    p_fin = subparsers.add_parser("finish-slice", help="Fast-forward merge slice into development, release worktree, and resolve ticket")
+    p_fin.add_argument("repo", help="Path to target repository")
 
     # pause
     p_pause = subparsers.add_parser("pause", help="Safely pause brigade execution and create durable checkpoint")
@@ -817,6 +943,8 @@ def main() -> int:
         "escalate": cmd_escalate,
         "release": cmd_release,
         "worktree": cmd_worktree,
+        "start-slice": cmd_start_slice,
+        "finish-slice": cmd_finish_slice,
         "pause": cmd_pause,
         "resume": cmd_resume,
         "check-heat": cmd_check_heat,

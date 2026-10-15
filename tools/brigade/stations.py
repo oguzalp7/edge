@@ -107,8 +107,22 @@ class StationRegistry:
    `refactor({ticket.domain}): {ticket.description.lower()} ({ticket.ticket_id})`
 6. Output: Report git diff summary, test output, and line count change."""
 
-        return f"""You are the SURGEON station worker in Edge Brigade operating in `{base_branch}`.
+        wt_block = ""
+        if ticket.worktree_path:
+            wt_block = f"""
+WORKTREE WORKING DIRECTORY (CRITICAL ZERO-TOUCH INVARIANT):
+- Assigned Treehouse Worktree: `{ticket.worktree_path}`
+- YOU MUST EXECUTE ALL COMMANDS, TESTS, AND FILE EDITS STRICTLY INSIDE: `{ticket.worktree_path}`
+- NEVER MODIFY FILES OR RUN BUILDS DIRECTLY IN THE PRIMARY REPO CHECKOUT.
+"""
+        else:
+            wt_block = """
+⚠️ WARNING: No isolated worktree assigned!
+Before mutating production code, ensure a Treehouse worktree is leased to preserve zero-touch primary isolation.
+"""
 
+        return f"""You are the SURGEON station worker in Edge Brigade operating in `{base_branch}`.
+{wt_block}
 MISSION:
 Execute the bounded refactor ticket `{ticket.ticket_id}` targeting `{ticket.rule_id}` in `{ticket.target_file}` (line {ticket.line_number}).
 
@@ -122,6 +136,7 @@ TICKET SPECIFICATION:
 - Description: {ticket.description}
 - Suggested Fix: {ticket.suggested_fix}
 - Branch Name: {ticket.branch_name}
+- Worktree Path: {ticket.worktree_path or 'Primary'}
 - Scaffolding Allowance: +{ticket.scaffolding_allowance} lines
 - Characterization Test Seam: `{ticket.test_seam_command}`
 
@@ -206,17 +221,32 @@ DIRECTIVES:
     @staticmethod
     def build_coder_prompt(ticket: Ticket, red_test_cmd: str) -> str:
         """Constructs a prompt for the CODER station."""
-        return f"""You are the CODER station worker in Edge Brigade on branch `{ticket.branch_name}`.
+        wt_block = ""
+        if ticket.worktree_path:
+            wt_block = f"""
+WORKTREE WORKING DIRECTORY (CRITICAL ZERO-TOUCH INVARIANT):
+- Assigned Treehouse Worktree: `{ticket.worktree_path}`
+- YOU MUST EXECUTE ALL COMMANDS, TESTS, AND FILE EDITS STRICTLY INSIDE: `{ticket.worktree_path}`
+- NEVER MODIFY FILES OR RUN BUILDS DIRECTLY IN THE PRIMARY REPO CHECKOUT.
+"""
+        else:
+            wt_block = """
+⚠️ WARNING: No isolated worktree assigned!
+Before mutating production code, ensure a Treehouse worktree is leased to preserve zero-touch primary isolation.
+"""
 
+        return f"""You are the CODER station worker in Edge Brigade on branch `{ticket.branch_name}`.
+{wt_block}
 MISSION:
 Implement the minimal, robust production code to turn all RED tests GREEN for ticket `{ticket.ticket_id}`.
 
 CONSTRAINTS (STRICT):
-1. Test Immutability: You MUST NEVER modify, weaken, or delete the test files written by the Seam Architect.
-2. Clean Implementation: Write production code in `src/` conforming strictly to the declared seam interfaces.
-3. Hermetic Verification: Run `{red_test_cmd}` and `npx tsc --noEmit`. Both must pass with EXIT CODE 0.
-4. Zero Leakage: Follow `coding_standards.md` (no raw leaks, explicit error handling, transaction safety).
-5. Output: Report the test passing output and git diff summary.
+1. Zero-Touch Primary Invariant: If a worktree is assigned, edit files strictly inside `{ticket.worktree_path}`.
+2. Test Immutability: You MUST NEVER modify, weaken, or delete the test files written by the Seam Architect.
+3. Clean Implementation: Write production code in `src/` conforming strictly to the declared seam interfaces.
+4. Hermetic Verification: Run `{red_test_cmd}` and `npx tsc --noEmit`. Both must pass with EXIT CODE 0.
+5. Zero Leakage: Follow `coding_standards.md` (no raw leaks, explicit error handling, transaction safety).
+6. Output: Report the test passing output and git diff summary.
 """
 
     @staticmethod

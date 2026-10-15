@@ -759,6 +759,118 @@ class BrigadeFSM:
         self.save()
         return ticket
 
+    def start_slice(
+        self,
+        name: str,
+        track: str = "feature",
+        target_file: str = "",
+        domain: str = "",
+        test_seam_command: str = "npm run test:unit",
+        allow_schema_migration: bool = True,
+        auto_lease_worktree: bool = True,
+    ) -> Tuple[bool, Optional[Ticket], str]:
+        """
+        Deterministically initiates a live feature or refactor slice:
+        1. Checks if an active ticket is currently in-flight.
+        2. Generates ticket (e.g. TICK-FEAT-<name>).
+        3. Derives branch name (e.g. feat/<name> or refactor/<name>).
+        4. If auto_lease_worktree is True and treehouse is installed, acquires an isolated worktree slot.
+        5. Initializes FlightRecorder.
+        6. Sets FSM state to SURGERY (ready for Coder or Surgeon).
+        """
+        if self.state.active_ticket and self.state.current_state != CycleState.IDLE:
+            return False, self.state.active_ticket, f"Cannot start slice: Active ticket {self.state.active_ticket.ticket_id} is currently in progress (State: {self.state.current_state.value}). Finish or abort it first."
+
+        clean_name = re.sub(r"[^a-zA-Z0-9_-]", "-", name).lower().strip("-")
+        eff_domain = domain or (Path(target_file).stem if target_file else clean_name)
+        rule_id = f"SLICE-{clean_name.upper()[:12]}"
+        ticket_id = f"TICK-{track.upper()[:4]}-{clean_name.upper()[:16]}"
+        
+        prefix = "feat" if track == "feature" else "refactor"
+        branch_name = f"{prefix}/{clean_name}"
+
+        # Flight recorder setup
+        recorder = FlightRecorder(self.target_repo, ticket_id)
+        prior_constraints = recorder.get_negative_constraints()
+
+        base_constraints = [
+            "Zero-Touch Primary Checkout Invariant: All mutations must be executed strictly inside the leased worktree.",
+            "Test Immutability: Coder must not delete or loosen tests authored by Seam Architect.",
+        ]
+        if track != "feature" and not allow_schema_migration:
+            base_constraints.append("MigrationGate Invariant: NEVER touch `src/db/schema/*` or `drizzle/` migrations.")
+
+        all_constraints = base_constraints + [c for c in prior_constraints if c not in base_constraints]
+
+        ticket = Ticket(
+            ticket_id=ticket_id,
+            track=track,
+            domain=eff_domain,
+            rule_id=rule_id,
+            severity="NORMAL",
+            target_file=target_file or f"src/{clean_name}",
+            line_number=1,
+            fingerprint=f"slice-{clean_name}",
+            description=f"Live slice: {name}",
+            suggested_fix=f"Implement slice {name}",
+            branch_name=branch_name,
+            test_seam_command=test_seam_command,
+            scaffolding_allowance=50 if track == "feature" else 15,
+            enforce_contraction=False,
+            allow_schema_migration=allow_schema_migration,
+            negative_constraints=all_constraints,
+        )
+
+        is_git_repo = (self.target_repo / ".git").exists()
+        worktree_msg = ""
+        if auto_lease_worktree and is_git_repo and is_treehouse_installed():
+            ok, wt_path, err = acquire_worktree(
+                repo_path=self.target_repo,
+                branch_name=branch_name,
+                lease_holder=f"brigade-{ticket_id}",
+            )
+            if not ok:
+                return False, None, f"Failed to acquire isolated Treehouse worktree: {err}"
+            ticket.worktree_path = wt_path
+            self.state.active_worktree = wt_path
+            worktree_msg = f" Worktree leased at {wt_path}."
+
+        recorder.set_metadata(
+            track=track,
+            domain=eff_domain,
+            target_file=ticket.target_file,
+            worktree_path=ticket.worktree_path or "",
+        )
+
+        self.state.active_ticket = ticket
+        self.state.active_branch = branch_name
+        self.state.current_state = CycleState.SURGERY
+        self.save()
+
+        return True, ticket, f"Slice '{name}' initiated successfully.{worktree_msg} Branch: {branch_name} (State: SURGERY)."
+
+    def finish_slice(self) -> Tuple[bool, str]:
+        """
+        Fast-forward merges the active slice worktree into base_branch (development),
+        releases the Treehouse worktree back to pool, and resets FSM to IDLE.
+        """
+        ticket = self.state.active_ticket
+        if not ticket:
+            return False, "No active slice or ticket to finish. Brigade is IDLE."
+
+        ok, msg, details = self.guard_staging_to_completed()
+        if not ok:
+            return False, f"Finish slice failed: {msg}"
+
+        self.state.active_ticket = None
+        self.state.active_branch = None
+        self.state.active_worktree = None
+        self.state.review_findings = []
+        self.state.blocked_reason = None
+        self._transition(CycleState.IDLE, f"Slice {ticket.ticket_id} finished and merged cleanly.")
+
+        return True, msg
+
     # =========================================================================
     # Pause, Resume & Context Heat Protocols
     # =========================================================================
