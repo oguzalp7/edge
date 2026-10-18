@@ -33,7 +33,7 @@ class RadarScanner:
         if file_paths is not None and len(file_paths) == 0:
             return []
 
-        summary = scanner.scan(target_dir)
+        summary = scanner.scan(target_dir, scoped_files=file_paths)
         findings: List[LedgerItem] = []
 
         for fmetric in summary.file_results:

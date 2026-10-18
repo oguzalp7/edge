@@ -1,21 +1,150 @@
 #!/usr/bin/env python3
-import sys
-import argparse
-import io
-from pathlib import Path
+"""
+edge-audit: Unified Deterministic Codebase Health, UI Architecture, and Test Isolation Auditor
+Supports specialized single tracks (--track [core|ui|tests]) and unified whole-repo analysis (--track all).
+"""
 
-# Fix Windows console encoding for UTF-8 / emojis
-if sys.platform == "win32":
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+import sys
+import os
+import argparse
+import json
+from pathlib import Path
 
 # Add project root to sys.path
 root_dir = Path(__file__).resolve().parent.parent.parent
 if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
 
+from tools.common import setup_utf8_console, normalize_target_path
+from tools.common.toon import encode
 from tools.audit.scanner import FileScanner
-from tools.audit.reporters import ConsoleReporter, ToonReporter
+from tools.audit.reporters import ConsoleReporter, ToonReporter, MarkdownReporter, JsonReporter
+from tools.ui_audit.cli import run_ui_audit
+from tools.ui_audit.reporter import UIConsoleReporter, UIMarkdownReporter, UIToonReporter, UIJsonReporter
+from tools.test_audit.cli import TestFileAuditor, format_human as test_format_human, format_markdown as test_format_markdown, format_toon as test_format_toon, format_json as test_format_json
+
+setup_utf8_console()
+
+
+def run_core_track(target_path: Path, output_format: str = "human", top: int = 15) -> str:
+    scanner = FileScanner()
+    summary = scanner.scan(target_path)
+    if output_format == "toon":
+        return ToonReporter.render(summary, top_n=top)
+    elif output_format == "markdown":
+        return MarkdownReporter.render(summary, top_n=top)
+    elif output_format == "json":
+        return JsonReporter.render(summary, top_n=top)
+    else:
+        return ConsoleReporter.render(summary, top_n=top)
+
+
+def run_ui_track(target_path: Path, output_format: str = "table") -> str:
+    summary = run_ui_audit(target_path)
+    if output_format == "markdown":
+        return UIMarkdownReporter.render(summary)
+    elif output_format == "toon":
+        return UIToonReporter.render(summary)
+    elif output_format == "json":
+        return UIJsonReporter.render(summary)
+    else:
+        return UIConsoleReporter.render(summary)
+
+
+def run_tests_track(target_path: Path, output_format: str = "human", top: int = 15) -> str:
+    auditor = TestFileAuditor(target_path)
+    test_target = target_path
+    if target_path.is_dir() and (target_path / "tests").exists() and not target_path.name.startswith("test"):
+        test_target = target_path / "tests"
+    files = auditor.get_test_files(test_target)
+    results = [auditor.analyze_file(f) for f in files]
+    results.sort(key=lambda x: x["score"])
+
+    if output_format == "toon":
+        return test_format_toon(results, top=top)
+    elif output_format == "markdown":
+        return test_format_markdown(results, top=top)
+    elif output_format == "json":
+        return test_format_json(results, top=top)
+    else:
+        return test_format_human(results, top=top)
+
+
+def run_all_tracks(target_path: Path, output_format: str = "human", top: int = 15) -> str:
+    scanner = FileScanner()
+    core_summary = scanner.scan(target_path)
+
+    ui_summary = run_ui_audit(target_path)
+
+    auditor = TestFileAuditor(target_path)
+    test_target = target_path
+    if target_path.is_dir() and (target_path / "tests").exists() and not target_path.name.startswith("test"):
+        test_target = target_path / "tests"
+    test_files = auditor.get_test_files(test_target)
+    test_results = [auditor.analyze_file(f) for f in test_files]
+    test_results.sort(key=lambda x: x["score"])
+
+    if output_format == "toon":
+        data = {
+            "edge_unified_audit": {
+                "core": {
+                    "health_score": core_summary.overall_health_score,
+                    "sloc": core_summary.total_sloc,
+                    "critical": core_summary.critical_hotspots,
+                    "attention": core_summary.attention_files,
+                },
+                "ui": {
+                    "health_score": round(ui_summary.health_score, 1),
+                    "files": ui_summary.total_tsx_files,
+                    "orphans": ui_summary.total_orphans,
+                    "clusters": len(ui_summary.clusters),
+                },
+                "tests": {
+                    "total_files": len(test_results),
+                    "average_score": round(sum(r["score"] for r in test_results) / len(test_results)) if test_results else 0,
+                    "toxic_count": sum(1 for r in test_results if r["score"] < 50),
+                }
+            }
+        }
+        return encode(data)
+
+    elif output_format == "markdown":
+        out = []
+        out.append("# 🌐 Edge Unified Codebase Audit Report")
+        out.append(f"> **Target Scope:** `{target_path}`  ")
+        out.append(f"> **Core Health:** `{core_summary.overall_health_score}/100` | **UI Health:** `{ui_summary.health_score:.1f}/100` | **Tests Analyzed:** `{len(test_results)}`")
+        out.append("\n---\n")
+        out.append(MarkdownReporter.render(core_summary, top_n=top))
+        out.append("\n---\n")
+        out.append(UIMarkdownReporter.render(ui_summary))
+        out.append("\n---\n")
+        out.append(test_format_markdown(test_results, top=top))
+        return "\n".join(out)
+
+    elif output_format == "json":
+        data = {
+            "unified_audit": {
+                "target_path": str(target_path),
+                "core": json.loads(JsonReporter.render(core_summary, top_n=top)),
+                "ui": json.loads(UIJsonReporter.render(ui_summary)),
+                "tests": json.loads(test_format_json(test_results, top=top)),
+            }
+        }
+        return json.dumps(data, indent=2)
+
+    else:
+        out = []
+        out.append("=" * 80)
+        out.append("🌐  EDGE UNIFIED CODEBASE AUDIT (ALL TRACKS: CORE, UI, TESTS)")
+        out.append("=" * 80)
+        out.append("\n--- [TRACK 1/3] CORE ARCHITECTURAL HEALTH & BLOAT ---")
+        out.append(ConsoleReporter.render(core_summary, top_n=top))
+        out.append("\n--- [TRACK 2/3] UI COMPONENT & JSX DUPLICATION ---")
+        out.append(UIConsoleReporter.render(ui_summary))
+        out.append("\n--- [TRACK 3/3] UNIT TEST PURITY & ISOLATION ---")
+        out.append(test_format_human(test_results, top=top))
+        return "\n".join(out)
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -25,13 +154,19 @@ def main():
         "target",
         nargs="?",
         default=".",
-        help="Target directory to audit (e.g. /home/oguz/MS-Randevu-monolith/src or .)"
+        help="Target directory to audit (e.g. /home/oguz/my-project or .)"
+    )
+    parser.add_argument(
+        "--track",
+        choices=["core", "ui", "tests", "all"],
+        default="core",
+        help="Audit track to execute: 'core' (default), 'ui', 'tests', or 'all' (unified)"
     )
     parser.add_argument(
         "--format",
-        choices=["human", "toon"],
+        choices=["human", "table", "markdown", "toon", "json"],
         default="human",
-        help="Output format: 'human' (colored console table) or 'toon' (AXI token-frugal notation)"
+        help="Output format: 'human'/'table' (console), 'markdown', 'toon', or 'json'"
     )
     parser.add_argument(
         "--top",
@@ -40,8 +175,8 @@ def main():
         help="Maximum number of hotspots to display (default: 15)"
     )
     parser.add_argument(
-        "--output",
-        "-o",
+        "-o", "--output", "--out",
+        dest="output",
         type=str,
         default=None,
         help="Optional file path to write report to (e.g. report.md)"
@@ -49,27 +184,36 @@ def main():
 
     args = parser.parse_args()
 
-    target_path = FileScanner.normalize_target_path(args.target)
-    scanner = FileScanner()
+    target_path = normalize_target_path(args.target)
+    if not target_path.exists():
+        print(f"Error: Target directory not found: {target_path}", file=sys.stderr)
+        sys.exit(1)
+
+    fmt = args.format
+    if fmt == "table":
+        fmt = "human"
 
     try:
-        summary = scanner.scan(target_path)
+        if args.track == "ui":
+            output = run_ui_track(target_path, fmt)
+        elif args.track == "tests":
+            output = run_tests_track(target_path, fmt, top=args.top)
+        elif args.track == "all":
+            output = run_all_tracks(target_path, fmt, top=args.top)
+        else:
+            output = run_core_track(target_path, fmt, top=args.top)
     except FileNotFoundError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
-
-    if args.format == "toon":
-        output = ToonReporter.render(summary, top_n=args.top)
-    else:
-        output = ConsoleReporter.render(summary, top_n=args.top)
 
     print(output)
 
     if args.output:
         out_file = Path(args.output)
-        with open(out_file, "w", encoding="utf-8") as f:
-            f.write(output)
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.write_text(output, encoding="utf-8")
         print(f"\n📁 Report successfully saved to: {out_file}")
+
 
 if __name__ == "__main__":
     main()

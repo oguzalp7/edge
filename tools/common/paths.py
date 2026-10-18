@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import Union
 
-WSL_DISTRO = "Ubuntu-24.04"
+WSL_DISTRO = os.environ.get("EDGE_WSL_DISTRO", "Ubuntu-24.04")
 WSL_UNC_PREFIX = rf"\\wsl.localhost\{WSL_DISTRO}"
 WSL_LEGACY_UNC_PREFIX = rf"\\wsl$\{WSL_DISTRO}"
 

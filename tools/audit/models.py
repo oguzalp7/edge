@@ -46,6 +46,7 @@ class FileMetrics:
     risk_category: RiskCategory = RiskCategory.CLEAN
     issue_tags: List[IssueTag] = field(default_factory=list)
     slicing_recommendations: List[str] = field(default_factory=list)
+    has_ui_action_mixing: bool = False
 
 @dataclass
 class AuditSummary:

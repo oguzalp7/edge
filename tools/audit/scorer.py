@@ -1,6 +1,7 @@
 from typing import List
 from .models import FileMetrics, RiskCategory, IssueTag, AuditSummary
 
+
 class HealthScorer:
     @staticmethod
     def score_file(m: FileMetrics) -> FileMetrics:
@@ -9,17 +10,17 @@ class HealthScorer:
         recs: List[str] = []
 
         # 1. SLOC Penalty
-        if m.sloc > 800:
+        if m.sloc > 500:
             score += 45.0
             tags.append(IssueTag.GOD_FILE)
-            recs.append(f"Massive file ({m.sloc} SLOC). Depletes agent attention; decompose into 3-4 cohesive submodules.")
-        elif m.sloc > 400:
+            recs.append(f"Critical God file ({m.sloc} SLOC). Severely dilutes model attention; decompose into 3-4 cohesive submodules.")
+        elif m.sloc > 350:
             score += 25.0
             tags.append(IssueTag.GOD_FILE)
-            recs.append(f"High line count ({m.sloc} SLOC). Slicing recommended to reach < 200 SLOC clean boundary.")
-        elif m.sloc > 250:
+            recs.append(f"Hotspot candidate for vertical slicing ({m.sloc} SLOC). Plan refactoring to reach < 200 SLOC clean boundary.")
+        elif m.sloc > 200:
             score += 12.0
-            recs.append(f"Approaching bloat boundary ({m.sloc} SLOC). Plan refactoring before adding new features.")
+            recs.append(f"Approaching complexity boundary ({m.sloc} SLOC). Plan refactoring before adding new features.")
 
         # 2. Complexity Penalty
         if m.complexity_score > 35:
@@ -61,6 +62,13 @@ class HealthScorer:
             tags.append(IssueTag.MISSING_TEST_SEAM)
             recs.append("Missing companion test seam. Pin existing behavior with tests before attempting refactoring.")
 
+        # 7. UI Action / Direct DB Mixing Penalty
+        if getattr(m, "has_ui_action_mixing", False) or IssueTag.UI_ACTION_MIXING in m.issue_tags:
+            score += 25.0
+            if IssueTag.UI_ACTION_MIXING not in tags:
+                tags.append(IssueTag.UI_ACTION_MIXING)
+            recs.append("UI component mixes direct DB queries or SQL operations. Extract data access to dedicated server actions or repositories.")
+
         # Final Score Cap & Categorization
         m.risk_score = min(100.0, round(score, 1))
         m.issue_tags = tags
@@ -83,12 +91,19 @@ class HealthScorer:
             summary.overall_health_score = 100.0
             return summary
 
-        total_risk = sum(f.risk_score for f in summary.file_results)
-        avg_risk = total_risk / len(summary.file_results)
-        summary.overall_health_score = max(0.0, round(100.0 - avg_risk, 1))
-
         summary.critical_hotspots = sum(1 for f in summary.file_results if f.risk_category == RiskCategory.CRITICAL)
         summary.attention_files = sum(1 for f in summary.file_results if f.risk_category in (RiskCategory.HOTSPOT, RiskCategory.ATTENTION))
         summary.clean_files = sum(1 for f in summary.file_results if f.risk_category == RiskCategory.CLEAN)
 
+        total_sloc = sum(f.sloc for f in summary.file_results)
+        if total_sloc > 0:
+            sloc_weighted_risk = sum(f.risk_score * f.sloc for f in summary.file_results) / total_sloc
+        else:
+            sloc_weighted_risk = sum(f.risk_score for f in summary.file_results) / len(summary.file_results)
+
+        # Hotspot penalty: critical hotspots apply an additional drag so barrel files cannot hide God files
+        hotspot_penalty = summary.critical_hotspots * 3.0
+        combined_risk = sloc_weighted_risk + hotspot_penalty
+
+        summary.overall_health_score = max(0.0, min(100.0, round(100.0 - combined_risk, 1)))
         return summary

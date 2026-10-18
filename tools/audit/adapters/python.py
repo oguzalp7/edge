@@ -22,6 +22,11 @@ class PythonAdapter(LanguageAdapter):
             return True
         return False
 
+    GENERIC_STEMS = {
+        "index", "repository", "service", "utils", "actions", "schema",
+        "types", "constants", "cli", "models", "scanner"
+    }
+
     def find_companion_tests(
         self,
         path: Path,
@@ -31,9 +36,24 @@ class PythonAdapter(LanguageAdapter):
         if test_index is None:
             return []
         stem = path.stem.lower()
+        parent_dir = path.parent.name.lower()
         matches = []
-        if stem in test_index:
-            matches.extend(test_index[stem])
+        if stem in self.GENERIC_STEMS:
+            combo_key = f"{parent_dir}/{stem}"
+            if combo_key in test_index:
+                matches.extend(test_index[combo_key])
+            if f"domain:{parent_dir}" in test_index:
+                matches.extend(test_index[f"domain:{parent_dir}"])
+            if parent_dir in test_index and parent_dir not in self.GENERIC_STEMS:
+                matches.extend(test_index[parent_dir])
+            if f"test_{parent_dir}" in test_index:
+                matches.extend(test_index[f"test_{parent_dir}"])
+        else:
+            if stem in test_index:
+                matches.extend(test_index[stem])
+            combo_key = f"{parent_dir}/{stem}"
+            if combo_key in test_index:
+                matches.extend(test_index[combo_key])
         return list(set(matches))
 
     def _count_lines(self, lines: List[str]) -> Tuple[int, int, int, int]:

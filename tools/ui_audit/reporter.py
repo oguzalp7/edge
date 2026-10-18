@@ -175,3 +175,43 @@ class UIConsoleReporter:
             lines.append("-" * 70)
 
         return "\n".join(lines)
+
+
+import json
+
+
+class UIJsonReporter:
+    @staticmethod
+    def render(summary: UIAuditSummary) -> str:
+        data = {
+            "ui_audit": {
+                "target_path": str(summary.target_path),
+                "health_score": round(summary.health_score, 1),
+                "total_tsx_files": summary.total_tsx_files,
+                "total_sloc": summary.total_sloc,
+                "app_routes_count": summary.app_routes_count,
+                "components_count": summary.components_count,
+                "orphan_count": summary.total_orphans,
+                "dead_import_count": summary.total_dead_imports,
+                "clusters_count": len(summary.clusters),
+                "orphan_components": [
+                    {"path": o.rel_path, "sloc": o.sloc, "exports": o.exported_symbols}
+                    for o in summary.orphan_components
+                ],
+                "dead_imports": [
+                    {"file": d[0], "symbol": d[1], "source": d[2]}
+                    for d in summary.dead_imports
+                ],
+                "duplicate_clusters": [
+                    {
+                        "category": c.category,
+                        "primitive": c.suggested_primitive,
+                        "count": c.count,
+                        "distinct_files": c.distinct_files,
+                        "estimated_sloc_saving": c.estimated_sloc_saving,
+                    }
+                    for c in summary.clusters
+                ],
+            }
+        }
+        return json.dumps(data, indent=2)

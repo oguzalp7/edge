@@ -1,8 +1,7 @@
-import sys
-import subprocess
 from pathlib import Path
 from typing import List, Tuple, Optional
 from collections import Counter
+from tools.common.runner import run_command
 
 
 class ChurnAnalyzer:
@@ -10,16 +9,7 @@ class ChurnAnalyzer:
         self.repo_path = repo_path
 
     def _run_git(self, args: List[str]) -> Tuple[int, str, str]:
-        is_wsl = str(self.repo_path).startswith(r"\\wsl.localhost") or str(self.repo_path).startswith("/home/")
-        if is_wsl and sys.platform == "win32":
-            wsl_dir = str(self.repo_path).replace(r"\\wsl.localhost\Ubuntu-24.04", "").replace("\\", "/")
-            full_cmd = ["wsl", "-d", "Ubuntu-24.04", "bash", "-c", f"cd '{wsl_dir}' && git {' '.join(args)}"]
-            p = subprocess.run(full_cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
-            return p.returncode, p.stdout, p.stderr
-        else:
-            cmd = ["git"] + args
-            p = subprocess.run(cmd, cwd=str(self.repo_path), capture_output=True, text=True, encoding="utf-8", errors="replace")
-            return p.returncode, p.stdout, p.stderr
+        return run_command(["git"] + args, cwd=self.repo_path)
 
     def get_churn_hotspots(self, since: str = "14.days", max_files: int = 25) -> List[Tuple[str, int]]:
         """

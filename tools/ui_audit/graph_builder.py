@@ -55,6 +55,41 @@ class GraphBuilder:
                     if rel_path not in target_node.incoming_references:
                         target_node.incoming_references.append(rel_path)
 
+        # Step 3: Scan src/lib and src/hooks for outgoing references to components
+        extra_dirs = [self.src_dir / "lib", self.src_dir / "hooks"]
+        for base in extra_dirs:
+            if not base.exists():
+                continue
+            for p in base.rglob("*"):
+                if (
+                    p.is_file()
+                    and p.suffix in (".ts", ".tsx")
+                    and not p.name.endswith(".test.ts")
+                    and not p.name.endswith(".test.tsx")
+                    and not p.name.endswith(".spec.ts")
+                    and not p.name.endswith(".spec.tsx")
+                ):
+                    try:
+                        extra_content = p.read_text(encoding="utf-8", errors="replace")
+                    except Exception:
+                        continue
+                    extra_imports = self._extract_imports(extra_content)
+                    for imp in extra_imports:
+                        resolved_rel = self._resolve_import_path(p, imp.source_str)
+                        if resolved_rel and resolved_rel in self.nodes:
+                            try:
+                                rel_path = p.relative_to(self.root_dir).as_posix()
+                            except ValueError:
+                                try:
+                                    rel_path = p.relative_to(self.src_dir).as_posix()
+                                    if not rel_path.startswith("src/"):
+                                        rel_path = f"src/{rel_path}"
+                                except ValueError:
+                                    rel_path = p.name
+                            target_node = self.nodes[resolved_rel]
+                            if rel_path not in target_node.incoming_references:
+                                target_node.incoming_references.append(rel_path)
+
         return self.nodes
 
     def _parse_file(self, file_path: Path) -> ComponentNode:
@@ -128,9 +163,12 @@ class GraphBuilder:
             re.MULTILINE
         )
 
-        # Also find the rest of the file without the import block to test symbol usage
-        # Remove all import statements from content to create body_content
-        body_content = re.sub(r"import\s+[^;]+;?", "", content)
+        # Remove import statements safely without eating non-import code in semicolon-free files
+        body_content = re.sub(
+            r"import\s+(?:type\s+)?(?:[\s\S]*?from\s+)?['\"][^'\"]+['\"]\s*;?",
+            "",
+            content
+        )
 
         for match in import_stmt_pattern.finditer(content):
             default_sym = match.group(1)

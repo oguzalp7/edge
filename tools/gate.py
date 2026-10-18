@@ -26,6 +26,7 @@ if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
 
 from tools.common import setup_utf8_console, normalize_target_path, run_command
+from tools.rules import RAW_TH_PATTERN, CANONICAL_ARRAY_PATTERN, SHALLOW_WRAPPER_PATTERN
 setup_utf8_console()
 
 
@@ -336,11 +337,7 @@ class EdgeVerificationGate:
             # 3. Main return statement is a single JSX element wrapping children with same/mapped props
             
             # Pattern check: return <SomeModal ...>{children}</SomeModal>
-            pass_through_matches = re.findall(
-                r"return\s*\(\s*<([A-Z][A-Za-z0-9]+)\b([^>]*?)>\s*\{children\}\s*</\1>\s*\);?",
-                content,
-                re.DOTALL
-            )
+            pass_through_matches = SHALLOW_WRAPPER_PATTERN.findall(content)
             
             # Detect explicit wrapper adapter notes or pass-through delegation
             is_delegating = bool(pass_through_matches)
@@ -376,16 +373,12 @@ class EdgeVerificationGate:
         """
         violations = []
 
-        canonical_pattern = re.compile(r"export\s+const\s+CANONICAL_[A-Z0-9_]+\s*=")
-        local_canonical_pattern = re.compile(r"const\s+CANONICAL_[A-Z0-9_]+\s*=")
-        raw_th_pattern = re.compile(r"<th\b[^>]*>\s*([A-Za-z0-9ğüşıöçĞÜŞİÖÇ\s]{2,})\s*</th>")
-
         modified = self._get_modified_files(base_ref)
 
         if modified is not None:
             candidate_files = [
                 f for f in modified
-                if f.suffix in (".tsx", ".jsx", ".ts")
+                if f.suffix in (".tsx", ".jsx", ".ts", ".js")
                 and any(str(f).replace("\\", "/").startswith(str(self.target_repo / d).replace("\\", "/")) for d in ["src/components", "src/app", "src/lib"])
             ]
         else:
@@ -394,7 +387,8 @@ class EdgeVerificationGate:
             candidate_files = []
             for tdir in target_dirs:
                 if tdir.exists():
-                    candidate_files.extend(list(tdir.rglob("*.[t|j]sx")))
+                    for ext in ("*.tsx", "*.jsx", "*.ts", "*.js"):
+                        candidate_files.extend(list(tdir.rglob(ext)))
 
         for file_path in candidate_files:
             if ".test." in file_path.name or ".spec." in file_path.name:
@@ -412,30 +406,20 @@ class EdgeVerificationGate:
 
             # Check for canonical array declarations inside frontend component tree
             for idx, line in enumerate(content.splitlines(), start=1):
-                if canonical_pattern.search(line) or local_canonical_pattern.search(line):
+                if CANONICAL_ARRAY_PATTERN.search(line):
                     violations.append(
                         f"{rel}:{idx} - Hardcoded canonical definition found: '{line.strip()}'. Move to DB/Domain Schema."
                     )
 
             # Check for raw string <th> tags in JSX (bypassing schema-driven table headers)
             for idx, line in enumerate(content.splitlines(), start=1):
-                m = raw_th_pattern.search(line)
+                m = RAW_TH_PATTERN.search(line)
                 if m:
                     header_text = m.group(1).strip()
                     if header_text and not header_text.startswith("{"):
                         violations.append(
                             f"{rel}:{idx} - Hardcoded raw <th> header '{header_text}'. Table columns must be schema/dictionary-driven."
                         )
-
-        # Also check src/lib/departments/constants.ts specifically if it defines canonical arrays and was modified/checked
-        dept_constants = self.target_repo / "src" / "lib" / "departments" / "constants.ts"
-        if dept_constants.exists() and (modified is None or dept_constants in modified):
-            content = dept_constants.read_text(encoding="utf-8", errors="replace")
-            if "CANONICAL_DEPARTMENTS" in content:
-                rel = dept_constants.relative_to(self.target_repo)
-                violations.append(
-                    f"{rel} - Defines CANONICAL_DEPARTMENTS static array. Canonical entities must be schema/DB-driven at runtime."
-                )
 
         if violations:
             return GateResult(
@@ -526,7 +510,7 @@ class EdgeVerificationGate:
 
 def main():
     parser = argparse.ArgumentParser(description="Edge Architectural Quality & Anti-Bloat Gate")
-    parser.add_argument("target", nargs="?", default=".", help="Target repository directory (e.g. /home/oguz/MS-Randevu-monolith)")
+    parser.add_argument("target", nargs="?", default=".", help="Target repository directory (e.g. /home/oguz/my-project or .)")
     parser.add_argument("--base", default="HEAD~1", help="Base commit/branch to compare diff against (default: HEAD~1)")
     parser.add_argument("--no-refactor", action="store_true", help="Set if this is a feature addition (allows positive net SLOC)")
     parser.add_argument("--skip-verify", action="store_true", help="Skip running tsc and unit tests (fast static audit only)")

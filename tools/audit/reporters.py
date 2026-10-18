@@ -76,7 +76,7 @@ class ToonReporter:
 
         data = {
             "edge_audit_result": {
-                "target": summary.target_path,
+                "target": str(summary.target_path),
                 "health_score": summary.overall_health_score,
                 "files_analyzed": summary.analyzed_files,
                 "total_sloc": summary.total_sloc,
@@ -98,4 +98,89 @@ class ToonReporter:
             }
         }
         return encode(data)
+
+
+class MarkdownReporter:
+    @staticmethod
+    def render(summary: AuditSummary, top_n: int = 15) -> str:
+        lines = []
+        lines.append("# 🛡️ EDGE-AUDIT: Codebase Health & Bloat Assessment")
+        lines.append("")
+        lines.append(f"> **Target Path:** `{summary.target_path}`  ")
+        lines.append(f"> **Overall Health Score:** `{summary.overall_health_score} / 100`  ")
+        lines.append(f"> **SLOC:** `{summary.total_sloc:,}` lines across `{summary.analyzed_files}` files")
+        lines.append("")
+        lines.append("## 📊 Summary Breakdown")
+        lines.append("")
+        lines.append("| Metric | Count |")
+        lines.append("| :--- | :--- |")
+        lines.append(f"| Total Files Found | `{summary.total_files}` |")
+        lines.append(f"| Analyzed Source Files | `{summary.analyzed_files}` |")
+        lines.append(f"| Total Source Lines (SLOC) | `{summary.total_sloc:,}` |")
+        lines.append(f"| 🔴 Critical Hotspots | `{summary.critical_hotspots}` |")
+        lines.append(f"| 🟡 Attention Needed | `{summary.attention_files}` |")
+        lines.append(f"| 🟢 Clean Files | `{summary.clean_files}` |")
+        lines.append("")
+
+        sorted_files = sorted(summary.file_results, key=lambda f: f.risk_score, reverse=True)
+        hotspots = [f for f in sorted_files if f.risk_score >= 18.0]
+        if hotspots:
+            lines.append(f"## 🔥 Top {min(top_n, len(hotspots))} Hotspots")
+            lines.append("")
+            lines.append("| Risk | SLOC | Cmplx | Indent | Exports | Test | File Path | Tags |")
+            lines.append("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |")
+            for f in hotspots[:top_n]:
+                test_icon = "✅" if f.has_test_seam else "❌"
+                tags_str = ", ".join(t.value for t in f.issue_tags) if f.issue_tags else "-"
+                lines.append(f"| `{f.risk_score:.1f}` | `{f.sloc}` | `{f.complexity_score}` | `{f.max_indent_level}` | `{f.public_exports}` | {test_icon} | `{f.rel_path}` | {tags_str} |")
+            lines.append("")
+
+            critical_sample = [f for f in sorted_files if f.risk_score >= 35.0][:5]
+            if critical_sample:
+                lines.append("## 📋 Critical Recommendations")
+                lines.append("")
+                for idx, f in enumerate(critical_sample, 1):
+                    lines.append(f"### {idx}. `{f.rel_path}` (Risk: {f.risk_score})")
+                    for rec in f.slicing_recommendations:
+                        lines.append(f"- {rec}")
+                    lines.append("")
+        else:
+            lines.append("✅ *Excellent! No files exceeding bloat and complexity thresholds were found.*")
+            lines.append("")
+
+        return "\n".join(lines)
+
+
+class JsonReporter:
+    @staticmethod
+    def render(summary: AuditSummary, top_n: int = 15) -> str:
+        sorted_files = sorted(summary.file_results, key=lambda f: f.risk_score, reverse=True)
+        data = {
+            "edge_audit_summary": {
+                "target_path": str(summary.target_path),
+                "overall_health_score": summary.overall_health_score,
+                "total_files": summary.total_files,
+                "analyzed_files": summary.analyzed_files,
+                "total_sloc": summary.total_sloc,
+                "critical_hotspots": summary.critical_hotspots,
+                "attention_files": summary.attention_files,
+                "clean_files": summary.clean_files,
+                "hotspots": [
+                    {
+                        "path": f.rel_path,
+                        "risk_score": f.risk_score,
+                        "risk_category": f.risk_category.value,
+                        "sloc": f.sloc,
+                        "complexity": f.complexity_score,
+                        "max_indent": f.max_indent_level,
+                        "exports": f.public_exports,
+                        "has_test_seam": f.has_test_seam,
+                        "issue_tags": [t.value for t in f.issue_tags],
+                        "recommendations": f.slicing_recommendations,
+                    }
+                    for f in sorted_files[:top_n]
+                ],
+            }
+        }
+        return json.dumps(data, indent=2)
 

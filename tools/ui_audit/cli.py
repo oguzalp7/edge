@@ -22,13 +22,13 @@ try:
     from .graph_builder import GraphBuilder
     from .jsx_fingerprint import JSXFingerprinter
     from .cluster_engine import ClusterEngine
-    from .reporter import UIMarkdownReporter, UIToonReporter, UIConsoleReporter
+    from .reporter import UIMarkdownReporter, UIToonReporter, UIConsoleReporter, UIJsonReporter
 except ImportError:
     from tools.ui_audit.models import UIAuditSummary, JSXPattern
     from tools.ui_audit.graph_builder import GraphBuilder
     from tools.ui_audit.jsx_fingerprint import JSXFingerprinter
     from tools.ui_audit.cluster_engine import ClusterEngine
-    from tools.ui_audit.reporter import UIMarkdownReporter, UIToonReporter, UIConsoleReporter
+    from tools.ui_audit.reporter import UIMarkdownReporter, UIToonReporter, UIConsoleReporter, UIJsonReporter
 
 
 def calculate_ui_health(
@@ -107,20 +107,13 @@ def run_ui_audit(target_path: Path, min_instances: int = 2) -> UIAuditSummary:
 
 
 def main():
-    # Ensure Windows console supports UTF-8
-    if sys.platform == "win32":
-        try:
-            sys.stdout.reconfigure(encoding="utf-8")
-        except AttributeError:
-            pass
-
     parser = argparse.ArgumentParser(description="Deterministic UI Component & JSX Duplication Audit Tool")
-    parser.add_argument("target", help="Path to project directory or src directory")
+    parser.add_argument("target", nargs="?", default=".", help="Path to project directory or src directory (default: .)")
     parser.add_argument(
         "--format",
-        choices=["table", "markdown", "toon"],
+        choices=["human", "table", "markdown", "toon", "json"],
         default="table",
-        help="Output format: table (default console), markdown (detailed RFC), toon (token-frugal agent format)"
+        help="Output format: 'table'/'human' (console), 'markdown', 'toon', or 'json'"
     )
     parser.add_argument(
         "--min-instances",
@@ -129,7 +122,8 @@ def main():
         help="Minimum pattern instances required to form a duplicate cluster (default: 2)"
     )
     parser.add_argument(
-        "--out",
+        "-o", "--output", "--out",
+        dest="output",
         type=str,
         default=None,
         help="Optional file path to write report output"
@@ -148,11 +142,13 @@ def main():
         output = UIMarkdownReporter.render(summary)
     elif args.format == "toon":
         output = UIToonReporter.render(summary)
+    elif args.format == "json":
+        output = UIJsonReporter.render(summary)
     else:
         output = UIConsoleReporter.render(summary)
 
-    if args.out:
-        out_path = Path(args.out)
+    if args.output:
+        out_path = Path(args.output)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(output, encoding="utf-8")
         print(f"UI Audit report successfully written to: {out_path}")

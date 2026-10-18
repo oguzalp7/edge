@@ -9,7 +9,7 @@ import sys
 import os
 import re
 import argparse
-import io
+import json
 from pathlib import Path
 
 # Add project root to sys.path
@@ -17,11 +17,10 @@ root_dir = Path(__file__).resolve().parent.parent.parent
 if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
 
-# Ensure UTF-8 console output on Windows
-if sys.platform == "win32":
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+from tools.common import setup_utf8_console, normalize_target_path
+from tools.common.toon import encode
 
+setup_utf8_console()
 
 
 class TestFileAuditor:
@@ -36,7 +35,7 @@ class TestFileAuditor:
             if target_dir.suffix in [".ts", ".tsx", ".js", ".jsx"]:
                 return [target_dir]
             return []
-        
+
         for root, _, files in os.walk(target_dir):
             for file in files:
                 if (file.endswith(".test.ts") or file.endswith(".test.tsx") or
@@ -53,7 +52,7 @@ class TestFileAuditor:
                 "score": 0,
                 "badge": "🔴 ERROR",
                 "category": "ERROR",
-                "violations": [{"rule": "READ_ERROR", "penalty": -100, "desc": f"Dosya okunamadı: {e}"}],
+                "violations": [{"rule": "READ_ERROR", "penalty": -100, "desc": f"File could not be read: {e}"}],
                 "bonuses": []
             }
 
@@ -79,7 +78,7 @@ class TestFileAuditor:
             violations.append({
                 "rule": "DB_CLIENT_IMPORT",
                 "penalty": -35,
-                "desc": "Doğrudan veritabanı istemcisi (@/db) ithal edilmiş"
+                "desc": "Direct database client (@/db) imported"
             })
 
         # 2. Direct DB Manipulation / DML (-25p)
@@ -90,7 +89,7 @@ class TestFileAuditor:
             violations.append({
                 "rule": "DB_DML_EXECUTION",
                 "penalty": -25,
-                "desc": f"Fiziksel veritabanı işlemi ({len(dml_matches)} çağrı: {', '.join(f'db.{op}()' for op in unique_ops)})"
+                "desc": f"Physical database manipulation ({len(dml_matches)} calls: {', '.join(f'db.{op}()' for op in unique_ops)})"
             })
 
         # 3. Schema / DDL / Seeding (-20p)
@@ -101,7 +100,7 @@ class TestFileAuditor:
             violations.append({
                 "rule": "DDL_OR_SEED_EXECUTION",
                 "penalty": -20,
-                "desc": f"DDL veya Seed çalıştırma ({', '.join(f'{s}()' for s in unique_seeds)})"
+                "desc": f"DDL or Seed execution ({', '.join(f'{s}()' for s in unique_seeds)})"
             })
 
         # 4. Teardown & Cleanup Health (-25p or -10p)
@@ -115,14 +114,14 @@ class TestFileAuditor:
                 violations.append({
                     "rule": "NO_TEARDOWN",
                     "penalty": -25,
-                    "desc": "Veritabanı manipülasyonu var ancak afterAll/cleanup bulunmuyor (DB Zehirleme Riski)"
+                    "desc": "Database manipulation present without afterAll/cleanup (DB poisoning risk)"
                 })
             elif has_teardown and not has_cleanup_func:
                 score -= 10
                 violations.append({
                     "rule": "WEAK_TEARDOWN",
                     "penalty": -10,
-                    "desc": "afterAll mevcut ancak somut temizlik/delete işlemi yetersiz"
+                    "desc": "afterAll present but lacks concrete cleanup/deletion"
                 })
 
         # 5. Direct Server Action Import (-15p)
@@ -132,17 +131,17 @@ class TestFileAuditor:
             violations.append({
                 "rule": "SERVER_ACTION_IMPORT",
                 "penalty": -15,
-                "desc": f"Server Action katmanına doğrudan bağımlılık ({len(action_matches)} ithal)"
+                "desc": f"Direct dependency on Server Action layer ({len(action_matches)} imports)"
             })
 
         # 6. Hardcoded Data Collisions (-5p)
-        has_static_phone = bool(re.search(r'["\'](5[0-9]{9})["\']', content))
-        if has_static_phone and has_db_activity:
+        has_static_collision = bool(re.search(r'["\'](?:\+?[1-9]\d{9,14}|5[0-9]{9}|test@example\.com)["\']', content))
+        if has_static_collision and has_db_activity:
             score -= 5
             violations.append({
                 "rule": "HARDCODED_DATA_COLLISION",
                 "penalty": -5,
-                "desc": "DB yazımında statik telefon numarası kullanımı (Unique constraint çakışma riski)"
+                "desc": "Static phone/credential used in DB write (Unique constraint collision risk)"
             })
 
         # 7. Bonuses (+10p / +15p)
@@ -151,15 +150,18 @@ class TestFileAuditor:
             score += 10
             bonuses.append({
                 "bonus": 10,
-                "desc": "İzole bellek mock kullanımı (vi.mock / vi.fn)"
+                "desc": "Isolated in-memory mock used (vi.mock / vi.fn)"
             })
 
-        has_pure_core = bool(re.search(r'from\s+["\']@/(core|lib/pricing/rate-resolver|lib/pricing/campaign-rules|lib/customers/qualification)["\']', content))
+        has_pure_core = bool(re.search(
+            r'from\s+["\']@/(?:core|domain|lib/[^"\']+/(?:domain|core|engine|rules|calculator)|lib/pricing/rate-resolver|lib/pricing/campaign-rules|lib/customers/qualification)(?:/[^"\']*)?["\']',
+            content
+        ))
         if has_pure_core and not has_db_import:
             score += 15
             bonuses.append({
                 "bonus": 15,
-                "desc": "Saf Domain / Core motor testi (Hermetic)"
+                "desc": "Pure Domain / Core engine test (Hermetic)"
             })
 
         score = max(0, min(100, score))
@@ -187,7 +189,7 @@ class TestFileAuditor:
 def format_human(results: list[dict], top: int = 15) -> str:
     lines = []
     lines.append("=" * 95)
-    lines.append("📊 TYPESCRIPT UNIT TEST SAĞLIK RADARI (edge-tests-audit-typescript)")
+    lines.append("📊 TYPESCRIPT UNIT TEST HEALTH RADAR (edge-tests-audit-typescript)")
     lines.append("=" * 95)
 
     toxic = [r for r in results if r["score"] < 50]
@@ -195,35 +197,71 @@ def format_human(results: list[dict], top: int = 15) -> str:
     pure = [r for r in results if r["score"] >= 85]
 
     if toxic:
-        lines.append(f"\n🚨 EN SAĞLIKSIZ {min(top, len(toxic))} UNIT TEST (ACİL İZOLE EDİLMESİ GEREKENLER):")
+        lines.append(f"\n🚨 TOP {min(top, len(toxic))} TOXIC UNIT TESTS (URGENT ISOLATION REQUIRED):")
         lines.append("-" * 95)
         for idx, r in enumerate(toxic[:top]):
-            lines.append(f"[#{idx + 1:02d}] {r['badge']} [Skor: {r['score']:02d}/100] -> {r['path']}")
+            lines.append(f"[#{idx + 1:02d}] {r['badge']} [Score: {r['score']:02d}/100] -> {r['path']}")
             for v in r["violations"]:
                 lines.append(f"       ❌ {v['penalty']}p : {v['desc']}")
             for b in r["bonuses"]:
                 lines.append(f"       ✅ +{b['bonus']}p : {b['desc']}")
     else:
-        lines.append("\n✨ Tebrikler! Toksik / veritabanı sızdıran hiçbir birim test bulunamadı.")
+        lines.append("\n✨ Excellent! No toxic / database-leaking unit tests were found.")
 
     lines.append("\n" + "=" * 95)
-    lines.append("📈 GENEL DAĞILIM VE ÖZET İSTATİSTİKLER:")
+    lines.append("📈 DISTRIBUTION & SUMMARY STATISTICS:")
     total = len(results)
     avg_score = round(sum(r["score"] for r in results) / total) if total else 0
     pure_pct = round((len(pure) / total) * 100) if total else 0
     masked_pct = round((len(masked) / total) * 100) if total else 0
     toxic_pct = round((len(toxic) / total) * 100) if total else 0
 
-    lines.append(f"   Toplam Test Dosyası : {total}")
-    lines.append(f"   Ortalama Sağlık     : {avg_score} / 100")
-    lines.append(f"   🟢 Pure Unit        : {len(pure)} (%{pure_pct})")
-    lines.append(f"   🟡 Masked Integrat. : {len(masked)} (%{masked_pct})")
-    lines.append(f"   🔴 Toxic / Leaky DB : {len(toxic)} (%{toxic_pct})")
+    lines.append(f"   Total Test Files    : {total}")
+    lines.append(f"   Average Health      : {avg_score} / 100")
+    lines.append(f"   🟢 Pure Unit        : {len(pure)} ({pure_pct}%)")
+    lines.append(f"   🟡 Masked Integrat. : {len(masked)} ({masked_pct}%)")
+    lines.append(f"   🔴 Toxic / Leaky DB : {len(toxic)} ({toxic_pct}%)")
     lines.append("=" * 95)
     return "\n".join(lines)
 
 
-from tools.common.toon import encode
+def format_markdown(results: list[dict], top: int = 15) -> str:
+    lines = []
+    lines.append("# 📊 TypeScript Unit Test Health Radar (`edge-tests-audit-typescript`)")
+    lines.append("")
+    total = len(results)
+    toxic = [r for r in results if r["score"] < 50]
+    masked = [r for r in results if 50 <= r["score"] < 85]
+    pure = [r for r in results if r["score"] >= 85]
+    avg_score = round(sum(r["score"] for r in results) / total) if total else 0
+
+    lines.append(f"> **Total Test Files:** `{total}` | **Average Health:** `{avg_score} / 100`")
+    lines.append("")
+    lines.append("## 📈 Summary Distribution")
+    lines.append("")
+    lines.append("| Category | Count | Percentage |")
+    lines.append("| :--- | :--- | :--- |")
+    pure_pct = round((len(pure) / total) * 100) if total else 0
+    masked_pct = round((len(masked) / total) * 100) if total else 0
+    toxic_pct = round((len(toxic) / total) * 100) if total else 0
+    lines.append(f"| 🟢 Pure Unit | `{len(pure)}` | `{pure_pct}%` |")
+    lines.append(f"| 🟡 Masked Integration | `{len(masked)}` | `{masked_pct}%` |")
+    lines.append(f"| 🔴 Toxic / Leaky DB | `{len(toxic)}` | `{toxic_pct}%` |")
+    lines.append("")
+
+    if toxic:
+        lines.append(f"## 🚨 Top {min(top, len(toxic))} Toxic Unit Tests (Urgent Isolation Required)")
+        lines.append("")
+        lines.append("| Score | Badge | Path | Violations |")
+        lines.append("| :--- | :--- | :--- | :--- |")
+        for r in toxic[:top]:
+            viols = ", ".join(f"{v['rule']} ({v['penalty']}p)" for v in r["violations"])
+            lines.append(f"| `{r['score']}/100` | {r['badge']} | `{r['path']}` | {viols} |")
+        lines.append("")
+    else:
+        lines.append("✅ *Excellent! No toxic / database-leaking unit tests were found.*")
+        lines.append("")
+    return "\n".join(lines)
 
 
 def format_toon(results: list[dict], top: int = 15) -> str:
@@ -253,6 +291,34 @@ def format_toon(results: list[dict], top: int = 15) -> str:
     return encode(data)
 
 
+def format_json(results: list[dict], top: int = 15) -> str:
+    total = len(results)
+    toxic = [r for r in results if r["score"] < 50]
+    masked = [r for r in results if 50 <= r["score"] < 85]
+    pure = [r for r in results if r["score"] >= 85]
+    avg_score = round(sum(r["score"] for r in results) / total) if total else 0
+
+    data = {
+        "test_audit_summary": {
+            "total_files": total,
+            "average_score": avg_score,
+            "pure_count": len(pure),
+            "masked_count": len(masked),
+            "toxic_count": len(toxic),
+            "results": [
+                {
+                    "path": r["path"],
+                    "score": r["score"],
+                    "category": r["category"],
+                    "violations": r["violations"],
+                    "bonuses": r["bonuses"],
+                }
+                for r in results[:top]
+            ]
+        }
+    }
+    return json.dumps(data, indent=2)
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -266,9 +332,9 @@ def main():
     )
     parser.add_argument(
         "--format",
-        choices=["human", "toon"],
+        choices=["human", "table", "markdown", "toon", "json"],
         default="human",
-        help="Output format: 'human' (colored console table) or 'toon' (AXI token-frugal notation)"
+        help="Output format: 'human'/'table' (console), 'markdown', 'toon', or 'json'"
     )
     parser.add_argument(
         "--top",
@@ -277,11 +343,11 @@ def main():
         help="Maximum number of toxic tests to display (default: 15)"
     )
     parser.add_argument(
-        "--output",
-        "-o",
+        "-o", "--output", "--out",
+        dest="output",
         type=str,
         default=None,
-        help="Optional file path to write markdown report to"
+        help="Optional file path to write report to"
     )
     parser.add_argument(
         "--fail-under",
@@ -298,15 +364,15 @@ def main():
     args = parser.parse_args()
 
     project_root = Path.cwd()
-    target_path = Path(args.target)
+    target_path = normalize_target_path(args.target)
     if not target_path.is_absolute():
-        target_path = project_root / target_path
+        target_path = (project_root / target_path).resolve()
 
     auditor = TestFileAuditor(project_root)
     files = auditor.get_test_files(target_path)
 
     if not files:
-        print(f"Uyarı: Belirtilen dizinde test dosyası bulunamadı: {target_path}", file=sys.stderr)
+        print(f"Warning: No test files found in target path: {target_path}", file=sys.stderr)
         sys.exit(0)
 
     results = [auditor.analyze_file(f) for f in files]
@@ -314,6 +380,10 @@ def main():
 
     if args.format == "toon":
         output = format_toon(results, top=args.top)
+    elif args.format == "markdown":
+        output = format_markdown(results, top=args.top)
+    elif args.format == "json":
+        output = format_json(results, top=args.top)
     else:
         output = format_human(results, top=args.top)
 
@@ -321,8 +391,9 @@ def main():
 
     if args.output:
         out_path = Path(args.output)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(output, encoding="utf-8")
-        print(f"\nRapor kaydedildi: {out_path}")
+        print(f"\nReport saved to: {out_path}")
 
     # Gate verification exit codes
     avg_score = sum(r["score"] for r in results) / len(results) if results else 0
