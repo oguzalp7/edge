@@ -162,13 +162,14 @@ class BrigadeFSM:
             return False, "No active ticket found in SURGERY state.", {}
 
         base_ref = self.state.base_branch
-        # Check files modified
-        code, stdout, stderr = self._run_cmd(["git", "diff", "--name-only", f"{base_ref}...HEAD"])
-        if code != 0:
-            # Fallback to local working tree diff against base
+        # Check files modified: check working tree against HEAD first, then fallback to base_ref
+        code, stdout, stderr = self._run_cmd(["git", "diff", "--name-only", "HEAD"])
+        if code != 0 or not stdout.strip():
+            code, stdout, stderr = self._run_cmd(["git", "diff", "--name-only", f"{base_ref}...HEAD"])
+        if code != 0 or not stdout.strip():
             code, stdout, stderr = self._run_cmd(["git", "diff", "--name-only", base_ref])
-            if code != 0:
-                code, stdout, stderr = self._run_cmd(["git", "diff", "--name-only", "HEAD~1"])
+        if code != 0 or not stdout.strip():
+            code, stdout, stderr = self._run_cmd(["git", "diff", "--name-only", "HEAD~1"])
 
         modified_files = [f.strip().replace("\\", "/") for f in stdout.splitlines() if f.strip()]
         
@@ -180,11 +181,13 @@ class BrigadeFSM:
                 return False, f"MigrationGate Invariant VIOLATION: Refactor touched database schemas: {schema_violations}", details
 
         # 2. Check target file delta
-        numstat_code, numstat_out, _ = self._run_cmd(["git", "diff", "--numstat", f"{base_ref}...HEAD"])
-        if numstat_code != 0:
+        numstat_code, numstat_out, _ = self._run_cmd(["git", "diff", "--numstat", "HEAD"])
+        if numstat_code != 0 or not numstat_out.strip():
+            numstat_code, numstat_out, _ = self._run_cmd(["git", "diff", "--numstat", f"{base_ref}...HEAD"])
+        if numstat_code != 0 or not numstat_out.strip():
             numstat_code, numstat_out, _ = self._run_cmd(["git", "diff", "--numstat", base_ref])
-            if numstat_code != 0:
-                numstat_code, numstat_out, _ = self._run_cmd(["git", "diff", "--numstat", "HEAD~1"])
+        if numstat_code != 0 or not numstat_out.strip():
+            numstat_code, numstat_out, _ = self._run_cmd(["git", "diff", "--numstat", "HEAD~1"])
 
         target_file_norm = ticket.target_file.replace("\\", "/")
         target_found = False
@@ -292,30 +295,34 @@ class BrigadeFSM:
 
         # Resolve path to tools/gate.py
         gate_script = Path(__file__).resolve().parent.parent / "gate.py"
-        target_path_str = str(self.target_repo)
+        eff_repo = ticket.worktree_path if (ticket and ticket.worktree_path) else self.target_repo
+        target_path_str = str(eff_repo)
+        target_file_flag = ["--target-file", ticket.target_file] if getattr(ticket, "enforce_contraction", False) else []
         if target_path_str.startswith(r"\\wsl.localhost") or target_path_str.startswith("/home/"):
             # Execute inside WSL
             wsl_target = target_path_str.replace(r"\\wsl.localhost\Ubuntu-24.04", "").replace("\\", "/")
             wsl_gate = str(gate_script).replace(r"C:\Users\oguz_\.gemini\config\plugins\edge", "/mnt/c/Users/oguz_/.gemini/config/plugins/edge").replace("\\", "/")
+            base_to_compare = "HEAD~1" if not getattr(ticket, "enforce_contraction", False) else self.state.base_branch
+            no_refactor_flag = ["--no-refactor"] if (not getattr(ticket, "enforce_contraction", False) or getattr(ticket, "track", "core") == "feature") else []
             cmd = [
                 "python3",
                 wsl_gate,
                 wsl_target,
-                "--base", self.state.base_branch,
+                "--base", base_to_compare,
                 "--track", ticket.track,
-                "--target-file", ticket.target_file,
                 "--allow-scaffolding", str(ticket.scaffolding_allowance),
-            ]
+            ] + target_file_flag + no_refactor_flag
         else:
+            base_to_compare = "HEAD~1" if not getattr(ticket, "enforce_contraction", False) else self.state.base_branch
+            no_refactor_flag = ["--no-refactor"] if (not getattr(ticket, "enforce_contraction", False) or getattr(ticket, "track", "core") == "feature") else []
             cmd = [
                 sys.executable,
                 str(gate_script),
-                str(self.target_repo),
-                "--base", self.state.base_branch,
+                str(eff_repo),
+                "--base", base_to_compare,
                 "--track", ticket.track,
-                "--target-file", ticket.target_file,
                 "--allow-scaffolding", str(ticket.scaffolding_allowance),
-            ]
+            ] + target_file_flag + no_refactor_flag
 
         code, stdout, stderr = self._run_cmd(cmd)
         if code != 0:

@@ -258,9 +258,9 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"Base Branch:     {state.base_branch}")
     print(f"Active State:    {state_icons.get(state.current_state, str(state.current_state))}")
     print(f"Active Branch:   {state.active_branch or 'None'}")
+    ticket = state.active_ticket
     print(f"Active Worktree: {state.active_worktree or (ticket.worktree_path if ticket else 'None (primary checkout)')}")
 
-    ticket = state.active_ticket
     print("\n📋 ACTIVE TICKET:")
     if ticket:
         print(f"   ID:          {ticket.ticket_id}")

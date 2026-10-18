@@ -13,7 +13,8 @@ class StationRole(str, Enum):
     CODER = "coder"                           # Coding Worker (Turns red tests green)
     SURGEON = "surgeon"                       # Chef de Partie: Code refactoring & DB leak extraction
     STANDARDS_EXAMINER = "standards_examiner" # Sous Chef: Fowler smells & coding standards verification
-    SPEC_EXAMINER = "spec_examiner"           # MaÃ®tre d': SKILL.md spec & architectural invariants
+    SPEC_EXAMINER = "spec_examiner"           # Maître d': SKILL.md spec & architectural invariants
+    QA_ENGINEER = "qa_engineer"               # Sommelier: E2E Browser QA & Visual QA
 
 
 class CycleState(str, Enum):
