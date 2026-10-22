@@ -38,9 +38,17 @@ suggested_skills:
    > İstasyon kuralları ve durum makinesi için doğrudan [**`skills/edge-brigade/SKILL.md`**](file:///C:/Users/oguz_/.gemini/config/plugins/edge/skills/edge-brigade/SKILL.md) el kitabını referans al.
    
    - **Station Zero-Amnesia Protocol (Zorunlu İstasyon Yeniden Kullanımı):**
-     1. **Önce Kontrol Et:** Bir istasyona iş sevk etmeden önce `manage_subagents(Action: 'list')` veya `python3 tools/brigade/cli.py stations <repo>` çalıştır.
-     2. **Yeniden Kullan (`send_message`):** Hedef rol için daha önce bir alt-ajan açılmışsa, **asla yeni bir `invoke_subagent` çağırma**; doğrudan o ajanın `conversationId`'sini kullanarak `send_message(Recipient: <id>, Message: ...)` ile görevi ilet.
-     3. **Yalnızca Yoksa Aç ve Kaydet:** Hedef rolde ajan henüz yoksa `invoke_subagent` çağır ve dönen `conversationId`'yi hemen `python3 tools/brigade/cli.py register <repo> --role <role> --conversation-id <id>` ile `.edge/brigade.json`'a kaydet.
+     1. **Önce Kontrol Et:** Bir istasyona iş sevk etmeden önce `manage_subagents(Action: 'list')` veya `brigade stations <repo>` çalıştır.
+     2. **Yeniden Kullan (`send_message`):** Hedef rol için aktif bir alt-ajan listeleniyorsa, **asla yeni bir `invoke_subagent` çağırma**; doğrudan o ajanın `conversationId`'sini kullanarak `send_message(Recipient: <id>, Message: ...)` ile görevi ilet.
+     3. **Yalnızca Yoksa Aç ve Kaydet:** Hedef rolde ajan henüz yoksa `invoke_subagent` çağır:
+        ```json
+        invoke_subagent(
+          TypeName: "self",
+          Role: "<Kanonik İstasyon Rolü, örn: Seam Architect>",
+          Prompt: "<İstasyon Yönergeleri & Görev Detayı>"
+        )
+        ```
+        Dönen `conversationId`'yi hemen `brigade register <repo> --role <role> --conversation-id <id>` ile `.edge/brigade.json`'a kaydet.
      4. **Kanonik İstasyon Zorunluluğu (Ad-Hoc Rol Yasağı):** Asla `Database Operator`, `Quality Worker` gibi ad-hoc roller türetme. Tüm sistem operasyonlarını, migration ve test koşumlarını `EXPEDITER`'a, araştırmaları `RESEARCHER`'a, refaktörleri `SURGEON`'a delege et.
    - **İş Akışı Zincirleri:**
      - **Feature İşi:** `SPEC_WRITER` $\rightarrow$ `SEAM_ARCHITECT` (Kırmızı Test) $\rightarrow$ **[TREEHOUSE WORKTREE GATE]** $\rightarrow$ `CODER` (Worktree'de Yeşil Test) $\rightarrow$ `EXAMINERS` $\rightarrow$ `QA_ENGINEER` $\rightarrow$ `EXPEDITER` (`finish-slice`).
@@ -55,39 +63,45 @@ suggested_skills:
 
 ---
 
-## ⚡ Kullanım ve Komut Akışı
+## ⚡ Kullanım ve Komut Akışı (Global `brigade` CLI)
 
 ```bash
 # 1. Brigade Durumunu İncele
-python tools/brigade/cli.py status <repo_path>
+brigade status <repo_path>
 
 # 2. Kalıcı İstasyonları Kaydet (conversation_id ile)
-python tools/brigade/cli.py register <repo_path> --role spec_writer --conversation-id <id>
-python tools/brigade/cli.py register <repo_path> --role seam_architect --conversation-id <id>
-python tools/brigade/cli.py register <repo_path> --role coder --conversation-id <id>
-python tools/brigade/cli.py register <repo_path> --role standards_examiner --conversation-id <id>
-python tools/brigade/cli.py register <repo_path> --role spec_examiner --conversation-id <id>
-python tools/brigade/cli.py register <repo_path> --role qa_engineer --conversation-id <id>
+brigade register <repo_path> --role spec_writer --conversation-id <id>
+brigade register <repo_path> --role seam_architect --conversation-id <id>
+brigade register <repo_path> --role coder --conversation-id <id>
+brigade register <repo_path> --role standards_examiner --conversation-id <id>
+brigade register <repo_path> --role spec_examiner --conversation-id <id>
+brigade register <repo_path> --role qa_engineer --conversation-id <id>
 
 # 3. Dikey Dilimi Başlat (Deterministik Olarak Treehouse Worktree Kiralar)
-python tools/brigade/cli.py start-slice <repo_path> --name <slice-adi> --track feature
+brigade start-slice <repo_path> --name <slice-adi> --track feature
 
 # 4. İşi İlerlet (Deterministik Kapılar Geçişi Yönetir)
-python tools/brigade/cli.py advance <repo_path>
+brigade advance <repo_path>
 
 # 5. Dikey Dilimi Tamamla (development Dalına Fast-Forward Merge & Worktree İadesi)
-python tools/brigade/cli.py finish-slice <repo_path>
+brigade finish-slice <repo_path>
 
 # 6. Güvenli Duraklatma (Bağlam Isısı Sebebiyle)
-python tools/brigade/cli.py pause <repo_path> --reason CONTEXT_LIMIT_YELLOW
+brigade pause <repo_path> --reason CONTEXT_LIMIT_YELLOW
 ```
 
 ---
 
-## 🚫 Negatif Kısıtlar (Anti-Patterns)
+## 🚫 Negatif Kısıtlar (Anti-Patterns & Deterministic Hook Guards)
+
+> [!CRITICAL]
+> **Orkestratör Fiziksel Araç Kalkanı (Hard Tool Gating):**  
+> `orchestrator_guard.py` hook'u Orkestratör'ün kaynak/test kodları üzerinde `write_file`, `edit_file` veya `read_file` çağırmasını fiziksel olarak ENGELLER (exit code deny).  
+> Kod okuma gerekiyorsa `RESEARCHER`'a, kod yazma gerekiyorsa `SEAM_ARCHITECT`/`CODER`/`SURGEON`'a delege etmek ZORUNLUDUR.
 
 * ❌ **Asla Ana Çalışma Ağacında Kodlama / Cerrahi Yapma (Zero-Touch Primary Invariant):** Kırmızı testler tamamlandıktan sonra `CODER`'a iş devredilmeden veya `SURGEON` çalıştırılmadan önce MUTLAKA Treehouse worktree kiralanmalıdır (`start-slice` veya `treehouse get --lease`). Ana repoda doğrudan üretim kodu değiştirmek KESİNLİKLE YASAKTIR.
 * ❌ **Asla Orkestratör Bağlamında Kod Üretme:** Cerrahiyi ve kodlamayı istasyon ajanlarına (`coder`, `surgeon`) bırak.
+* ❌ **Asla Orkestratör Bağlamında Üretim/Test Kodu Okuma:** Kod analizi için `RESEARCHER` istasyonunu sevk et. Orkestratör yalnızca `.edge/**`, `specs/**`, `coding_standards.md` ve artifact belgelerini okuyabilir.
 * ❌ **Asla Mükerrer İstasyon Ajanı Doğurma (Anti-Graveyard):** İlgili rolde aktif veya kayıtlı bir istasyon varsa `invoke_subagent` çağırma; `send_message(Recipient: <id>)` ile iletişimi sürdür.
 * ❌ **Asla Ad-Hoc Persona / Rol Türetme:** `Database Operator`, `Quality Worker` gibi keyfi roller açma; yalnızca 9 kanonik Brigade istasyonunu kullan.
 * ❌ **Asla UI'ı Onaysız Geçme:** `lavish-axi` prototipi insan tarafından onaylanmadan kodlama fazını başlatma.

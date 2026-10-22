@@ -137,46 +137,46 @@ Run from target repository or plugin directory:
 
 ```bash
 # 1. Initialize Brigade state in target repository (Default base branch: development)
-python3 tools/brigade/cli.py init /path/to/repo --base-branch development
+brigade init /path/to/repo --base-branch development
 
 # 2. Register persistent station workers (using their conversation_id)
-python3 tools/brigade/cli.py register /path/to/repo --role surgeon --conversation-id <id> --name "Refactor Surgeon"
-python3 tools/brigade/cli.py register /path/to/repo --role standards_examiner --conversation-id <id> --name "Standards Examiner"
-python3 tools/brigade/cli.py register /path/to/repo --role spec_examiner --conversation-id <id> --name "Spec Examiner"
-python3 tools/brigade/cli.py register /path/to/repo --role qa_engineer --conversation-id <id> --name "QA Sommelier"
+brigade register /path/to/repo --role surgeon --conversation-id <id> --name "Refactor Surgeon"
+brigade register /path/to/repo --role standards_examiner --conversation-id <id> --name "Standards Examiner"
+brigade register /path/to/repo --role spec_examiner --conversation-id <id> --name "Spec Examiner"
+brigade register /path/to/repo --role qa_engineer --conversation-id <id> --name "QA Sommelier"
 
 # 3. View registered stations
-python3 tools/brigade/cli.py stations /path/to/repo
+brigade stations /path/to/repo
 
 # 4. Treehouse Worktree Yönetimi
-python3 tools/brigade/cli.py worktree /path/to/repo                              # Havuz durumunu göster
-python3 tools/brigade/cli.py worktree /path/to/repo --action lease --branch feat/my-feat  # İzole slot kirala
-python3 tools/brigade/cli.py worktree /path/to/repo --action return --force     # Worktree'yi havuza iade et
+brigade worktree /path/to/repo                              # Havuz durumunu göster
+brigade worktree /path/to/repo --action lease --branch feat/my-feat  # İzole slot kirala
+brigade worktree /path/to/repo --action return --force     # Worktree'yi havuza iade et
 
 # 5. Dikey Dilim Başlat (Feature / Refactor için otomatik Treehouse Worktree kiralar)
-python3 tools/brigade/cli.py start-slice /path/to/repo --name staff-allocation --track feature
+brigade start-slice /path/to/repo --name staff-allocation --track feature
 
 # 6. Radar Bilet Triage (Mevcut borç defterinden bilet alır ve worktree kiralar)
-python3 tools/brigade/cli.py triage /path/to/repo --track core
+brigade triage /path/to/repo --track core
 
 # 7. Aktif İstasyon Prompt Payload'unu İncele (Negatif kısıtlar ve worktree yolu içerir)
-python3 tools/brigade/cli.py ticket /path/to/repo --prompt
+brigade ticket /path/to/repo --prompt
 
 # 8. Durum Makinesini İlerlet (Deterministik kapıları çalıştırır)
-python3 tools/brigade/cli.py advance /path/to/repo
+brigade advance /path/to/repo
 
 # 9. Dikey Dilimi Tamamla (development Dalına Fast-Forward Merge & Worktree İadesi)
-python3 tools/brigade/cli.py finish-slice /path/to/repo
+brigade finish-slice /path/to/repo
 
 # 10. Zengin Durum Kartını İncele (Aktif worktree ve eskalasyon durumunu gösterir)
-python3 tools/brigade/cli.py status /path/to/repo
+brigade status /path/to/repo
 
 # 11. Acil Durum Butonu: Kaptana Eskalasyon
-python3 tools/brigade/cli.py escalate /path/to/repo --reason "Need schema column clarification"
+brigade escalate /path/to/repo --reason "Need schema column clarification"
 
 # 12. Eskalasyonu Kaptan Kararıyla Çöz
-python3 tools/brigade/cli.py release /path/to/repo --decision "Use 'user_display_name' field"
+brigade release /path/to/repo --decision "Use 'user_display_name' field"
 
 # 13. Acil Durum Butonu: İptal Et, Negatif Kuralı Kaydet ve Worktree'yi Zorla İade Et
-python3 tools/brigade/cli.py abort /path/to/repo --reason "Deadlock under concurrency" --constraint "DO NOT use raw queries without transaction context"
+brigade abort /path/to/repo --reason "Deadlock under concurrency" --constraint "DO NOT use raw queries without transaction context"
 ```
