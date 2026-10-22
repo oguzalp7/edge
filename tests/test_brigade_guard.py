@@ -58,6 +58,109 @@ class TestBrigadeGuard(unittest.TestCase):
             self.assertEqual(res["decision"], "deny")
             self.assertIn("Yeşil Alandadır", res["reason"])
 
+    def test_antigravity_orchestrator_denied_write_file_and_edit_file(self):
+        # Native write_file with Path
+        payload_write = {
+            "conversationId": "orch-1",
+            "toolCall": {
+                "name": "write_file",
+                "args": {"Path": "src/actions/foo.ts", "Content": "code"}
+            }
+        }
+        with patch.object(guard, "detect_session_role", return_value=("ORCHESTRATOR", "test")):
+            res = guard.handle_pre_tool(payload_write)
+            self.assertEqual(res["decision"], "deny")
+            self.assertIn("Yeşil Alandadır", res["reason"])
+
+        # Native edit_file with Path
+        payload_edit = {
+            "conversationId": "orch-1",
+            "toolCall": {
+                "name": "edit_file",
+                "args": {"Path": "src/components/bookings/PhoneBookingManager.tsx", "Target": "foo", "Replacement": "bar"}
+            }
+        }
+        with patch.object(guard, "detect_session_role", return_value=("ORCHESTRATOR", "test")):
+            res = guard.handle_pre_tool(payload_edit)
+            self.assertEqual(res["decision"], "deny")
+            self.assertIn("Yeşil Alandadır", res["reason"])
+
+    def test_antigravity_orchestrator_read_file_lean_context_guard(self):
+        # Denied reading production code
+        payload_read_code = {
+            "conversationId": "orch-1",
+            "toolCall": {
+                "name": "read_file",
+                "args": {"Path": "src/components/bookings/PhoneBookingManager.tsx"}
+            }
+        }
+        with patch.object(guard, "detect_session_role", return_value=("ORCHESTRATOR", "test")):
+            res = guard.handle_pre_tool(payload_read_code)
+            self.assertEqual(res["decision"], "deny")
+            self.assertIn("EDGE ORCHESTRATOR LEAN CONTEXT GUARD", res["reason"])
+            self.assertIn("RESEARCHER", res["reason"])
+
+        # Denied reading test files
+        payload_read_test = {
+            "conversationId": "orch-1",
+            "toolCall": {
+                "name": "read_file",
+                "args": {"Path": "tests/unit/bookings/phone-booking.test.ts"}
+            }
+        }
+        with patch.object(guard, "detect_session_role", return_value=("ORCHESTRATOR", "test")):
+            res = guard.handle_pre_tool(payload_read_test)
+            self.assertEqual(res["decision"], "deny")
+            self.assertIn("EDGE ORCHESTRATOR LEAN CONTEXT GUARD", res["reason"])
+
+        # Allowed reading specs and .edge state
+        payload_read_spec = {
+            "conversationId": "orch-1",
+            "toolCall": {
+                "name": "read_file",
+                "args": {"Path": "specs/feature-01.md"}
+            }
+        }
+        with patch.object(guard, "detect_session_role", return_value=("ORCHESTRATOR", "test")):
+            res = guard.handle_pre_tool(payload_read_spec)
+            self.assertEqual(res["decision"], "allow")
+
+        # Allowed reading coding_standards
+        payload_read_standards = {
+            "conversationId": "orch-1",
+            "toolCall": {
+                "name": "read_file",
+                "args": {"Path": "coding_standards.md"}
+            }
+        }
+        with patch.object(guard, "detect_session_role", return_value=("ORCHESTRATOR", "test")):
+            res = guard.handle_pre_tool(payload_read_standards)
+            self.assertEqual(res["decision"], "allow")
+
+        # Allowed reading brain artifacts
+        payload_read_brain = {
+            "conversationId": "orch-1",
+            "toolCall": {
+                "name": "read_file",
+                "args": {"Path": "C:/Users/oguz_/.gemini/antigravity/brain/sess-1/plan.md"}
+            }
+        }
+        with patch.object(guard, "detect_session_role", return_value=("ORCHESTRATOR", "test")):
+            res = guard.handle_pre_tool(payload_read_brain)
+            self.assertEqual(res["decision"], "allow")
+
+    def test_antigravity_native_invoke_subagent_role_extraction(self):
+        # Native invoke_subagent with Role parameter
+        payload_spawn = {
+            "conversationId": "orch-1",
+            "toolCall": {
+                "name": "invoke_subagent",
+                "args": {"Role": "Seam Architect", "TypeName": "self", "Prompt": "Write red test"}
+            }
+        }
+        res = guard.handle_pre_tool(payload_spawn)
+        self.assertEqual(res["decision"], "allow")
+
     def test_orchestrator_allowed_artifact_write(self):
         payload_artifact = {
             "conversationId": "orch-1",
