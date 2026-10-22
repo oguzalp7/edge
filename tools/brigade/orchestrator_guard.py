@@ -305,9 +305,9 @@ class TranscriptStationScanner:
                     tool_calls = step.get("tool_calls", [])
                     for tc in tool_calls:
                         if tc.get("name") == "invoke_subagent":
-                            subagents = parse_subagents(tc.get("args", {}).get("Subagents"))
-                            for sa in subagents:
-                                r = sa.get("Role", "")
+                            tc_args = tc.get("args", {})
+                            req_roles = extract_requested_roles(tc_args)
+                            for r in req_roles:
                                 canonical = normalize_role(r) or r
                                 pending_roles.append(canonical)
 
@@ -588,6 +588,36 @@ def parse_subagents(raw_subagents: Any) -> List[Dict[str, Any]]:
     return []
 
 
+def extract_requested_roles(args: dict) -> List[str]:
+    """Extracts role names from Antigravity native (Role) or legacy (Subagents) invoke_subagent tool args."""
+    roles = []
+    # 1. Direct Antigravity invoke_subagent: Role parameter
+    role_arg = args.get("Role") or args.get("role")
+    if role_arg:
+        roles.append(str(role_arg).strip())
+    # 2. Legacy / multi-subagent array
+    subagents_arg = args.get("Subagents") or args.get("subagents")
+    if subagents_arg:
+        subagents = parse_subagents(subagents_arg)
+        for sa in subagents:
+            if isinstance(sa, dict) and sa.get("Role"):
+                roles.append(str(sa.get("Role")).strip())
+    return roles
+
+
+def get_target_file(args: dict) -> str:
+    """Extracts target file path from Antigravity (Path) or legacy (TargetFile/path/file_path) args."""
+    path_val = (
+        args.get("Path")
+        or args.get("path")
+        or args.get("TargetFile")
+        or args.get("target_file")
+        or args.get("file_path")
+        or ""
+    )
+    return str(path_val).replace("\\", "/").lower()
+
+
 def handle_pre_tool(payload: dict) -> dict:
     tool_call = payload.get("toolCall", {})
     tool_name = tool_call.get("name", "")
@@ -600,9 +630,8 @@ def handle_pre_tool(payload: dict) -> dict:
         store = StationStore(ACTIVE_STATIONS_FILE)
         brain_root = ACTIVE_STATIONS_FILE.parent / "brain"
         scanner = TranscriptStationScanner(brain_root)
-        subagents = parse_subagents(args.get("Subagents"))
-        for sa in subagents:
-            req_role = sa.get("Role", "")
+        requested_roles = extract_requested_roles(args)
+        for req_role in requested_roles:
             eval_res = StationSelector.evaluate_spawn_request(
                 store=store,
                 scanner=scanner,
@@ -613,10 +642,10 @@ def handle_pre_tool(payload: dict) -> dict:
                 return eval_res
         return {"decision": "allow"}
 
-    # 2. write_to_file & replace_file_content: Physical Tool Boundaries
-    if tool_name in ("write_to_file", "replace_file_content"):
-        target_file = (args.get("TargetFile") or "").replace("\\", "/").lower()
+    target_file = get_target_file(args)
 
+    # 2. write_file, edit_file & legacy file mutation: Physical Tool Boundaries
+    if tool_name in ("write_file", "edit_file", "write_to_file", "replace_file_content"):
         # A. Orchestrator: Sovereign Commander in Green Zone
         if role == "ORCHESTRATOR":
             # Allowed: Antigravity brain artifacts and .edge state/checkpoints
@@ -710,6 +739,47 @@ def handle_pre_tool(payload: dict) -> dict:
                     ),
                 }
 
+    # 3. read_file & view_file: Lean Context Guard for ORCHESTRATOR
+    if tool_name in ("read_file", "view_file"):
+        if role == "ORCHESTRATOR":
+            allowed_read_keywords = [
+                "/brain/", "brain/",
+                ".edge/", "/.edge/",
+                ".lavish/", "/.lavish/",
+                "specs/", "/specs/",
+                "coding_standards",
+                "agents.md",
+                "gemini.md",
+                "readme.md",
+                "architecture.md",
+                "package.json",
+                "tsconfig.json",
+                "treehouse.toml",
+            ]
+            is_allowed = any(k in target_file for k in allowed_read_keywords)
+
+            code_or_test_keywords = [
+                "/src/", "src/",
+                "/app/", "app/",
+                "/lib/", "lib/",
+                "/db/", "db/",
+                "/drizzle/", "drizzle/",
+                "/tests/", "tests/",
+                ".test.", ".spec.",
+            ]
+            is_code_or_test = any(k in target_file for k in code_or_test_keywords)
+
+            if is_code_or_test and not is_allowed:
+                return {
+                    "decision": "deny",
+                    "reason": (
+                        "❌ [EDGE ORCHESTRATOR LEAN CONTEXT GUARD]: Kök Ajan (Orkestratör) Yeşil Alandadır ve doğrudan üretim veya test kodu okuyamaz! "
+                        f"Hedef dosya: `{target_file}`. "
+                        "Kod incelemesi ve kök neden analizi (RCA) için RESEARCHER istasyonunu (`invoke_subagent` / `send_message`) görevlendiriniz. "
+                        "Orkestratör yalnızca `.edge/**`, `specs/**`, `coding_standards.md` ve artifact belgelerini okuyabilir."
+                    ),
+                }
+
     return {"decision": "allow"}
 
 
@@ -731,8 +801,8 @@ def handle_post_tool(payload: dict) -> dict:
                         match = re.search(r'\\?["\']conversationId\\?["\']\s*:\s*\\?["\']([a-f0-9\-]+)\\?["\']', line)
                         if match:
                             created_cid = match.group(1)
-                            subagents = parse_subagents(args.get("Subagents"))
-                            role = subagents[0].get("Role", "STATION_WORKER") if subagents else "STATION_WORKER"
+                            requested_roles = extract_requested_roles(args)
+                            role = requested_roles[0] if requested_roles else "STATION_WORKER"
                             register_station(created_cid, role, parent_cid)
                             break
                 except Exception:
