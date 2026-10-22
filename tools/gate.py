@@ -516,7 +516,7 @@ def main():
     parser.add_argument("--skip-verify", action="store_true", help="Skip running tsc and unit tests (fast static audit only)")
     parser.add_argument("--target-file", default=None, help="Target action/controller file to enforce strict contraction (insertions - deletions < 0)")
     parser.add_argument("--allow-scaffolding", type=int, default=0, help="Scaffolding budget tolerance for new domain repositories (lines)")
-    parser.add_argument("--track", choices=["core", "ui", "all"], default="all", help="Refactoring track: core, ui, or all (default: all)")
+    parser.add_argument("--track", choices=["core", "ui", "all", "feature"], default="all", help="Refactoring track: core, ui, all, or feature (default: all)")
 
     args = parser.parse_args()
     target_path = normalize_target_path(args.target)
