@@ -74,7 +74,7 @@ class TestKnipParser:
 
     def test_parse_knip_v5_with_dotenv_banner_and_issue_files(self):
         raw = (
-            "◇ injected env (12) from .env.test\n"
+            "◇ injected env (12) from .env.test // tip: ⌘ custom filepath { path: '/custom/path/.env' }\n"
             '{"issues":[{"file":"src/old.ts","files":[{"name":"src/old.ts"}],"exports":[{"name":"deadFn","line":10}],"types":[]}]}'
         )
         report = parse_knip_json(raw)
