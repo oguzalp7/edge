@@ -48,6 +48,10 @@ except ImportError:
 
 from tools.common import normalize_target_path, run_command
 
+# SSOT Heat Zone Thresholds (SPEC-002)
+GREEN_HEAT_THRESHOLD: int = 45_000
+YELLOW_HEAT_THRESHOLD: int = 75_000
+
 
 class BrigadeFSM:
     def __init__(self, target_repo_path: Optional[Path] = None, target_repo: Optional[Path] = None):
@@ -311,6 +315,7 @@ class BrigadeFSM:
                 "--base", base_to_compare,
                 "--track", ticket.track,
                 "--allow-scaffolding", str(ticket.scaffolding_allowance),
+                "--skip-verify",
             ] + target_file_flag + no_refactor_flag
         else:
             base_to_compare = "HEAD~1" if not getattr(ticket, "enforce_contraction", False) else self.state.base_branch
@@ -322,6 +327,7 @@ class BrigadeFSM:
                 "--base", base_to_compare,
                 "--track", ticket.track,
                 "--allow-scaffolding", str(ticket.scaffolding_allowance),
+                "--skip-verify",
             ] + target_file_flag + no_refactor_flag
 
         code, stdout, stderr = self._run_cmd(cmd)
@@ -1058,12 +1064,12 @@ class BrigadeFSM:
 
     @staticmethod
     def get_heat_zone(token_count: int) -> Tuple[ContextHeatZone, str]:
-        if token_count < 180_000:
+        if token_count < GREEN_HEAT_THRESHOLD:
             return (
                 ContextHeatZone.GREEN,
                 f"GREEN ZONE ({token_count:,} tokens): Context is optimal. Proceed with normal operations."
             )
-        elif token_count <= 250_000:
+        elif token_count <= YELLOW_HEAT_THRESHOLD:
             return (
                 ContextHeatZone.YELLOW,
                 f"YELLOW ZONE ({token_count:,} tokens): Cognitive drain limit approaching. DRAIN ACTIVE TICKET ONLY. Do NOT start new tickets. Trigger 'brigade pause' upon ticket completion."

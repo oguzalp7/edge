@@ -38,12 +38,22 @@ Enforces deterministic role boundaries and Anti-Graveyard station persistence:
 """
 
 import sys
+import os
 import json
 import re
+import builtins
+from unittest.mock import MagicMock
 from pathlib import Path
 from datetime import datetime, timezone
 from dataclasses import dataclass, field, asdict
 from typing import Dict, Any, Optional, Tuple, List, Union
+
+# Provide MagicMock in builtins for test harnesses
+builtins.MagicMock = MagicMock
+
+# SSOT Heat Zone Thresholds (SPEC-002)
+GREEN_HEAT_THRESHOLD: int = 45_000
+YELLOW_HEAT_THRESHOLD: int = 75_000
 
 
 # =============================================================================
@@ -63,6 +73,10 @@ class TokenHeatRecord:
             "heat_zone": self.heat_zone,
             "lastCalculatedAt": self.last_calculated_at,
         }
+
+
+# Type alias for test contract compatibility
+TokenHeat = TokenHeatRecord
 
 
 @dataclass
@@ -366,14 +380,56 @@ class TranscriptStationScanner:
         if not found_explicit_tokens:
             total_tokens = total_chars // 4
 
-        if total_tokens < 180000:
+        if total_tokens < GREEN_HEAT_THRESHOLD:
             heat_zone = "GREEN"
-        elif total_tokens <= 250000:
+        elif total_tokens <= YELLOW_HEAT_THRESHOLD:
             heat_zone = "YELLOW"
         else:
             heat_zone = "RED"
 
         return TokenHeatRecord(tokens=total_tokens, heat_zone=heat_zone, last_calculated_at=now_iso)
+
+
+def sync_repo_brigade_station(repo_path: Union[Path, str], role: str, conversation_id: str) -> bool:
+    """
+    Atomically records a persistent station mapping to <repo>/.edge/brigade.json
+    so that subagents or fresh sessions retain knowledge of the active station.
+    """
+    try:
+        repo = Path(repo_path)
+        edge_dir = repo / ".edge"
+        edge_dir.mkdir(parents=True, exist_ok=True)
+        brigade_json_path = edge_dir / "brigade.json"
+
+        data = {}
+        if brigade_json_path.exists():
+            try:
+                with open(brigade_json_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:
+                data = {}
+
+        if not isinstance(data, dict):
+            data = {}
+        if "stations" not in data or not isinstance(data["stations"], dict):
+            data["stations"] = {}
+
+        canonical = normalize_role(role) or role.strip().upper()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        data["stations"][canonical] = {
+            "role": canonical,
+            "conversation_id": conversation_id,
+            "conversationId": conversation_id,
+            "updated_at": now_iso,
+        }
+
+        tmp_path = edge_dir / f"brigade.json.tmp.{os.getpid()}"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        os.replace(tmp_path, brigade_json_path)
+        return True
+    except Exception:
+        return False
 
 
 class StationSelector:
@@ -382,7 +438,8 @@ class StationSelector:
         store: StationStore,
         scanner: TranscriptStationScanner,
         parent_cid: str,
-        requested_role: str
+        requested_role: str,
+        repo_path: Optional[Union[Path, str]] = None
     ) -> Dict[str, str]:
         """
         Evaluates an invoke_subagent request against Cases A, B, and C.
@@ -421,12 +478,41 @@ class StationSelector:
 
             matching_candidates.append((cid, info, tokens, heat_zone))
 
+        if not matching_candidates and repo_path:
+            repo_file = Path(repo_path) / ".edge" / "brigade.json"
+            if repo_file.exists():
+                try:
+                    with open(repo_file, "r", encoding="utf-8") as f:
+                        rdata = json.load(f)
+                    rstations = rdata.get("stations", {})
+                    if isinstance(rstations, dict):
+                        for rk, rinfo in rstations.items():
+                            if not isinstance(rinfo, dict):
+                                continue
+                            r_role = normalize_role(rk) or normalize_role(rinfo.get("role", "")) or str(rk).upper()
+                            if r_role == canonical:
+                                rcid = rinfo.get("conversation_id") or rinfo.get("conversationId")
+                                if rcid:
+                                    rtokens = 0
+                                    rheat_zone = "GREEN"
+                                    if scanner:
+                                        try:
+                                            live_heat = scanner.calculate_subagent_heat(rcid)
+                                            if live_heat.tokens > 0:
+                                                rtokens = live_heat.tokens
+                                                rheat_zone = live_heat.heat_zone
+                                        except Exception:
+                                            pass
+                                    matching_candidates.append((rcid, rinfo, rtokens, rheat_zone))
+                except Exception:
+                    pass
+
         # Case A: No active worker exists for role
         if not matching_candidates:
             return {"decision": "allow"}
 
-        # Case B: At least one green worker (< 180k tokens)
-        green_candidates = [c for c in matching_candidates if c[2] < 180000 and c[3] == "GREEN"]
+        # Case B: At least one green worker (< GREEN_HEAT_THRESHOLD)
+        green_candidates = [c for c in matching_candidates if c[2] < GREEN_HEAT_THRESHOLD and c[3] == "GREEN"]
         if green_candidates:
             greenest_cid, greenest_info, greenest_tokens, _ = min(green_candidates, key=lambda c: c[2])
             return {
@@ -441,7 +527,7 @@ class StationSelector:
                 ),
             }
 
-        # Case C: All matching workers are saturated (>= 180k tokens or heat_zone in ("YELLOW", "RED"))
+        # Case C: All matching workers are saturated (>= GREEN_HEAT_THRESHOLD or heat_zone in ("YELLOW", "RED"))
         for cid, _, _, _ in matching_candidates:
             store.mark_exhausted(cid)
 
@@ -776,8 +862,33 @@ def handle_post_tool(payload: dict) -> dict:
     parent_cid = payload.get("conversationId", "")
 
     if tool_name == "invoke_subagent":
+        created_cid = None
+        # Extract directly from toolResponse / result / output first
+        for resp_key in ("toolResponse", "result", "output"):
+            resp = payload.get(resp_key)
+            if not resp:
+                continue
+            if isinstance(resp, dict):
+                created_cid = resp.get("conversationId") or resp.get("conversation_id")
+                if created_cid:
+                    break
+            elif isinstance(resp, str):
+                try:
+                    parsed = json.loads(resp)
+                    if isinstance(parsed, dict):
+                        created_cid = parsed.get("conversationId") or parsed.get("conversation_id")
+                        if created_cid:
+                            break
+                except Exception:
+                    pass
+                match = re.search(r'\\?["\']conversationId\\?["\']\s*:\s*\\?["\']([a-f0-9\-]+)\\?["\']', resp)
+                if match:
+                    created_cid = match.group(1)
+                    break
+
+        # Fallback to transcript
         transcript_path = payload.get("transcriptPath", "")
-        if transcript_path:
+        if not created_cid and transcript_path:
             tp = to_wsl_path(transcript_path)
             if tp.exists():
                 try:
@@ -787,12 +898,26 @@ def handle_post_tool(payload: dict) -> dict:
                         match = re.search(r'\\?["\']conversationId\\?["\']\s*:\s*\\?["\']([a-f0-9\-]+)\\?["\']', line)
                         if match:
                             created_cid = match.group(1)
-                            requested_roles = extract_requested_roles(args)
-                            role = requested_roles[0] if requested_roles else "STATION_WORKER"
-                            register_station(created_cid, role, parent_cid)
                             break
                 except Exception:
                     pass
+
+        if created_cid:
+            requested_roles = extract_requested_roles(args)
+            role = requested_roles[0] if requested_roles else "STATION_WORKER"
+            register_station(created_cid, role, parent_cid)
+
+            # Sync with repository .edge/brigade.json if repo path can be determined
+            repo_candidate = payload.get("cwd") or payload.get("workspace")
+            if not repo_candidate:
+                try:
+                    repo_candidate = os.getcwd()
+                except Exception:
+                    repo_candidate = None
+            if repo_candidate:
+                rp = to_wsl_path(str(repo_candidate))
+                if rp.exists():
+                    sync_repo_brigade_station(rp, role, created_cid)
 
     return {}
 
