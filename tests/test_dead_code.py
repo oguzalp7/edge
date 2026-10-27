@@ -72,6 +72,18 @@ class TestKnipParser:
         assert report.unused_exports == []
         assert report.unused_types == []
 
+    def test_parse_knip_v5_with_dotenv_banner_and_issue_files(self):
+        raw = (
+            "◇ injected env (12) from .env.test\n"
+            '{"issues":[{"file":"src/old.ts","files":[{"name":"src/old.ts"}],"exports":[{"name":"deadFn","line":10}],"types":[]}]}'
+        )
+        report = parse_knip_json(raw)
+        assert isinstance(report, DeadCodeReport)
+        assert report.engine == "knip"
+        assert "src/old.ts" in report.unused_files
+        export_names = [e["name"] for e in report.unused_exports]
+        assert "deadFn" in export_names
+
 
 class TestDeadCodeFallback:
     def test_run_dead_code_scan_fallback_to_graph_builder(self, tmp_path):
