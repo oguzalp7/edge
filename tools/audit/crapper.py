@@ -176,20 +176,16 @@ def _calc_node_complexity(node: Any, source_bytes: bytes) -> int:
             op = n.child_by_field_name("operator")
             if op:
                 op_text = source_bytes[op.start_byte:op.end_byte].decode("utf-8", errors="ignore").strip()
-                if op_text in ("&&", "||", "??"):
+                if op_text in ("&&", "||"):
                     comp += 1
             else:
                 for c in n.children:
                     token = source_bytes[c.start_byte:c.end_byte].decode("utf-8", errors="ignore").strip()
-                    if token in ("&&", "||", "??"):
+                    if token in ("&&", "||"):
                         comp += 1
                         break
         elif n.type == "boolean_operator":
             comp += 1
-        elif n.type in ("optional_chain", "member_expression"):
-            txt = source_bytes[n.start_byte:n.end_byte].decode("utf-8", errors="ignore")
-            if "?." in txt:
-                comp += 1
 
         for child in n.children:
             _walk(child)

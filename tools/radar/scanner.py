@@ -36,6 +36,16 @@ class RadarScanner:
         summary = scanner.scan(target_dir, scoped_files=file_paths)
         findings: List[LedgerItem] = []
 
+        # Discover LCOV report for CRAP analysis
+        lcov_records = {}
+        try:
+            from tools.audit.crapper import discover_existing_lcov, parse_lcov
+            lcov_file = discover_existing_lcov(self.repo_path)
+            if lcov_file:
+                lcov_records = parse_lcov(lcov_file.read_text(encoding="utf-8", errors="ignore"))
+        except Exception:
+            pass
+
         for fmetric in summary.file_results:
             rel = fmetric.rel_path
             # Normalize path
@@ -45,6 +55,27 @@ class RadarScanner:
             # Scoping filter
             if file_paths is not None and rel not in file_paths:
                 continue
+
+            # Look up LCOV data for file
+            file_lcov = None
+            if lcov_records:
+                repo_rel = ""
+                try:
+                    repo_rel = str(fmetric.path.relative_to(self.repo_path)).replace("\\", "/")
+                except Exception:
+                    pass
+                file_lcov = (
+                    lcov_records.get(repo_rel)
+                    or lcov_records.get(rel)
+                    or lcov_records.get(fmetric.path.name)
+                )
+                if not file_lcov:
+                    for lk, lrec in lcov_records.items():
+                        if (repo_rel and (lk.endswith(repo_rel) or repo_rel.endswith(lk))) or \
+                           (rel and (lk.endswith(rel) or rel.endswith(lk))) or \
+                           lk.endswith(fmetric.path.name):
+                            file_lcov = lrec
+                            break
 
             # 1. Action Layer DB / SQL Leak (Rule from coding_standards.md)
             if rel.startswith("src/actions/") or rel.startswith("actions/"):
@@ -96,26 +127,59 @@ class RadarScanner:
                     last_seen_at="",
                 ))
 
-            # 3. God Functions / Fat Actions (> 80 SLOC for actions, > 60 for core functions)
+            # 3. God Functions / Fat Actions & CRAP Risk Engine
             for fn in fmetric.functions:
                 limit = 80 if "action" in rel else 60
-                if fn.sloc > limit:
-                    fp = LedgerItem.generate_fingerprint("RULE-FAT-FUNCTION", rel, fn.name)
+
+                # Compute CRAP if coverage data is available
+                crap_score = None
+                if file_lcov is not None:
+                    try:
+                        from tools.audit.crapper import function_coverage_from_lcov, compute_crap
+                        cov = function_coverage_from_lcov(file_lcov, fn.start_line, fn.end_line)
+                        crap_score = compute_crap(fn.complexity, cov)
+                    except Exception:
+                        crap_score = None
+
+                # CRAP Critical Smell (RULE-HIGH-CRAP)
+                if crap_score is not None and crap_score >= 30.0:
+                    fp = LedgerItem.generate_fingerprint("RULE-HIGH-CRAP", rel, fn.name, str(round(crap_score, 1)))
                     findings.append(LedgerItem(
                         fingerprint=fp,
                         track=Track.CORE.value,
-                        rule_id="RULE-FAT-FUNCTION",
-                        title=f"Fat Function: '{fn.name}' has {fn.sloc} SLOC (limit: {limit}) in {rel}",
+                        rule_id="RULE-HIGH-CRAP",
+                        title=f"High Change Risk (CRAP {crap_score:.1f} >= 30.0): '{fn.name}' in {rel}",
                         file_path=rel,
                         line_number=fn.start_line,
                         symbol=fn.name,
-                        severity=FindingSeverity.WARNING.value,
+                        severity=FindingSeverity.CRITICAL.value,
                         status=FindingStatus.OPEN.value,
-                        details={"sloc": fn.sloc, "complexity": fn.complexity},
-                        suggested_fix="Decompose into pure helper functions or delegate business calculation to src/core.",
+                        details={"crap_score": crap_score, "complexity": fn.complexity, "sloc": fn.sloc},
+                        suggested_fix="Break function into smaller units or write missing branch tests.",
                         first_seen_at="",
                         last_seen_at="",
                     ))
+
+                # Fat Function check (suppressed if well-tested and CRAP < 15.0)
+                if fn.sloc > limit:
+                    is_crap_clean = (crap_score is not None and crap_score < 15.0)
+                    if not is_crap_clean:
+                        fp = LedgerItem.generate_fingerprint("RULE-FAT-FUNCTION", rel, fn.name)
+                        findings.append(LedgerItem(
+                            fingerprint=fp,
+                            track=Track.CORE.value,
+                            rule_id="RULE-FAT-FUNCTION",
+                            title=f"Fat Function: '{fn.name}' has {fn.sloc} SLOC (limit: {limit}) in {rel}",
+                            file_path=rel,
+                            line_number=fn.start_line,
+                            symbol=fn.name,
+                            severity=FindingSeverity.WARNING.value,
+                            status=FindingStatus.OPEN.value,
+                            details={"sloc": fn.sloc, "complexity": fn.complexity},
+                            suggested_fix="Decompose into pure helper functions or delegate business calculation to src/core.",
+                            first_seen_at="",
+                            last_seen_at="",
+                        ))
 
             # 4. Missing Test Seam in Domain Core (Exclude types, definitions, and examples)
             is_type_or_example = (
@@ -142,12 +206,43 @@ class RadarScanner:
                     last_seen_at="",
                 ))
 
+        # 5. DRYER Structural AST Clones (RULE-AST-DUPLICATE)
+        try:
+            from tools.audit.dryer import DryerScanner, TREE_SITTER_AVAILABLE
+            if TREE_SITTER_AVAILABLE:
+                dryer = DryerScanner(threshold=0.82)
+                clone_pairs = dryer.scan_path(target_dir, scoped_files=file_paths)
+                for pair in clone_pairs:
+                    score = pair.score
+                    sev = FindingSeverity.CRITICAL.value if score >= 0.92 else FindingSeverity.WARNING.value
+                    rel_left = pair.left.file_path
+                    if rel_left.startswith("./"):
+                        rel_left = rel_left[2:]
+                    fp = LedgerItem.generate_fingerprint("RULE-AST-DUPLICATE", rel_left, pair.left.symbol, str(round(score, 2)))
+                    findings.append(LedgerItem(
+                        fingerprint=fp,
+                        track=Track.CORE.value,
+                        rule_id="RULE-AST-DUPLICATE",
+                        title=f"Structural AST Duplicate ({score * 100:.1f}%): '{pair.left.symbol}' in {Path(rel_left).name} matches '{pair.right.symbol}' in {Path(pair.right.file_path).name}",
+                        file_path=rel_left,
+                        line_number=pair.left.start_line,
+                        symbol=pair.left.symbol,
+                        severity=sev,
+                        status=FindingStatus.OPEN.value,
+                        details={"score": score, "right_file": pair.right.file_path, "right_symbol": pair.right.symbol},
+                        suggested_fix="Extract duplicate logic into shared domain helper under src/core/ or src/lib/.",
+                        first_seen_at="",
+                        last_seen_at="",
+                    ))
+        except Exception:
+            pass
+
         return findings
 
     # =========================================================================
     # UI / FRONTEND SCANNER
     # =========================================================================
-    def scan_ui(self, file_paths: Optional[List[str]] = None) -> List[LedgerItem]:
+    def scan_ui(self, file_paths: Optional[List[str]] = None, include_mechanical: bool = False) -> List[LedgerItem]:
         """Scans frontend components, JSX duplication clusters, and magic headers."""
         findings: List[LedgerItem] = []
         target_dir = self.repo_path / "src"
@@ -186,25 +281,26 @@ class RadarScanner:
                 last_seen_at="",
             ))
 
-        for rel, dead_sym, imp_src in dead_imports:
-            if file_paths is not None and rel not in file_paths:
-                continue
-            fp = LedgerItem.generate_fingerprint("RULE-DEAD-IMPORT", rel, dead_sym)
-            findings.append(LedgerItem(
-                fingerprint=fp,
-                track=Track.UI.value,
-                rule_id="RULE-DEAD-IMPORT",
-                title=f"Dead Symbol Import: '{dead_sym}' from '{imp_src}' in {rel}",
-                file_path=rel,
-                line_number=1,
-                symbol=dead_sym,
-                severity=FindingSeverity.ADVISORY.value,
-                status=FindingStatus.OPEN.value,
-                details={"source": imp_src, "symbol": dead_sym},
-                suggested_fix="Remove unused import to reduce module bundle size.",
-                first_seen_at="",
-                last_seen_at="",
-            ))
+        if include_mechanical:
+            for rel, dead_sym, imp_src in dead_imports:
+                if file_paths is not None and rel not in file_paths:
+                    continue
+                fp = LedgerItem.generate_fingerprint("RULE-DEAD-IMPORT", rel, dead_sym)
+                findings.append(LedgerItem(
+                    fingerprint=fp,
+                    track=Track.UI.value,
+                    rule_id="RULE-DEAD-IMPORT",
+                    title=f"Dead Symbol Import: '{dead_sym}' from '{imp_src}' in {rel}",
+                    file_path=rel,
+                    line_number=1,
+                    symbol=dead_sym,
+                    severity=FindingSeverity.ADVISORY.value,
+                    status=FindingStatus.OPEN.value,
+                    details={"source": imp_src, "symbol": dead_sym},
+                    suggested_fix="Remove unused import to reduce module bundle size.",
+                    first_seen_at="",
+                    last_seen_at="",
+                ))
 
         # 2. JSX Duplication Clustering
         fingerprinter = JSXFingerprinter()
