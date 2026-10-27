@@ -42,9 +42,16 @@ Findings are strictly partitioned to prevent cognitive context dilution:
 ```
 .edge/ledger/
 ├── ui.json       <-- Frontend Track (JSX Tailwind clusters, orphan components, magic headers)
-├── core.json     <-- Backend Track (Fat actions >80 LOC, SQL leaks, deep indent >3, missing tests)
+├── core.json     <-- Backend Track (Fat actions >80 LOC, SQL leaks, CRAP score >= 30, AST duplicates, missing tests)
 └── meta.json     <-- Executive index & systemic macro pattern detector
 ```
+
+### 🧹 Zero-Token Mechanical De-Pollution
+By default (`include_mechanical=False`), the UI ledger omits mechanical lint violations such as `RULE-DEAD-IMPORT`. Run mechanical automated fixes (`npx eslint --fix`) via the pre-sweep pipeline rather than consuming LLM reasoning tokens.
+
+### 🧬 Uncle Bob Quality Rules
+- **`RULE-HIGH-CRAP` (CRITICAL):** Emitted when a function's CRAP score $\ge 30.0$ (combining cyclomatic complexity with LCOV branch coverage). When CRAP $< 15.0$, `RULE-FAT-FUNCTION` is automatically suppressed.
+- **`RULE-AST-DUPLICATE` (WARNING/CRITICAL):** Structural code clones identified by the Tree-Sitter `DRYER` engine across functions, class methods, or JSX blocks (Jaccard similarity $\ge 0.82$).
 
 ---
 
