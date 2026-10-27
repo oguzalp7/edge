@@ -28,8 +28,10 @@ def parse_knip_json(raw_json: str) -> DeadCodeReport:
     if not raw_json:
         return DeadCodeReport(unused_files=[], unused_exports=[], unused_types=[], engine="knip")
 
-    idx = raw_json.find("{")
-    if idx == -1:
+    idx = raw_json.find('{"')
+    if idx < 0:
+        idx = raw_json.find("{")
+    if idx < 0:
         return DeadCodeReport(unused_files=[], unused_exports=[], unused_types=[], engine="knip")
 
     try:
