@@ -26,6 +26,70 @@ from tools.test_audit.cli import TestFileAuditor, format_human as test_format_hu
 setup_utf8_console()
 
 
+def run_clones_track(target_path: Path, output_format: str = "human") -> str:
+    from tools.audit.dryer import DryerScanner, TREE_SITTER_AVAILABLE
+    if not TREE_SITTER_AVAILABLE:
+        return "⚠️ tree-sitter or tree-sitter-language-pack not found. Clones track unavailable."
+    scanner = DryerScanner()
+    pairs = scanner.scan_path(target_path)
+    clusters = scanner.cluster_clones(pairs)
+
+    if output_format == "json":
+        data = {
+            "clones": {
+                "total_pairs": len(pairs),
+                "total_clusters": len(clusters),
+                "pairs": [
+                    {
+                        "score": p.score,
+                        "language": p.language,
+                        "left": {
+                            "file": p.left.file_path,
+                            "symbol": p.left.symbol,
+                            "lines": f"{p.left.start_line}-{p.left.end_line}",
+                        },
+                        "right": {
+                            "file": p.right.file_path,
+                            "symbol": p.right.symbol,
+                            "lines": f"{p.right.start_line}-{p.right.end_line}",
+                        }
+                    }
+                    for p in pairs
+                ],
+                "clusters": [
+                    {
+                        "cluster_id": c.cluster_id,
+                        "distinct_files": c.distinct_files,
+                        "max_score": c.max_score,
+                        "members": [f"{m.file_path}:{m.symbol}" for m in c.members]
+                    }
+                    for c in clusters
+                ]
+            }
+        }
+        return json.dumps(data, indent=2)
+    elif output_format == "markdown":
+        out = ["# 👯 DRYER Structural AST Clones Report", f"> **Target:** `{target_path}` | **Clone Pairs:** {len(pairs)} | **Clusters:** {len(clusters)}\n"]
+        for c in clusters:
+            out.append(f"### Cluster `{c.cluster_id}` (Max Similarity: {c.max_score * 100:.1f}%)")
+            out.append(f"- **Files:** {', '.join(c.distinct_files)}")
+            for m in c.members:
+                out.append(f"  - `{Path(m.file_path).name}:{m.symbol}` (lines {m.start_line}-{m.end_line})")
+        return "\n".join(out)
+    else:
+        out = [
+            "=" * 80,
+            f"👯  DRYER STRUCTURAL AST CLONES ({len(pairs)} pairs, {len(clusters)} clusters)",
+            "=" * 80,
+        ]
+        for c in clusters:
+            out.append(f"\n📦 Cluster {c.cluster_id} (Similarity: {c.max_score * 100:.1f}%)")
+            out.append(f"   Files: {', '.join(c.distinct_files)}")
+            for m in c.members:
+                out.append(f"   - {Path(m.file_path).name}::{m.symbol} (lines {m.start_line}-{m.end_line})")
+        return "\n".join(out)
+
+
 def run_core_track(target_path: Path, output_format: str = "human", top: int = 15) -> str:
     scanner = FileScanner()
     summary = scanner.scan(target_path)
@@ -158,9 +222,9 @@ def main():
     )
     parser.add_argument(
         "--track",
-        choices=["core", "ui", "tests", "all"],
+        choices=["core", "ui", "tests", "clones", "dead-code", "all"],
         default="core",
-        help="Audit track to execute: 'core' (default), 'ui', 'tests', or 'all' (unified)"
+        help="Audit track to execute: 'core' (default), 'ui', 'tests', 'clones', 'dead-code', or 'all' (unified)"
     )
     parser.add_argument(
         "--format",
@@ -198,6 +262,12 @@ def main():
             output = run_ui_track(target_path, fmt)
         elif args.track == "tests":
             output = run_tests_track(target_path, fmt, top=args.top)
+        elif args.track == "clones":
+            output = run_clones_track(target_path, fmt)
+        elif args.track == "dead-code":
+            from tools.audit.dead_code import run_dead_code_scan, format_dead_code_report
+            report = run_dead_code_scan(target_path)
+            output = format_dead_code_report(report, fmt)
         elif args.track == "all":
             output = run_all_tracks(target_path, fmt, top=args.top)
         else:
