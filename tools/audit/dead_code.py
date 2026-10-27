@@ -25,18 +25,47 @@ class DeadCodeReport:
 
 def parse_knip_json(raw_json: str) -> DeadCodeReport:
     """Parses Knip JSON output into structured DeadCodeReport."""
+    if not raw_json:
+        return DeadCodeReport(unused_files=[], unused_exports=[], unused_types=[], engine="knip")
+
+    idx = raw_json.find("{")
+    if idx == -1:
+        return DeadCodeReport(unused_files=[], unused_exports=[], unused_types=[], engine="knip")
+
     try:
-        data = json.loads(raw_json)
+        data = json.loads(raw_json[idx:])
     except Exception:
         return DeadCodeReport(unused_files=[], unused_exports=[], unused_types=[], engine="knip")
 
-    unused_files: List[str] = data.get("files", [])
+    # Collect unused files deduplicated preserving insertion order
+    unused_files_set = set()
+    unused_files: List[str] = []
+
+    def _add_file(fname: Optional[str]):
+        if fname and fname not in unused_files_set:
+            unused_files_set.add(fname)
+            unused_files.append(fname)
+
+    # Top-level files
+    for f_item in data.get("files", []):
+        if isinstance(f_item, dict):
+            _add_file(f_item.get("name") or f_item.get("file"))
+        elif isinstance(f_item, str):
+            _add_file(f_item)
+
     unused_exports: List[Dict[str, Any]] = []
     unused_types: List[Dict[str, Any]] = []
 
     issues = data.get("issues", [])
     for issue in issues:
         file_path = issue.get("file", "")
+        # Knip v5/v6 per-issue files
+        for f_item in issue.get("files", []):
+            if isinstance(f_item, dict):
+                _add_file(f_item.get("name") or file_path)
+            elif isinstance(f_item, str):
+                _add_file(f_item)
+
         for exp in issue.get("exports", []):
             item = dict(exp)
             if "file" not in item and file_path:
@@ -58,22 +87,25 @@ def parse_knip_json(raw_json: str) -> DeadCodeReport:
 
 def run_dead_code_scan(repo_root: Union[Path, str], timeout_sec: int = 60) -> DeadCodeReport:
     """
-    Executes 'npx --no-install knip --reporter json' if package.json exists.
+    Executes knip with JSON reporter if package.json exists.
+    Tries 'npx --no-install knip --reporter json' then 'npx --yes knip --reporter json'.
     If knip is missing or fails, falls back cleanly to GraphBuilder orphan scan.
     """
     root = Path(repo_root)
     pkg_json = root / "package.json"
 
     if pkg_json.exists() and shutil.which("npx"):
-        try:
-            cmd = ["npx", "--no-install", "knip", "--reporter", "json"]
-            res = subprocess.run(cmd, cwd=str(root), capture_output=True, text=True, timeout=timeout_sec)
-            # Knip exits with non-zero when issues are found, but still outputs JSON in stdout
-            out = res.stdout.strip()
-            if out.startswith("{") and "issues" in out:
-                return parse_knip_json(out)
-        except Exception:
-            pass
+        for cmd in (
+            ["npx", "--no-install", "knip", "--reporter", "json"],
+            ["npx", "--yes", "knip", "--reporter", "json"],
+        ):
+            try:
+                res = subprocess.run(cmd, cwd=str(root), capture_output=True, text=True, timeout=timeout_sec)
+                out = res.stdout.strip()
+                if "{" in out and '"issues"' in out:
+                    return parse_knip_json(out)
+            except Exception:
+                pass
 
     # Fallback to GraphBuilder orphan component / file detection
     try:
