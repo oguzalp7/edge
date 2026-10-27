@@ -33,6 +33,62 @@ from tools.brigade.fsm import BrigadeFSM
 
 
 class TestBrigadeModels(unittest.TestCase):
+    def test_canonical_roles_roster(self):
+        expected_roles = {
+            "spec_writer",
+            "researcher",
+            "seam_architect",
+            "coder",
+            "surgeon",
+            "examiner",
+            "qa_engineer",
+        }
+        actual_roles = {r.value for r in StationRole}
+        self.assertEqual(actual_roles, expected_roles)
+        self.assertEqual(len(StationRole), 7)
+        self.assertEqual(StationRole.EXAMINER.value, "examiner")
+        self.assertFalse(hasattr(StationRole, "EXPEDITER"))
+        self.assertFalse(hasattr(StationRole, "STANDARDS_EXAMINER"))
+        self.assertFalse(hasattr(StationRole, "SPEC_EXAMINER"))
+
+    def test_legacy_brigade_state_migration(self):
+        legacy_data = {
+            "version": "1.0.0",
+            "repo_path": "/test/legacy-repo",
+            "base_branch": "main",
+            "current_state": "REVIEW",
+            "stations": {
+                "expediter": {
+                    "role": "expediter",
+                    "conversation_id": "legacy-exp-1",
+                    "name": "Expediter Station",
+                },
+                "standards_examiner": {
+                    "role": "standards_examiner",
+                    "conversation_id": "legacy-std-1",
+                    "name": "Standards Examiner Station",
+                },
+                "spec_examiner": {
+                    "role": "spec_examiner",
+                    "conversation_id": "legacy-spec-1",
+                    "name": "Spec Examiner Station",
+                },
+                "surgeon": {
+                    "role": "surgeon",
+                    "conversation_id": "legacy-surg-1",
+                    "name": "Surgeon Station",
+                },
+            },
+        }
+        restored = BrigadeState.from_dict(legacy_data)
+        self.assertNotIn("expediter", restored.stations)
+        self.assertNotIn("standards_examiner", restored.stations)
+        self.assertNotIn("spec_examiner", restored.stations)
+        self.assertIn("examiner", restored.stations)
+        self.assertIn("surgeon", restored.stations)
+        self.assertEqual(restored.stations["examiner"].role, "examiner")
+        self.assertEqual(restored.stations["examiner"].conversation_id, "legacy-std-1")
+
     def test_station_serialization(self):
         s = Station(role="surgeon", conversation_id="conv-123", name="Chef Surgeon")
         d = s.to_dict()
@@ -189,13 +245,12 @@ class TestStationRegistry(unittest.TestCase):
         self.assertIn("src/actions/bookings.ts", surgeon_prompt)
         self.assertIn("Do not touch schema", surgeon_prompt)
 
-        std_prompt = StationRegistry.build_standards_review_prompt(ticket, "feat/clean")
-        self.assertIn("STANDARDS_EXAMINER", std_prompt)
-        self.assertIn("git diff feat/clean..HEAD", std_prompt)
-
-        spec_prompt = StationRegistry.build_spec_review_prompt(ticket, "feat/clean")
-        self.assertIn("SPEC_EXAMINER", spec_prompt)
-        self.assertIn("MigrationGate Invariant", spec_prompt)
+        examiner_prompt = StationRegistry.build_examiner_prompt(ticket, "feat/clean")
+        self.assertIn("EXAMINER", examiner_prompt)
+        self.assertIn("git diff feat/clean..HEAD", examiner_prompt)
+        self.assertIn("coding_standards.md", examiner_prompt)
+        self.assertIn("MigrationGate Invariant", examiner_prompt)
+        self.assertIn("EXAMINER REVIEW: PASS", examiner_prompt)
 
         finding = ReviewFinding(
             axis="standards",
@@ -208,10 +263,6 @@ class TestStationRegistry(unittest.TestCase):
         polish_prompt = StationRegistry.build_polish_prompt(ticket, [finding])
         self.assertIn("Polish Remediation", polish_prompt)
         self.assertIn("Missing transaction", polish_prompt)
-
-        expediter_prompt = StationRegistry.build_expediter_prompt(ticket, "feat/clean")
-        self.assertIn("EXPEDITER", expediter_prompt)
-        self.assertIn("git merge --squash", expediter_prompt)
 
         spec_writer_prompt = StationRegistry.build_spec_writer_prompt(ticket, "User wants payment wallet")
         self.assertIn("SPEC_WRITER", spec_writer_prompt)

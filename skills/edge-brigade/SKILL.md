@@ -1,6 +1,6 @@
 ---
 name: edge-brigade
-description: Michelin Station (Brigade de Cuisine) deterministic State Machine Engine. Orchestrates persistent station workers (Surgeon, Standards Examiner, Spec Examiner, Expediter) with hardcoded state transitions governed by OS exit codes and data invariants rather than LLM self-assessment.
+description: Michelin Station (Brigade de Cuisine) deterministic State Machine Engine. Orchestrates persistent station workers (Spec Writer, Researcher, Seam Architect, Coder, Surgeon, Examiner, QA Engineer) with hardcoded state transitions governed by OS exit codes and data invariants rather than LLM self-assessment.
 ---
 
 # 🏛️ /edge-brigade — Michelin Station & Deterministic State Machine Engine
@@ -18,8 +18,7 @@ Instead of spawning disposable generalist agents that try to do everything and e
 
 ```
   +------------------------------------------------------------------------+
-  |                           EXPEDITER (Aboyeur)                          |
-  |        Triage Tickets --> Dispatch Stations --> Squash Merge --> PR    |
+  |            DETERMINISTIC FSM DELIVERY (brigade finish-slice)           |
   +-------------------+--------------------------------+-------------------+
                       |                                |
        [TRACK: FEATURE]                                [TRACK: REFACTOR]
@@ -33,44 +32,43 @@ Instead of spawning disposable generalist agents that try to do everything and e
                       +----------------+---------------+
                                        |
                                        v
-       +------------------------------+ +------------------------------+
-       |  STANDARDS EXAMINER (Sous)   | |    SPEC EXAMINER (Maitre d') |
-       |  Fowler Smells & Standards   | |    3-Tier Decoupling & Invar |
-       +------------------------------+ +------------------------------+
+       +---------------------------------------------------------------+
+       |                   EXAMINER (Sous / Maitre d')                 |
+       |       Unified Dual-Axis Standards & Architectural Invariants  |
+       +-------------------------------+-------------------------------+
                                        |
                                        v
        +---------------------------------------------------------------+
        |                 QA_ENGINEER (Sommelier)                       |
        |     E2E Browser QA (chrome-devtools-axi) & frontier-axi       |
+       +-------------------------------+-------------------------------+
+                                       |
+                                       v
+       +---------------------------------------------------------------+
+       |             Deterministic Merge (brigade finish-slice)        |
        +---------------------------------------------------------------+
 ```
 
-### The 9 Brigade Stations (Kadro Yapılanması):
-1. **EXPEDITER (`expediter` / Aboyeur)**:
-   - **Role:** Kitchen coordinator and dispatcher.
-   - **Constraint:** Squash-merges verified branches, refreshes debt ledgers, and triggers PR creation via `no-mistakes`.
-2. **SPEC_WRITER (`spec_writer`)**:
+### The 7 Brigade Stations (Kadro Yapılanması):
+1. **SPEC_WRITER (`spec_writer`)**:
    - **Role:** Ubiquitous language translator & N-Spec slicer.
    - **Constraint:** Condenses user story into 3-4 plain English sentences. Enforces Pocock/Dexter Horthy vertical slice completeness (DB -> Core -> API -> UI). **Visual Approval Gate (`lavish-axi`):** If UI is touched, MUST author interactive HTML in `.lavish/<feature>.html` and obtain user approval before coding.
-3. **RESEARCHER (`researcher`)**:
+2. **RESEARCHER (`researcher`)**:
    - **Role:** Deep codebase exploration, AST tracing, external documentation verification, and root cause analysis.
-   - **Constraint:** Zero production code mutation; delivers evidence-backed seam recommendations.
-4. **SEAM_ARCHITECT (`seam_architect`)**:
+   - **Constraint:** Zero production code mutation; delivers evidence-backed seam recommendations. Strictly read-only.
+3. **SEAM_ARCHITECT (`seam_architect`)**:
    - **Role:** Michael Feathers seam architect & contract author.
    - **Constraint:** Declares TypeScript interfaces and writes **RED Unit/Contract Tests** that initially fail (TDD anchor).
-5. **CODER (`coder`)**:
+4. **CODER (`coder`)**:
    - **Role:** Production code worker.
    - **Constraint:** Turns red tests GREEN with minimal, clean code. **Test Immutability:** Cannot modify or loosen test assertions.
-6. **SURGEON (`surgeon` / Chef de Partie)**:
+5. **SURGEON (`surgeon` / Chef de Partie)**:
    - **Role:** Refactor & structural cleanup specialist.
-   - **Constraint:** Decouples bloated controllers and extracts domain repositories. (Target contraction $\Delta	ext{SLOC} < 0$ is decoupled; structural cleanliness and test greenness govern quality).
-7. **STANDARDS_EXAMINER (`standards_examiner` / Sous Chef)**:
-   - **Role:** Dual-axis review against `coding_standards.md` and Fowler code smells.
-   - **Constraint:** Differentiates hard standard breaches (index signature tampering, missing transactions) from baseline smells.
-8. **SPEC_EXAMINER (`spec_examiner` / Maitre d')**:
-   - **Role:** Architectural invariants audit and scope creep detection.
-   - **Constraint:** Verifies 3-tier decoupling and ensures implementation does not exceed spec boundaries.
-9. **QA_ENGINEER (`qa_engineer` / Sommelier)**:
+   - **Constraint:** Decouples bloated controllers and extracts domain repositories. Bound by the **MigrationGate Invariant** (never mutates schema or migrations).
+6. **EXAMINER (`examiner` / Sous Chef & Maître d')**:
+   - **Role:** Unified dual-axis review: `coding_standards.md`/Fowler code smells and architectural invariants/scope creep in a single concise pass (< 350 words).
+   - **Constraint:** Strictly read-only. Distinguishes hard violations from judgement calls; skips deterministic checks enforced by `gate.py`.
+7. **QA_ENGINEER (`qa_engineer` / Sommelier)**:
    - **Role:** End-to-end browser verification, visual quality assurance, and user journey testing.
    - **Protocol:** Receives translated user scenarios mapped to project ubiquitous domain vocabulary by the Orchestrator. Drives live browser interactions via `chrome-devtools-axi` (primary) or `chrome-devtools-mcp` (fallback).
    - **Constraint:** Strictly zero production code mutation (`src/**`, `app/**`, `lib/**`, `db/**`). Documents defects with reproduction steps, network payloads, console errors, and screenshots. Parks non-blocking UX issues to `frontier-axi`.
@@ -141,8 +139,7 @@ brigade init /path/to/repo --base-branch development
 
 # 2. Register persistent station workers (using their conversation_id)
 brigade register /path/to/repo --role surgeon --conversation-id <id> --name "Refactor Surgeon"
-brigade register /path/to/repo --role standards_examiner --conversation-id <id> --name "Standards Examiner"
-brigade register /path/to/repo --role spec_examiner --conversation-id <id> --name "Spec Examiner"
+brigade register /path/to/repo --role examiner --conversation-id <id> --name "Examiner"
 brigade register /path/to/repo --role qa_engineer --conversation-id <id> --name "QA Sommelier"
 
 # 3. View registered stations

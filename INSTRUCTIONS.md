@@ -47,11 +47,11 @@ Orkestratör, görevin türüne göre istasyonları sırayla devreye sokar:
                   3. CODER (Kırmızı Testi Yeşile Çevirir)
                      │ (Test assertion'larını gevşetmesi yasaktır)
                      ▼
-                  4. STANDARDS & SPEC EXAMINERS (Çift Eksenli İnceleme)
+                  4. EXAMINER (Tek Geçişte Çift Eksenli Standart & Şartname İncelemesi)
                      ▼
                   5. QA_ENGINEER (Canlı Tarayıcı E2E Testi)
                      ▼
-                  6. EXPEDITER (Squash-Merge & no-mistakes ile PR)
+                  6. Deterministik Teslimat (`brigade finish-slice`)
 ```
 
 ### 🧬 B. Refaktör Akışı (Structural Refactor Track)
@@ -61,7 +61,7 @@ Orkestratör, görevin türüne göre istasyonları sırayla devreye sokar:
                      ▼
                   2. Karakterizasyon Testleri Doğrulaması (Sıfır Davranış Değişimi)
                      ▼
-                  3. STANDARDS EXAMINER & EXPEDITER
+                  3. EXAMINER & Deterministik Teslimat (`brigade finish-slice`)
 ```
 
 ### 🐞 C. Hata Ayıklama Akışı (Bug-Fix Track)

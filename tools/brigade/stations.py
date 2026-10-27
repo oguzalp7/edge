@@ -250,55 +250,39 @@ CONSTRAINTS (STRICT):
 """
 
     @staticmethod
-    def build_standards_review_prompt(ticket: Ticket, base_branch: str) -> str:
-        """Constructs a standards review ticket for the STANDARDS_EXAMINER station."""
-        return f"""You are the STANDARDS_EXAMINER station worker in Edge Brigade.
+    def build_examiner_prompt(ticket: Ticket, base_branch: str) -> str:
+        """Constructs a unified dual-axis review ticket for the EXAMINER station."""
+        return f"""You are the EXAMINER station worker in Edge Brigade.
 
 DIFF INSPECTION:
 Target Diff: `git diff {base_branch}..HEAD`
 
-STANDARDS SOURCES:
+REVIEW SOURCES:
 1. `coding_standards.md` in repository root.
 2. Fowler Code Smell Baseline (Mysterious Name, Duplicated Code, Feature Envy, Data Clumps, Primitive Obsession, Message Chains, Middle Man).
+3. Architectural Specification (`skills/edge-core-refactor/SKILL.md` or `edge-ui-refactor/SKILL.md`).
 
 TICKET CONTEXT:
 - Refactoring Ticket: {ticket.ticket_id}
 - Domain: {ticket.domain}
 - Target File: {ticket.target_file}
 
-REVIEW DIRECTIVE:
-1. Verify if the diff complies with `coding_standards.md` (e.g. Â§4.3 no index signature tampering, explicit types, transaction safety).
-2. Spot baseline smells in the diff.
-3. Distinguish HARD VIOLATIONS from judgement calls. Skip anything automated tooling enforces.
-4. Keep the report concise (under 300 words). If clean, state: 'STANDARDS REVIEW: PASS'.
-"""
+DUAL-AXIS REVIEW DIRECTIVES:
+Axis 1 (Standards & Fowler Smells):
+1. Verify if the diff complies with `coding_standards.md` (explicit types, transaction safety, error boundaries, zero raw leaks).
+2. Spot Fowler code smells in the diff.
+3. Distinguish HARD VIOLATIONS from advisory guidance; skip deterministic checks already enforced by gate.py or compiler.
 
-    @staticmethod
-    def build_spec_review_prompt(ticket: Ticket, base_branch: str) -> str:
-        """Constructs an architectural spec review ticket for the SPEC_EXAMINER station."""
-        return f"""You are the SPEC_EXAMINER station worker in Edge Brigade.
-
-DIFF INSPECTION:
-Target Diff: `git diff {base_branch}..HEAD`
-
-SPEC SOURCE:
-`skills/edge-core-refactor/SKILL.md` (or `edge-ui-refactor/SKILL.md`)
-
-TICKET CONTEXT:
-- Refactoring Ticket: {ticket.ticket_id}
-- Domain: {ticket.domain}
-- Target File: {ticket.target_file}
-
-ARCHITECTURAL INVARIANTS TO AUDIT:
+Axis 2 (Architectural & Spec Boundaries):
 1. MigrationGate Invariant: Did the diff touch any file in `src/db/schema/*` or `drizzle/*`? (Immediate failure).
 2. Database Leak Elimination: Did any `db.select`, `db.insert`, `db.update`, `db.delete` remain in action controller?
 3. Target File Contraction: Did `{ticket.target_file}` contract?
 4. Zero-Wrapper: Are there useless pass-through services?
 5. Scope Creep: Did the diff touch anything outside the ticket domain?
 
-REVIEW DIRECTIVE:
-Report missing requirements, scope creep, or invalid implementations.
-Keep the report concise (under 300 words). If clean, state: 'SPEC REVIEW: PASS'.
+REPORT DISCIPLINE:
+Keep findings concise (under 350 words). Categorize findings by severity (CRITICAL, WARNING, ADVISORY).
+If clean, state: 'EXAMINER REVIEW: PASS'.
 """
 
     @staticmethod
@@ -324,27 +308,6 @@ INSTRUCTIONS:
 3. Commit the changes:
    `git commit -am "refactor({ticket.domain}): polish review findings ({ticket.ticket_id})"`
 4. Report the resulting git diff and test verification output.
-"""
-
-    @staticmethod
-    def build_expediter_prompt(ticket: Ticket, base_branch: str) -> str:
-        """Constructs delivery instructions for the EXPEDITER station."""
-        return f"""You are the EXPEDITER station worker in Edge Brigade.
-
-MISSION:
-Finalize and deliver ticket `{ticket.ticket_id}` (`{ticket.branch_name}`) to `{base_branch}`.
-
-EXECUTION PROTOCOL:
-1. Checkout `{base_branch}`.
-2. Squash-merge `{ticket.branch_name}`:
-   `git merge --squash {ticket.branch_name}`
-   `git commit -m "refactor({ticket.domain}): resolve {ticket.rule_id} in {ticket.target_file} ({ticket.ticket_id})"`
-3. Refresh radar debt ledger:
-   `python tools/radar/cli.py scan .`
-4. Confirm monotonic health score improvement and that `{ticket.fingerprint}` is RESOLVED.
-5. Delete temporary refactor branch:
-   `git branch -D {ticket.branch_name}`
-6. If PR creation requested, hand off to `no-mistakes` or open PR.
 """
 
     @staticmethod

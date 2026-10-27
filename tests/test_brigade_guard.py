@@ -31,11 +31,13 @@ class TestBrigadeGuard(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def test_normalize_role(self):
-        self.assertEqual(guard.normalize_role("expediter"), "EXPEDITER")
-        self.assertEqual(guard.normalize_role("Quality & Test Isolation Worker"), "EXPEDITER")
-        self.assertEqual(guard.normalize_role("aboyeur"), "EXPEDITER")
-        self.assertEqual(guard.normalize_role("Standards Examiner"), "STANDARDS_EXAMINER")
-        self.assertEqual(guard.normalize_role("spec_examiner"), "SPEC_EXAMINER")
+        self.assertIsNone(guard.normalize_role("expediter"))
+        self.assertEqual(guard.normalize_role("Standards Examiner"), "EXAMINER")
+        self.assertEqual(guard.normalize_role("spec_examiner"), "EXAMINER")
+        self.assertEqual(guard.normalize_role("Examiner"), "EXAMINER")
+        self.assertEqual(guard.normalize_role("Code Reviewer"), "EXAMINER")
+        self.assertEqual(guard.normalize_role("Sous Chef"), "EXAMINER")
+        self.assertEqual(guard.normalize_role("Maitre d"), "EXAMINER")
         self.assertEqual(guard.normalize_role("Refactor Surgeon"), "SURGEON")
         self.assertEqual(guard.normalize_role("Coder"), "CODER")
         self.assertEqual(guard.normalize_role("Seam Architect"), "SEAM_ARCHITECT")
@@ -185,7 +187,7 @@ class TestBrigadeGuard(unittest.TestCase):
             self.assertEqual(res["decision"], "allow")
 
     def test_examiners_denied_any_write(self):
-        for examiner in ["SPEC_EXAMINER", "STANDARDS_EXAMINER", "RESEARCHER"]:
+        for examiner in ["EXAMINER", "RESEARCHER"]:
             payload = {
                 "conversationId": "exam-1",
                 "toolCall": {
@@ -198,18 +200,21 @@ class TestBrigadeGuard(unittest.TestCase):
                 self.assertEqual(res["decision"], "deny")
                 self.assertIn("salt-okunur", res["reason"])
 
-    def test_expediter_denied_src_write(self):
-        payload = {
-            "conversationId": "exp-1",
-            "toolCall": {
-                "name": "write_to_file",
-                "args": {"TargetFile": "src/actions/booking.ts"}
+    def test_examiner_legacy_aliases_normalized_and_denied_write(self):
+        for legacy_role in ["standards_examiner", "spec_examiner", "sous chef", "maitre d"]:
+            canonical = guard.normalize_role(legacy_role)
+            self.assertEqual(canonical, "EXAMINER")
+            payload = {
+                "conversationId": "exam-legacy",
+                "toolCall": {
+                    "name": "write_file",
+                    "args": {"TargetFile": "src/actions/booking.ts"}
+                }
             }
-        }
-        with patch.object(guard, "detect_session_role", return_value=("EXPEDITER", "test")):
-            res = guard.handle_pre_tool(payload)
-            self.assertEqual(res["decision"], "deny")
-            self.assertIn("EXPEDITER BOUNDARY GUARD", res["reason"])
+            with patch.object(guard, "detect_session_role", return_value=(canonical, "test")):
+                res = guard.handle_pre_tool(payload)
+                self.assertEqual(res["decision"], "deny")
+                self.assertIn("salt-okunur", res["reason"])
 
     def test_spec_writer_boundary(self):
         # Denied in src/
@@ -327,40 +332,40 @@ class TestBrigadeGuard(unittest.TestCase):
             self.assertEqual(res["decision"], "allow")
 
     def test_anti_graveyard_station_reuse(self):
-        # Step 1: No expediter active yet -> invoke_subagent allowed
+        # Step 1: No examiner active yet -> invoke_subagent allowed
         payload_first = {
             "conversationId": "orch-parent",
             "toolCall": {
                 "name": "invoke_subagent",
                 "args": {
-                    "Subagents": json.dumps([{"Role": "Expediter", "Prompt": "Run tests"}])
+                    "Subagents": json.dumps([{"Role": "Examiner", "Prompt": "Review diff"}])
                 }
             }
         }
         res1 = guard.handle_pre_tool(payload_first)
         self.assertEqual(res1["decision"], "allow")
 
-        # Step 2: Register the spawned expediter subagent
+        # Step 2: Register the spawned examiner subagent
         guard.register_station(
-            conversation_id="conv-exp-456",
-            role="EXPEDITER",
+            conversation_id="conv-exam-456",
+            role="EXAMINER",
             parent_cid="orch-parent"
         )
 
-        # Step 3: Second call to invoke_subagent for Expediter -> HARD DENIAL
+        # Step 3: Second call to invoke_subagent for Examiner (using legacy alias) -> HARD DENIAL
         payload_second = {
             "conversationId": "orch-parent",
             "toolCall": {
                 "name": "invoke_subagent",
                 "args": {
-                    "Subagents": json.dumps([{"Role": "Quality & Test Isolation Worker", "Prompt": "Run more tests"}])
+                    "Subagents": json.dumps([{"Role": "Standards Examiner", "Prompt": "Check standards"}])
                 }
             }
         }
         res2 = guard.handle_pre_tool(payload_second)
         self.assertEqual(res2["decision"], "deny")
         self.assertIn("PERSISTENT STATION REUSE REQUIRED", res2["reason"])
-        self.assertIn("conv-exp-456", res2["reason"])
+        self.assertIn("conv-exam-456", res2["reason"])
         self.assertIn("send_message", res2["reason"])
 
         # Step 4: Spawning another role (e.g. Surgeon) is allowed
@@ -413,12 +418,12 @@ class TestBrigadeGuard(unittest.TestCase):
             self.assertIn("Canonical Brigade Stations", msg)
             self.assertIn("Anti-Graveyard Protocol", msg)
 
-        # Expediter station worker
-        with patch.object(guard, "detect_session_role", return_value=("EXPEDITER", "test")):
+        # Examiner station worker
+        with patch.object(guard, "detect_session_role", return_value=("EXAMINER", "test")):
             res = guard.handle_pre_invocation({})
             self.assertTrue(len(res["injectSteps"]) > 0)
             msg = res["injectSteps"][0]["ephemeralMessage"]
-            self.assertIn("persistent EXPEDITER station worker", msg)
+            self.assertIn("persistent EXAMINER station worker", msg)
 
         # QA Engineer station worker
         with patch.object(guard, "detect_session_role", return_value=("QA_ENGINEER", "test")):

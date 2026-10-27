@@ -6,14 +6,12 @@ from datetime import datetime, timezone
 
 
 class StationRole(str, Enum):
-    EXPEDITER = "expediter"                   # Aboyeur: Station coordination, squash-merge, PR delivery
     SPEC_WRITER = "spec_writer"               # Translator & N-Spec Slicer (with lavish-axi UI approval)
     RESEARCHER = "researcher"                 # Deep Research & Root Cause Analyzer
     SEAM_ARCHITECT = "seam_architect"         # Contract & Red Test Author (TDD anchor)
     CODER = "coder"                           # Coding Worker (Turns red tests green)
     SURGEON = "surgeon"                       # Chef de Partie: Code refactoring & DB leak extraction
-    STANDARDS_EXAMINER = "standards_examiner" # Sous Chef: Fowler smells & coding standards verification
-    SPEC_EXAMINER = "spec_examiner"           # Maître d': SKILL.md spec & architectural invariants
+    EXAMINER = "examiner"                     # Sous Chef / Maître d': Unified standards & spec verification
     QA_ENGINEER = "qa_engineer"               # Sommelier: E2E Browser QA & Visual QA
 
 
@@ -176,7 +174,18 @@ class BrigadeState:
         if "active_ticket" in raw and raw["active_ticket"]:
             raw["active_ticket"] = Ticket.from_dict(raw["active_ticket"])
         if "stations" in raw and isinstance(raw["stations"], dict):
-            raw["stations"] = {k: Station.from_dict(v) for k, v in raw["stations"].items()}
+            migrated_stations: Dict[str, Station] = {}
+            for k, v in raw["stations"].items():
+                if k == "expediter":
+                    continue
+                if k in ("standards_examiner", "spec_examiner"):
+                    if "examiner" not in migrated_stations:
+                        v_copy = dict(v) if isinstance(v, dict) else (v.to_dict() if hasattr(v, "to_dict") else dict(v))
+                        v_copy["role"] = StationRole.EXAMINER.value
+                        migrated_stations["examiner"] = Station.from_dict(v_copy)
+                    continue
+                migrated_stations[k] = Station.from_dict(v) if isinstance(v, dict) else v
+            raw["stations"] = migrated_stations
         if "review_findings" in raw and isinstance(raw["review_findings"], list):
             raw["review_findings"] = [ReviewFinding.from_dict(f) for f in raw["review_findings"]]
         if "history" in raw and isinstance(raw["history"], list):

@@ -49,11 +49,11 @@ suggested_skills:
         )
         ```
         Dönen `conversationId`'yi hemen `brigade register <repo> --role <role> --conversation-id <id>` ile `.edge/brigade.json`'a kaydet.
-     4. **Kanonik İstasyon Zorunluluğu (Ad-Hoc Rol Yasağı):** Asla `Database Operator`, `Quality Worker` gibi ad-hoc roller türetme. Tüm sistem operasyonlarını, migration ve test koşumlarını `EXPEDITER`'a, araştırmaları `RESEARCHER`'a, refaktörleri `SURGEON`'a delege et.
+     4. **Kanonik İstasyon Zorunluluğu (Ad-Hoc Rol Yasağı):** Asla `Database Operator`, `Quality Worker` gibi ad-hoc roller türetme. 7 Kanonik İstasyon (`SPEC_WRITER`, `RESEARCHER`, `SEAM_ARCHITECT`, `CODER`, `SURGEON`, `EXAMINER`, `QA_ENGINEER`) kullan. Teslimat ve entegrasyon deterministik CLI (`brigade finish-slice`) ile yürütülür.
    - **İş Akışı Zincirleri:**
-     - **Feature İşi:** `SPEC_WRITER` $\rightarrow$ `SEAM_ARCHITECT` (Kırmızı Test) $\rightarrow$ **[TREEHOUSE WORKTREE GATE]** $\rightarrow$ `CODER` (Worktree'de Yeşil Test) $\rightarrow$ `EXAMINERS` $\rightarrow$ `QA_ENGINEER` $\rightarrow$ `EXPEDITER` (`finish-slice`).
-     - **Refactor İşi:** **[TREEHOUSE WORKTREE GATE]** $\rightarrow$ `SURGEON` (Worktree'de Cerrahi) $\rightarrow$ `EXAMINERS` $\rightarrow$ `EXPEDITER` (`finish-slice`).
-     - **Bug-Fix İşi:** `RESEARCHER` (RCA) $\rightarrow$ `SEAM_ARCHITECT` (Karakterizasyon Testi) $\rightarrow$ **[TREEHOUSE WORKTREE GATE]** $\rightarrow$ `CODER` $\rightarrow$ `EXAMINERS` $\rightarrow$ `QA_ENGINEER` $\rightarrow$ `EXPEDITER`.
+     - **Feature İşi:** `SPEC_WRITER` $\rightarrow$ `SEAM_ARCHITECT` (Kırmızı Test) $\rightarrow$ **[TREEHOUSE WORKTREE GATE]** $\rightarrow$ `CODER` (Worktree'de Yeşil Test) $\rightarrow$ `EXAMINER` $\rightarrow$ `QA_ENGINEER` $\rightarrow$ Deterministik Teslimat (`brigade finish-slice`).
+     - **Refactor İşi:** **[TREEHOUSE WORKTREE GATE]** $\rightarrow$ `SURGEON` (Worktree'de Cerrahi) $\rightarrow$ `EXAMINER` $\rightarrow$ Deterministik Teslimat (`brigade finish-slice`).
+     - **Bug-Fix İşi:** `RESEARCHER` (RCA) $\rightarrow$ `SEAM_ARCHITECT` (Karakterizasyon Testi) $\rightarrow$ **[TREEHOUSE WORKTREE GATE]** $\rightarrow$ `CODER` $\rightarrow$ `EXAMINER` $\rightarrow$ `QA_ENGINEER` $\rightarrow$ Deterministik Teslimat (`brigade finish-slice`).
      - **QA / E2E Doğrulama:** `QA_ENGINEER` (`chrome-devtools-axi` + Fast-Forward Codegen Replay + Scraper Anomaly Journaling).
 
 5. **Bağlam Isısı & Güvenli Duraklatma (Context Heat Sentinel):**
@@ -73,8 +73,7 @@ brigade status <repo_path>
 brigade register <repo_path> --role spec_writer --conversation-id <id>
 brigade register <repo_path> --role seam_architect --conversation-id <id>
 brigade register <repo_path> --role coder --conversation-id <id>
-brigade register <repo_path> --role standards_examiner --conversation-id <id>
-brigade register <repo_path> --role spec_examiner --conversation-id <id>
+brigade register <repo_path> --role examiner --conversation-id <id>
 brigade register <repo_path> --role qa_engineer --conversation-id <id>
 
 # 3. Dikey Dilimi Başlat (Deterministik Olarak Treehouse Worktree Kiralar)

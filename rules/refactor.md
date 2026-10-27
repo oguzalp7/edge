@@ -1,6 +1,6 @@
 # 🧬 Refactoring Domain Protocol & Safety Manual
 
-Bu doküman, otonom ve yarı-otonom refaktör görevlerini icra eden tüm alt-ajanlar (`SURGEON`, `STANDARDS_EXAMINER`) için operasyonel rehberdir.
+Bu doküman, otonom ve yarı-otonom refaktör görevlerini icra eden tüm alt-ajanlar (`SURGEON`, `EXAMINER`) için operasyonel rehberdir.
 
 ---
 

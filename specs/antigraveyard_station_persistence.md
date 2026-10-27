@@ -72,7 +72,7 @@ To achieve industrial reliability, determinism, and token conservation, this spe
 
 In a Michelin-starred kitchen, stations are permanent fixtures. The Saucier does not turn into a Pâtissier midway through dinner service. Similarly, in Edge Brigade:
 1. Each station worker is initialized with a hyper-specialized role definition, strict filesystem boundaries, and specialized tooling.
-2. A station worker does not cross into another station's territory (e.g., `EXPEDITER` cannot edit `src/`, `CODER` cannot alter tests in `tests/`, `SPEC_EXAMINER` is strictly read-only).
+2. A station worker does not cross into another station's territory (e.g., `EXAMINER` is strictly read-only, `CODER` cannot alter tests in `tests/`).
 3. The Orchestrator does not spawn a new worker when a new dish (ticket) arrives. It sends the ticket package to the existing, waiting station worker via `send_message`.
 
 ### 3.2 The Zero-Handoff Invariant
@@ -302,18 +302,16 @@ For each discovered subagent `conversationId`, the scanner locates the subagent 
    If a subagent has just been spawned and its transcript file is not yet flushed to disk, `tokens = 0` (GREEN).
 
 ### 6.4 Canonical Role Normalization
-The scanner and guard map all variations of input role names to the canonical 9 Edge Brigade stations:
+The scanner and guard map all variations of input role names to the canonical 7 Edge Brigade stations:
 
 ```python
 CANONICAL_ROLES: Dict[str, List[str]] = {
-    "EXPEDITER": ["expediter", "aboyeur", "coordinator", "dispatcher", "isolation", "test runner", "qa runner"],
     "SPEC_WRITER": ["spec_writer", "spec writer", "spec-writer", "translator", "slicer", "n-spec"],
     "RESEARCHER": ["researcher", "research", "recon", "reconnaissance", "investigator", "rca", "root cause"],
     "SEAM_ARCHITECT": ["seam_architect", "seam architect", "seam-architect", "contract", "test author", "red test", "tdd"],
     "CODER": ["coder", "programmer", "worker", "implementer", "production worker"],
     "SURGEON": ["surgeon", "refactor", "refactorer", "chef de partie", "decoupling"],
-    "STANDARDS_EXAMINER": ["standards_examiner", "standards examiner", "standards-examiner", "sous chef", "smell auditor"],
-    "SPEC_EXAMINER": ["spec_examiner", "spec examiner", "spec-examiner", "maitre d", "architectural examiner"],
+    "EXAMINER": ["examiner", "reviewer", "code reviewer", "standards_examiner", "standards examiner", "standards-examiner", "spec_examiner", "spec examiner", "spec-examiner", "sous chef", "maitre d"],
     "QA_ENGINEER": ["qa_engineer", "qa", "e2e", "e2e_tester", "sommelier", "inspector", "test_agent", "qa agent"],
 }
 ```

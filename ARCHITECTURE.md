@@ -37,13 +37,12 @@ Edge enforces four unshakeable operational invariants across all workflows:
 
 ## 2. The Michelin Kitchen Brigade (Brigade de Cuisine)
 
-Instead of spawning ephemeral subagents that attempt to solve entire problems in a single noisy prompt, Edge partitions engineering responsibilities across **9 Canonical Stations**:
+Instead of spawning ephemeral subagents that attempt to solve entire problems in a single noisy prompt, Edge partitions engineering responsibilities across **7 Canonical Stations** with deterministic merge delivery:
 
 ```
-                              ┌────────────────────────────────────────┐
-                              │          EXPEDITER (Aboyeur)           │
-                              │ Triage ──► Dispatch ──► Squash ──► PR  │
-                              └───────────────────┬────────────────────┘
+                  ┌───────────────────────────────────────────────────────────────┐
+                  │          DETERMINISTIC FSM DELIVERY (brigade finish-slice)    │
+                  └───────────────────────────────┬───────────────────────────────┘
                                                   │
                   ┌───────────────────────────────┴───────────────────────────────┐
                   ▼                                                               ▼
@@ -57,28 +56,31 @@ Instead of spawning ephemeral subagents that attempt to solve entire problems in
                   └───────────────────────────────┬───────────────────────────────┘
                                                   ▼
                                   ┌───────────────────────────────┐
-                                  │ STANDARDS_EXAMINER (Sous)     │
-                                  │ SPEC_EXAMINER (Maitre d')     │
+                                  │ EXAMINER (Sous / Maitre d')   │
+                                  │ Dual-Axis Standards & Spec    │
                                   └───────────────┬───────────────┘
                                                   ▼
                                   ┌───────────────────────────────┐
                                   │ QA_ENGINEER (Sommelier)       │
                                   │ E2E Browser & Visual Parity   │
+                                  └───────────────┬───────────────┘
+                                                  ▼
+                                  ┌───────────────────────────────┐
+                                  │ Deterministic Merge & PR      │
+                                  │ (brigade finish-slice)        │
                                   └───────────────────────────────┘
 ```
 
-### The 9 Stations Breakdown
+### The 7 Stations Breakdown
 
 | Station | Metaphor | Responsibilities | Constraints |
 | :--- | :--- | :--- | :--- |
-| **`EXPEDITER`** | *Aboyeur* | Ticket intake, stage transitions, squash-merge, and PR filing via `no-mistakes`. | Never writes feature code directly; controls flow. |
 | **`SPEC_WRITER`** | *Menu Planner* | INVEST vertical slicing (DB $\rightarrow$ Core $\rightarrow$ API $\rightarrow$ UI). Interactive HTML prototypes via `lavish-axi`. | Zero production code edits; human must seal UI approval. |
 | **`RESEARCHER`** | *Scout* | AST tracing, dependency analysis, root-cause investigation. | Strictly read-only; delivers actionable seam findings. |
 | **`SEAM_ARCHITECT`** | *Seam Engineer* | Michael Feathers seams, characterization tests, RED unit/contract tests. | Authors tests only; never implements the solution. |
 | **`CODER`** | *Line Cook* | Implements production code to turn red tests GREEN. | Cannot alter or loosen test assertions (Test Immutability). |
 | **`SURGEON`** | *Chef de Partie* | Core architecture refactoring, separating controllers from repositories. | Target contraction $\Delta\text{SLOC} < 0$; 100% test greenness. |
-| **`STANDARDS_EXAMINER`** | *Sous Chef* | Code review against `coding_standards.md` and Fowler smells. | Differentiates hard breaches from subjective nits. |
-| **`SPEC_EXAMINER`** | *Maitre d'* | Scope creep auditing and architectural invariants check. | Rejects out-of-scope additions and contract drift. |
+| **`EXAMINER`** | *Sous Chef / Maître d'* | Unified dual-axis review: `coding_standards.md`/Fowler smells and architectural invariants/scope-creep. | Strictly read-only; differentiates hard breaches from subjective nits. |
 | **`QA_ENGINEER`** | *Sommelier* | End-to-end browser verification via `chrome-devtools-axi`. | Zero production code mutation; parks defects to `frontier-axi`. |
 
 ---
@@ -210,12 +212,11 @@ flowchart TD
 
     subgraph Kitchen ["Michelin Kitchen Stations"]
         direction TB
-        Expediter["EXPEDITER (Dispatcher)"]
         SpecWriter["SPEC_WRITER (Spec & Lavish UI)"]
         SeamArch["SEAM_ARCHITECT (Red Tests)"]
         Coder["CODER (Red to Green)"]
         Surgeon["SURGEON (Refactor & Seams)"]
-        Examiners["STANDARDS & SPEC EXAMINERS"]
+        Examiner["EXAMINER (Dual-Axis Review)"]
         QA["QA_ENGINEER (Browser QA)"]
     end
 
@@ -230,7 +231,7 @@ flowchart TD
 
 ```
 .
-├── agents/             # Canonical station role prompts (expediter, coder, surgeon, etc.)
+├── agents/             # Canonical station role prompts (examiner, coder, surgeon, etc.)
 ├── hooks.json          # Antigravity runtime lifecycle hooks
 ├── plugin.json         # Plugin manifest and metadata
 ├── rules/              # Core doctrines (AGENTS.md, feature.md, refactor.md)

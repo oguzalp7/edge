@@ -8,6 +8,7 @@ import sys
 import json
 import shutil
 import tempfile
+import subprocess
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -129,12 +130,12 @@ class TestFlightRecorder(unittest.TestCase):
 
     def test_escalation_and_captain_decision(self):
         self.recorder.record_escalation(
-            station="spec_examiner",
+            station="examiner",
             reason="Ambiguous business requirement: whether refund requires manager approval.",
         )
         report = self.recorder.load()
         self.assertEqual(report["status"], "PAUSED_ESCALATED")
-        self.assertEqual(report["escalations"][0]["station"], "spec_examiner")
+        self.assertEqual(report["escalations"][0]["station"], "examiner")
 
         self.recorder.record_captain_decision(
             decision="Allow refunds under $50 without manager approval.",
@@ -149,6 +150,11 @@ class TestFsmEscalationAndAbort(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
         self.repo_path = Path(self.temp_dir)
+        self.mock_slot = self.repo_path / "mock-slot"
+        self.mock_slot.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init"], cwd=self.mock_slot, capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.email", "test@test.local"], cwd=self.mock_slot, capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.name", "Test User"], cwd=self.mock_slot, capture_output=True, check=True)
         self.fsm = BrigadeFSM(target_repo=self.repo_path)
         
         # Setup an active ticket
@@ -165,7 +171,7 @@ class TestFsmEscalationAndAbort(unittest.TestCase):
             suggested_fix="Repository extraction",
             test_seam_command="npm run test:unit",
             branch_name="brigade/TICK-ESC-01",
-            worktree_path="/tmp/mock-worktree-slot",
+            worktree_path=str(self.mock_slot),
         )
         self.fsm.state.active_ticket = self.ticket
         self.fsm.state.current_state = CycleState.SURGERY
@@ -205,7 +211,7 @@ class TestFsmEscalationAndAbort(unittest.TestCase):
         # Ensure return_worktree was invoked with force=True
         mock_return.assert_called_once_with(
             self.repo_path,
-            "/tmp/mock-worktree-slot",
+            str(self.mock_slot),
             force=True,
         )
 
@@ -223,7 +229,7 @@ class TestFsmEscalationAndAbort(unittest.TestCase):
         mock_return.return_value = (True, "Returned")
 
         # Fake git repo
-        (self.repo_path / ".git").mkdir()
+        (self.repo_path / ".git").mkdir(exist_ok=True)
 
         # Reset to IDLE
         fsm = BrigadeFSM(self.repo_path)

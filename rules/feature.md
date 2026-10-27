@@ -23,10 +23,10 @@ Bu doküman, `edge` eklentisi bünyesinde **Yeni Davranış & Feature Ekleme** o
    * Seam sözleşmelerine sadık kalarak `src/` altında üretim kodunu yazar.
    * **Test Dokunulmazlığı (Test Immutability):** Seam Architect'in yazdığı test dosyalarına ASLA dokunamaz, testleri yumuşatamaz.
    * Çıkış kriteri: Kırmızı testleri YEŞİLE çevirmek (`vitest` exit 0) ve `npx tsc --noEmit` exit 0.
-6. **STANDARDS_EXAMINER & SPEC_EXAMINER (Çift Eksenli Denetim):**
-   * `coding_standards.md` kurallarını, Fowler kokularını ve 3-tier decoupling mimarisini denetler. 0 kritik bulgu aranır.
-7. **EXPEDITER (Teslimat & Entegrasyon):**
-   * Doğrulanan dalı squash-merge eder, `no-mistakes` kapısıyla PR'a hazırlar.
+6. **EXAMINER (Tek Geçişte Çift Eksenli Denetim):**
+   * `coding_standards.md` kurallarını, Fowler kokularını ve 3-tier decoupling mimarisini/kapsam sınırlarını tek geçişte denetler. 0 kritik bulgu aranır.
+7. **Deterministik Teslimat (`brigade finish-slice`):**
+   * Doğrulanan dalı FSM üzerinden ana depodaki `development` dalına fast-forward birleştirir, worktree'yi havuza iade eder ve `no-mistakes` kapısıyla PR'a hazırlar.
 
 ---
 
@@ -48,10 +48,10 @@ Bu doküman, `edge` eklentisi bünyesinde **Yeni Davranış & Feature Ekleme** o
 [CODER WORKER]   ──────────────────────► [YEŞİL TEST GATE: vitest PASS (0) & tsc (0)]
        │
        ▼
-[EXAMINERS]      ──────────────────────► [REVIEW GATE: 0 Critical Findings]
+[EXAMINER]       ──────────────────────► [REVIEW GATE: 0 Critical Findings]
        │
        ▼
-[EXPEDITER]      ──────────────────────► [STAGING: git merge --ff-only into development & return worktree]
+[FINISH-SLICE]   ──────────────────────► [STAGING: git merge --ff-only into development & return worktree]
 ```
 
 ### 🛑 2.1 Visual Approval Gate İnvaryantları (No-Bypass Kuralı)
@@ -73,7 +73,7 @@ Bu doküman, `edge` eklentisi bünyesinde **Yeni Davranış & Feature Ekleme** o
    python3 tools/brigade/cli.py start-slice /home/oguz/<project> --name <feature-name> --track feature
    ```
 2. **CODER Yalnızca Worktree İçinde Çalışır:** `CODER` ajanı ana repo çalışma dizininde (`/home/oguz/<project>`) tek bir dosya dahi değiştiremez. Tüm kod yazımı, derleme ve yeşil test doğrulaması kiralık worktree (`/home/oguz/.treehouse/pool/slot-N/...`) içinde icra edilir.
-3. **Senkronizasyon & İade:** `EXAMINERS` incelemesi tamamlandığında `EXPEDITER` `python3 tools/brigade/cli.py finish-slice <repo>` çalıştırarak worktree branch'ini ana depodaki `development` dalına fast-forward (`git merge --ff-only`) birleştirir ve worktree slotunu Treehouse havuzuna iade eder.
+3. **Senkronizasyon & İade:** `EXAMINER` incelemesi tamamlandığında `python3 tools/brigade/cli.py finish-slice <repo>` çalıştırılarak worktree branch'i ana depodaki `development` dalına fast-forward (`git merge --ff-only`) birleştirilir ve worktree slotu Treehouse havuzuna iade edilir.
 
 
 ---

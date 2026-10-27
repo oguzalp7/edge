@@ -6,30 +6,29 @@ Enforces deterministic role boundaries and Anti-Graveyard station persistence:
 1. ORCHESTRATOR:
    - Denied: write_to_file, replace_file_content.
    - Guarded: invoke_subagent -> MUST reuse existing idle station via send_message if already active!
-   - Injected: PreInvocation reminder of canonical 8 Brigade stations and anti-graveyard protocol.
+   - Injected: PreInvocation reminder of canonical 7 Brigade stations and anti-graveyard protocol.
 
-2. EXPEDITER:
-   - Denied: write_to_file / replace_file_content targeting production code (src/, lib/, app/, db/, drizzle/).
-   - Allowed: run_command (git squash-merge, npm test, vitest, radar, make), view_file.
-
-3. SPEC_EXAMINER / STANDARDS_EXAMINER / RESEARCHER:
+2. EXAMINER / RESEARCHER:
    - Denied: write_to_file, replace_file_content (Pure read-only!).
 
-4. SPEC_WRITER:
+3. SPEC_WRITER:
    - Allowed: specs/**, .edge/**, .lavish/**.
    - Denied: production code (src/**, app/**, lib/**, db/**).
 
-5. SEAM_ARCHITECT:
+4. SEAM_ARCHITECT:
    - Allowed: tests/**, *.test.ts, *.spec.ts, src/types/**, src/contracts/**.
    - Denied: implementation files in src/** (reserved for CODER).
 
-6. CODER:
+5. CODER:
    - Allowed: src/**.
    - Denied: tests/**, *.test.ts, *.spec.ts (Test Immutability Invariant).
 
-7. SURGEON:
+6. SURGEON:
    - Allowed: src/** within ticket boundaries.
    - Denied: src/db/schema/**, drizzle/** (MigrationGate Invariant).
+
+7. QA_ENGINEER:
+   - Denied: production code (src/**, app/**, lib/**, db/**, drizzle/**).
 
 8. Anti-Graveyard Station Persistence:
    - Tracks active stations in ~/.gemini/antigravity/edge_active_stations.json.
@@ -464,14 +463,12 @@ def get_active_stations_path() -> Path:
 ACTIVE_STATIONS_FILE = get_active_stations_path()
 
 CANONICAL_ROLES = {
-    "EXPEDITER": ["expediter", "aboyeur", "coordinator", "dispatcher", "isolation", "test runner", "qa runner"],
     "SPEC_WRITER": ["spec_writer", "spec writer", "spec-writer", "translator", "slicer", "n-spec"],
     "RESEARCHER": ["researcher", "research", "recon", "reconnaissance", "investigator", "rca", "root cause"],
     "SEAM_ARCHITECT": ["seam_architect", "seam architect", "seam-architect", "contract", "test author", "red test", "tdd"],
     "CODER": ["coder", "programmer", "worker", "implementer", "production worker"],
     "SURGEON": ["surgeon", "refactor", "refactorer", "chef de partie", "decoupling"],
-    "STANDARDS_EXAMINER": ["standards_examiner", "standards examiner", "standards-examiner", "sous chef", "smell auditor"],
-    "SPEC_EXAMINER": ["spec_examiner", "spec examiner", "spec-examiner", "maitre d", "architectural examiner"],
+    "EXAMINER": ["examiner", "reviewer", "code reviewer", "standards_examiner", "standards examiner", "standards-examiner", "spec_examiner", "spec examiner", "spec-examiner", "sous chef", "maitre d"],
     "QA_ENGINEER": ["qa_engineer", "qa", "e2e", "e2e_tester", "sommelier", "inspector", "test_agent", "qa agent"],
 }
 
@@ -660,8 +657,8 @@ def handle_pre_tool(payload: dict) -> dict:
                     ),
                 }
 
-        # B. Pure Read-Only Stations: SPEC_EXAMINER, STANDARDS_EXAMINER, RESEARCHER
-        if role in ("SPEC_EXAMINER", "STANDARDS_EXAMINER", "RESEARCHER"):
+        # B. Pure Read-Only Stations: EXAMINER, RESEARCHER
+        if role in ("EXAMINER", "RESEARCHER"):
             return {
                 "decision": "deny",
                 "reason": (
@@ -669,17 +666,6 @@ def handle_pre_tool(payload: dict) -> dict:
                     "Hiçbir dosyada değişiklik yapamaz / kod yazamaz!"
                 ),
             }
-
-        # C. EXPEDITER: Kitchen Coordinator / Dispatcher
-        if role == "EXPEDITER":
-            if any(k in target_file for k in ["/src/", "src/", "/lib/", "lib/", "/app/", "app/", "/db/", "db/", "/drizzle/", "drizzle/"]):
-                return {
-                    "decision": "deny",
-                    "reason": (
-                        f"❌ [EXPEDITER BOUNDARY GUARD]: EXPEDITER istasyonu yalnızca koordinasyon, test koşumu ve squash-merge işlemlerinden sorumludur. "
-                        f"Kaynak kod (`{target_file}`) düzenleyemez! Kod değişiklikleri SURGEON veya CODER istasyonuna aittir."
-                    ),
-                }
 
         # D. SPEC_WRITER: Specifications & Prototypes Only
         if role == "SPEC_WRITER":
@@ -822,7 +808,7 @@ def handle_pre_invocation(payload: dict) -> dict:
                         "🚨 [EDGE ORCHESTRATOR ENFORCED]: You are the Sovereign Commander (Orchestrator) in the Green Zone.\n"
                         "- You do NOT write production source code (only Antigravity brain artifacts and `.edge/**` checkpoints are permitted).\n"
                         "- UI Visual Gate (`lavish-axi`): When SPEC_WRITER produces `.lavish/*.html`, present the active session URL to the human and run `lavish-axi poll <file>` in the background (WaitMsBeforeAsync: 1000, IsDaemon: false). Await user approval before advancing to SEAM_ARCHITECT.\n"
-                        "- Canonical Brigade Stations: EXPEDITER, SPEC_EXAMINER, STANDARDS_EXAMINER, CODER, SURGEON, SEAM_ARCHITECT, SPEC_WRITER, RESEARCHER, QA_ENGINEER.\n"
+                        "- Canonical Brigade Stations: SPEC_WRITER, RESEARCHER, SEAM_ARCHITECT, CODER, SURGEON, EXAMINER, QA_ENGINEER.\n"
                         "- Anti-Graveyard Protocol: ALWAYS check existing stations with `manage_subagents(Action: 'list')`. "
                         "If an active station exists for the role, REUSE it via `send_message`. Only call `invoke_subagent` if no station exists yet."
                     )

@@ -155,14 +155,12 @@ def cmd_ticket(args: argparse.Namespace) -> int:
         if curr == CycleState.SURGERY or curr == CycleState.TRIAGE:
             print(StationRegistry.build_surgeon_prompt(ticket, fsm.state.base_branch))
         elif curr == CycleState.REVIEW:
-            print("=== STANDARDS REVIEW PROMPT ===")
-            print(StationRegistry.build_standards_review_prompt(ticket, fsm.state.base_branch))
-            print("\n=== SPEC REVIEW PROMPT ===")
-            print(StationRegistry.build_spec_review_prompt(ticket, fsm.state.base_branch))
+            print("=== EXAMINER REVIEW PROMPT ===")
+            print(StationRegistry.build_examiner_prompt(ticket, fsm.state.base_branch))
         elif curr == CycleState.POLISH:
             print(StationRegistry.build_polish_prompt(ticket, fsm.state.review_findings))
         elif curr == CycleState.STAGING:
-            print(StationRegistry.build_expediter_prompt(ticket, fsm.state.base_branch))
+            print(f"STAGING STATE: Run deterministic CLI delivery command:\nbrigade finish-slice {repo_path}")
         else:
             print(f"No prompt template defined for state {curr.value}.")
         print("--- END PROMPT PAYLOAD ---\n")
@@ -344,7 +342,15 @@ def cmd_graph(args: argparse.Namespace) -> int:
 
     print("\n🧑‍🍳 STATION ROSTER:")
     stations = state.stations
-    for role in [StationRole.SURGEON, StationRole.STANDARDS_EXAMINER, StationRole.SPEC_EXAMINER, StationRole.EXPEDITER]:
+    for role in [
+        StationRole.SPEC_WRITER,
+        StationRole.RESEARCHER,
+        StationRole.SEAM_ARCHITECT,
+        StationRole.CODER,
+        StationRole.SURGEON,
+        StationRole.EXAMINER,
+        StationRole.QA_ENGINEER,
+    ]:
         s = stations.get(role.value)
         status_dot = "🟢" if s and s.status == "IDLE" else ("🟡" if s else "⚪")
         name_str = s.name if s else "Not registered"
@@ -785,14 +791,14 @@ def main() -> int:
     # register
     p_reg = subparsers.add_parser("register", help="Register a persistent station worker")
     p_reg.add_argument("repo", help="Path to target repository")
-    p_reg.add_argument("--role", required=True, help="Station role (surgeon, standards_examiner, spec_examiner, expediter)")
+    p_reg.add_argument("--role", required=True, choices=[r.value for r in StationRole], help=f"Station role ({', '.join(r.value for r in StationRole)})")
     p_reg.add_argument("--conversation-id", required=True, help="Subagent conversation ID")
     p_reg.add_argument("--name", help="Human-readable station name")
 
     # unregister
     p_unreg = subparsers.add_parser("unregister", help="Unregister a station")
     p_unreg.add_argument("repo", help="Path to target repository")
-    p_unreg.add_argument("--role", required=True, help="Station role to unregister")
+    p_unreg.add_argument("--role", required=True, choices=[r.value for r in StationRole], help="Station role to unregister")
 
     # stations
     p_stat = subparsers.add_parser("stations", help="List registered stations")
