@@ -150,7 +150,33 @@ class TypeScriptAdapter(LanguageAdapter):
             count += len(re.findall(pat, content))
         return count
 
-    def _find_functions(self, lines: List[str]) -> List[FunctionMetrics]:
+    def _find_functions(
+        self,
+        lines: List[str],
+        path: Optional[Path] = None,
+        rel_path: Optional[str] = None
+    ) -> List[FunctionMetrics]:
+        # Tree-sitter AST extraction via CRAPPER when available
+        try:
+            from tools.audit.crapper import analyze_file_crap, TREE_SITTER_AVAILABLE
+            if TREE_SITTER_AVAILABLE and path and path.exists():
+                crap_metrics = analyze_file_crap(path, rel_path or str(path))
+                if crap_metrics:
+                    return [
+                        FunctionMetrics(
+                            name=m.name,
+                            start_line=m.start_line,
+                            end_line=m.end_line,
+                            sloc=m.sloc,
+                            complexity=m.complexity,
+                            is_exported=m.is_exported,
+                        )
+                        for m in crap_metrics
+                    ]
+        except Exception:
+            pass
+
+        # Fallback to regex-based extraction
         funcs = []
         func_sig_pat = re.compile(
             r"^(?:\s*export\s+)?(?:async\s+)?(?:function\s+(\w+)|(?:const|let)\s+(\w+)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>|(?:const|let)\s+(\w+)\s*=\s*(?:async\s*)?function)"
@@ -206,7 +232,7 @@ class TypeScriptAdapter(LanguageAdapter):
         max_indent = self._calc_max_indent(lines)
         complexity = self._calc_complexity(content)
         exports = self._count_exports(content)
-        funcs = self._find_functions(lines)
+        funcs = self._find_functions(lines, path=path, rel_path=rel_path)
 
         companion_tests = self.find_companion_tests(path, workspace_root, test_index)
         has_test_seam = len(companion_tests) > 0
