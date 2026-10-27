@@ -603,7 +603,7 @@ class TestTranscriptStationScanner(unittest.TestCase):
         self.assertEqual(guard.normalize_role(role), "SURGEON")
 
     def test_calculate_token_heat_exact(self):
-        # 1. GREEN Zone (< 180k tokens)
+        # 1. GREEN Zone (< 45k tokens)
         sub_green_cid = "subagent-green-111"
         green_log_dir = self.brain_root / sub_green_cid / ".system_generated" / "logs"
         green_log_dir.mkdir(parents=True, exist_ok=True)
@@ -613,15 +613,15 @@ class TestTranscriptStationScanner(unittest.TestCase):
                 "step_index": 42,
                 "source": "MODEL",
                 "content": "Finished ticket",
-                "input_tokens": 40000,
-                "cache_read_tokens": 15000
+                "input_tokens": 20000,
+                "cache_read_tokens": 10000
             }) + "\n")
 
         heat_green = self.scanner.calculate_subagent_heat(sub_green_cid)
-        self.assertEqual(heat_green.tokens, 55000)
+        self.assertEqual(heat_green.tokens, 30000)
         self.assertEqual(heat_green.heat_zone, "GREEN")
 
-        # 2. YELLOW Zone (180k - 250k tokens)
+        # 2. YELLOW Zone (45k - 75k tokens)
         sub_yellow_cid = "subagent-yellow-222"
         yellow_log_dir = self.brain_root / sub_yellow_cid / ".system_generated" / "logs"
         yellow_log_dir.mkdir(parents=True, exist_ok=True)
@@ -631,15 +631,15 @@ class TestTranscriptStationScanner(unittest.TestCase):
                 "step_index": 80,
                 "source": "MODEL",
                 "content": "Working...",
-                "input_tokens": 140000,
-                "cache_read_tokens": 55000
+                "input_tokens": 40000,
+                "cache_read_tokens": 15000
             }) + "\n")
 
         heat_yellow = self.scanner.calculate_subagent_heat(sub_yellow_cid)
-        self.assertEqual(heat_yellow.tokens, 195000)
+        self.assertEqual(heat_yellow.tokens, 55000)
         self.assertEqual(heat_yellow.heat_zone, "YELLOW")
 
-        # 3. RED Zone (> 250k tokens)
+        # 3. RED Zone (> 75k tokens)
         sub_red_cid = "subagent-red-333"
         red_log_dir = self.brain_root / sub_red_cid / ".system_generated" / "logs"
         red_log_dir.mkdir(parents=True, exist_ok=True)
@@ -649,12 +649,12 @@ class TestTranscriptStationScanner(unittest.TestCase):
                 "step_index": 120,
                 "source": "MODEL",
                 "content": "Saturated...",
-                "input_tokens": 200000,
-                "cache_read_tokens": 60000
+                "input_tokens": 60000,
+                "cache_read_tokens": 25000
             }) + "\n")
 
         heat_red = self.scanner.calculate_subagent_heat(sub_red_cid)
-        self.assertEqual(heat_red.tokens, 260000)
+        self.assertEqual(heat_red.tokens, 85000)
         self.assertEqual(heat_red.heat_zone, "RED")
 
 
@@ -698,7 +698,7 @@ class TestStationSelectorRotation(unittest.TestCase):
                     "parentConversationId": "orch-parent",
                     "status": "IDLE",
                     "tokenHeat": {
-                        "tokens": 45000,
+                        "tokens": 30000,
                         "heatZone": "GREEN"
                     }
                 }
@@ -728,7 +728,7 @@ class TestStationSelectorRotation(unittest.TestCase):
                     "parentConversationId": "orch-parent",
                     "status": "IDLE",
                     "tokenHeat": {
-                        "tokens": 140000,
+                        "tokens": 40000,
                         "heatZone": "GREEN"
                     }
                 },
@@ -768,7 +768,7 @@ class TestStationSelectorRotation(unittest.TestCase):
                     "parentConversationId": "orch-parent",
                     "status": "IDLE",
                     "tokenHeat": {
-                        "tokens": 195000,
+                        "tokens": 55000,
                         "heatZone": "YELLOW"
                     }
                 }
@@ -787,6 +787,141 @@ class TestStationSelectorRotation(unittest.TestCase):
             envelope["stations"]["cid-spec-exhausted"]["status"],
             ["EXHAUSTED", "ROTATED"]
         )
+
+    def test_constants_ssot_heat_thresholds(self):
+        self.assertTrue(hasattr(guard, "GREEN_HEAT_THRESHOLD"), "GREEN_HEAT_THRESHOLD must be defined in orchestrator_guard")
+        self.assertTrue(hasattr(guard, "YELLOW_HEAT_THRESHOLD"), "YELLOW_HEAT_THRESHOLD must be defined in orchestrator_guard")
+        self.assertEqual(guard.GREEN_HEAT_THRESHOLD, 45_000)
+        self.assertEqual(guard.YELLOW_HEAT_THRESHOLD, 75_000)
+
+    def test_45k_green_heat_threshold_rotation(self):
+        # 1. Worker with 44,999 tokens in transcript is GREEN and must be reused (deny spawn)
+        cid = "cid-coder-sub45"
+        log_dir = self.brain_root / cid / ".system_generated" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        with open(log_dir / "transcript.jsonl", "w", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "step_index": 1,
+                "source": "MODEL",
+                "input_tokens": 40_000,
+                "cache_read_tokens": 4_999
+            }) + "\n")
+
+        store_data = {
+            "version": "1.0",
+            "initializedAt": "2026-10-15T00:00:00Z",
+            "sessions": {},
+            "stations": {
+                cid: {
+                    "conversationId": cid,
+                    "role": "CODER",
+                    "canonicalRole": "CODER",
+                    "parentConversationId": "orch-parent",
+                    "status": "IDLE"
+                }
+            }
+        }
+        with open(self.store_path, "w", encoding="utf-8") as f:
+            json.dump(store_data, f)
+
+        res = guard.StationSelector.evaluate_spawn_request(
+            self.store, self.scanner, "orch-parent", "Coder"
+        )
+        self.assertEqual(res["decision"], "deny")
+        self.assertIn(cid, res["reason"])
+
+        # 2. Worker with 45,001 tokens in transcript is saturated (YELLOW) and must allow rotation (spawn allowed, marked EXHAUSTED)
+        with open(log_dir / "transcript.jsonl", "w", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "step_index": 2,
+                "source": "MODEL",
+                "input_tokens": 40_000,
+                "cache_read_tokens": 5_001
+            }) + "\n")
+
+        res_rot = guard.StationSelector.evaluate_spawn_request(
+            self.store, self.scanner, "orch-parent", "Coder"
+        )
+        self.assertEqual(res_rot["decision"], "allow")
+        envelope = self.store.load()
+        self.assertIn(
+            envelope["stations"][cid]["status"],
+            ["EXHAUSTED", "ROTATED"]
+        )
+
+    def test_handle_post_tool_direct_response_extraction_dict(self):
+        # Must extract conversationId directly from payload["toolResponse"] dict
+        # without requiring transcript.jsonl to exist on disk!
+        with patch.object(guard, "ACTIVE_STATIONS_FILE", self.store_path):
+            payload = {
+                "toolCall": {
+                    "name": "invoke_subagent",
+                    "args": {"role": "SURGEON"}
+                },
+                "toolResponse": {
+                    "conversationId": "cid-surgeon-direct-999"
+                },
+                "conversationId": "orch-parent"
+            }
+            res = guard.handle_post_tool(payload)
+            envelope = self.store.load()
+            self.assertIn("cid-surgeon-direct-999", envelope["stations"])
+            st = envelope["stations"]["cid-surgeon-direct-999"]
+            self.assertEqual(st["canonicalRole"], "SURGEON")
+
+    def test_handle_post_tool_direct_response_extraction_str(self):
+        # Must extract conversationId directly from payload["toolResponse"] string
+        # without requiring transcript.jsonl to exist on disk!
+        with patch.object(guard, "ACTIVE_STATIONS_FILE", self.store_path):
+            payload = {
+                "toolCall": {
+                    "name": "invoke_subagent",
+                    "args": {"role": "CODER"}
+                },
+                "toolResponse": '{"conversationId": "cid-coder-str-888", "status": "started"}',
+                "conversationId": "orch-parent"
+            }
+            res = guard.handle_post_tool(payload)
+            envelope = self.store.load()
+            self.assertIn("cid-coder-str-888", envelope["stations"])
+            st = envelope["stations"]["cid-coder-str-888"]
+            self.assertEqual(st["canonicalRole"], "CODER")
+
+    def test_sync_repo_brigade_station(self):
+        # sync_repo_brigade_station atomically creates/updates <repo>/.edge/brigade.json
+        self.assertTrue(hasattr(guard, "sync_repo_brigade_station"), "sync_repo_brigade_station must exist")
+        repo_dir = Path(self.temp_dir.name) / "test_repo"
+        repo_dir.mkdir(parents=True, exist_ok=True)
+
+        ok = guard.sync_repo_brigade_station(repo_dir, "SURGEON", "cid-surgeon-sync-777")
+        self.assertTrue(ok)
+
+        brigade_json_path = repo_dir / ".edge" / "brigade.json"
+        self.assertTrue(brigade_json_path.exists())
+        with open(brigade_json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        self.assertIn("stations", data)
+        self.assertIn("SURGEON", data["stations"])
+        self.assertEqual(data["stations"]["SURGEON"]["conversation_id"], "cid-surgeon-sync-777")
+
+    def test_station_selector_repo_fallback(self):
+        # When runtime store has no record, but <repo>/.edge/brigade.json does,
+        # StationSelector fallback detects the green station and denies spawn
+        repo_dir = Path(self.temp_dir.name) / "fallback_repo"
+        repo_dir.mkdir(parents=True, exist_ok=True)
+        guard.sync_repo_brigade_station(repo_dir, "CODER", "cid-repo-coder-555")
+
+        # Mock scanner to return green tokens for this repo station
+        self.scanner.calculate_subagent_heat = MagicMock(
+            return_value=guard.TokenHeat(tokens=20_000, heat_zone="GREEN")
+        )
+
+        res = guard.StationSelector.evaluate_spawn_request(
+            self.store, self.scanner, "orch-parent", "Coder", repo_path=repo_dir
+        )
+        self.assertEqual(res["decision"], "deny")
+        self.assertIn("cid-repo-coder-555", res["reason"])
 
 
 if __name__ == "__main__":

@@ -772,17 +772,39 @@ class TestBrigadeFSM(unittest.TestCase):
         self.assertIn("No checkpoint found", msg)
 
     def test_heat_zone_detection(self):
-        zone, rec = self.fsm.get_heat_zone(100_000)
+        zone, rec = self.fsm.get_heat_zone(30_000)
         self.assertEqual(zone, ContextHeatZone.GREEN)
         self.assertIn("GREEN ZONE", rec)
 
-        zone_y, rec_y = self.fsm.get_heat_zone(200_000)
+        zone_y, rec_y = self.fsm.get_heat_zone(60_000)
         self.assertEqual(zone_y, ContextHeatZone.YELLOW)
         self.assertIn("YELLOW ZONE", rec_y)
 
-        zone_r, rec_r = self.fsm.get_heat_zone(280_000)
+        zone_r, rec_r = self.fsm.get_heat_zone(90_000)
         self.assertEqual(zone_r, ContextHeatZone.RED)
         self.assertIn("RED ZONE", rec_r)
+
+    def test_fsm_heat_threshold_constants(self):
+        from tools.brigade import fsm as fsm_module
+        self.assertTrue(hasattr(fsm_module, "GREEN_HEAT_THRESHOLD"), "GREEN_HEAT_THRESHOLD SSOT must exist in fsm.py")
+        self.assertTrue(hasattr(fsm_module, "YELLOW_HEAT_THRESHOLD"), "YELLOW_HEAT_THRESHOLD SSOT must exist in fsm.py")
+        self.assertEqual(fsm_module.GREEN_HEAT_THRESHOLD, 45_000)
+        self.assertEqual(fsm_module.YELLOW_HEAT_THRESHOLD, 75_000)
+
+    def test_fsm_gate_appends_skip_verify(self):
+        from unittest.mock import MagicMock, patch
+        self.fsm.state.active_ticket = MagicMock()
+        self.fsm.state.active_ticket.track = "core"
+        self.fsm.state.active_ticket.worktree_path = self.repo_path
+        self.fsm.state.active_ticket.scaffolding_allowance = 0
+        self.fsm.state.active_ticket.enforce_contraction = False
+
+        with patch.object(self.fsm, "_run_cmd", return_value=(0, "Gate ok", "")) as mock_cmd:
+            passed, msg, _ = self.fsm.guard_gate_to_staging()
+            self.assertTrue(passed)
+            mock_cmd.assert_called_once()
+            invoked_cmd = mock_cmd.call_args[0][0]
+            self.assertIn("--skip-verify", invoked_cmd, "gate.py must be invoked with --skip-verify to prevent 120s timeouts")
 
     def test_calculate_token_estimate(self):
         mock_transcript = self.repo_path / "mock_transcript.jsonl"
