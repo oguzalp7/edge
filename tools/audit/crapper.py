@@ -156,6 +156,7 @@ def _calc_node_complexity(node: Any, source_bytes: bytes) -> int:
     """Computes cyclomatic complexity of an AST subtree."""
     branching_types = {
         "if_statement",
+        "elif_clause",
         "while_statement",
         "for_statement",
         "for_in_statement",

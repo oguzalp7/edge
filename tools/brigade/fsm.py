@@ -47,6 +47,7 @@ except ImportError:
     from tools.brigade.flight_recorder import FlightRecorder
 
 from tools.common import normalize_target_path, run_command
+from tools.common.paths import to_wsl_path, is_wsl_path
 
 # SSOT Heat Zone Thresholds (SPEC-002)
 GREEN_HEAT_THRESHOLD: int = 45_000
@@ -157,9 +158,8 @@ class BrigadeFSM:
     def guard_surgery_to_verify(self) -> Tuple[bool, str, Dict[str, Any]]:
         """
         Validates surgery invariants via git diff:
-        1. MigrationGate Invariant: Zero schema or drizzle files touched.
-        2. Target File Contraction: insertions - deletions < 0 in target_file.
-        3. Scaffolding allowance respected.
+        1. MigrationGate Invariant: Zero schema or drizzle files touched (on refactor tracks).
+        2. Target File Modification: Verifies target_file was touched and records SLOC delta telemetry.
         """
         ticket = self.state.active_ticket
         if not ticket:
@@ -184,7 +184,7 @@ class BrigadeFSM:
                 details = {"schema_violations": schema_violations}
                 return False, f"MigrationGate Invariant VIOLATION: Refactor touched database schemas: {schema_violations}", details
 
-        # 2. Check target file delta
+        # 2. Check target file modification and record SLOC delta telemetry
         numstat_code, numstat_out, _ = self._run_cmd(["git", "diff", "--numstat", "HEAD"])
         if numstat_code != 0 or not numstat_out.strip():
             numstat_code, numstat_out, _ = self._run_cmd(["git", "diff", "--numstat", f"{base_ref}...HEAD"])
@@ -209,7 +209,7 @@ class BrigadeFSM:
                         target_found = True
                         target_delta = ins - dels
 
-                    # Filter out tests, docs, json ledgers, and .edge from net production SLOC
+                    # Filter out tests, docs, json ledgers, and .edge from net production SLOC telemetry
                     if (
                         ".test." in file_name
                         or ".spec." in file_name
@@ -224,15 +224,6 @@ class BrigadeFSM:
 
         if not target_found:
             return False, f"Target file '{ticket.target_file}' was not modified in the diff.", {"modified_files": modified_files}
-
-        # 3. Optional contraction check (Decoupled by default: code cleanliness & tests govern quality)
-        if getattr(ticket, "enforce_contraction", False):
-            if target_delta >= 0:
-                return False, f"Target Contraction VIOLATION: '{ticket.target_file}' did not contract (delta: +{target_delta} lines).", {"target_delta": target_delta}
-
-            allowance = ticket.scaffolding_allowance
-            if total_net > allowance:
-                return False, f"Net SLOC Budget VIOLATION: Net line change +{total_net} exceeds scaffolding allowance of +{allowance}.", {"net_sloc": total_net, "allowance": allowance}
 
         return True, f"Surgery invariants passed: Target file delta {target_delta:+d} lines (Net SLOC: {total_net:+d}).", {
             "target_delta": target_delta,
@@ -300,35 +291,29 @@ class BrigadeFSM:
         # Resolve path to tools/gate.py
         gate_script = Path(__file__).resolve().parent.parent / "gate.py"
         eff_repo = ticket.worktree_path if (ticket and ticket.worktree_path) else self.target_repo
-        target_path_str = str(eff_repo)
-        target_file_flag = ["--target-file", ticket.target_file] if getattr(ticket, "enforce_contraction", False) else []
-        if target_path_str.startswith(r"\\wsl.localhost") or target_path_str.startswith("/home/"):
-            # Execute inside WSL
-            wsl_target = target_path_str.replace(r"\\wsl.localhost\Ubuntu-24.04", "").replace("\\", "/")
-            wsl_gate = str(gate_script).replace(r"C:\Users\oguz_\.gemini\config\plugins\edge", "/mnt/c/Users/oguz_/.gemini/config/plugins/edge").replace("\\", "/")
-            base_to_compare = "HEAD~1" if not getattr(ticket, "enforce_contraction", False) else self.state.base_branch
-            no_refactor_flag = ["--no-refactor"] if (not getattr(ticket, "enforce_contraction", False) or getattr(ticket, "track", "core") == "feature") else []
+        base_to_compare = self.state.base_branch.strip() if (self.state.base_branch and self.state.base_branch.strip()) else "HEAD~1"
+        no_refactor_flag = ["--no-refactor"] if getattr(ticket, "track", "core") == "feature" else []
+
+        if is_wsl_path(eff_repo):
+            wsl_target = to_wsl_path(eff_repo)
+            wsl_gate = to_wsl_path(gate_script)
             cmd = [
                 "python3",
                 wsl_gate,
                 wsl_target,
                 "--base", base_to_compare,
                 "--track", ticket.track,
-                "--allow-scaffolding", str(ticket.scaffolding_allowance),
                 "--skip-verify",
-            ] + target_file_flag + no_refactor_flag
+            ] + no_refactor_flag
         else:
-            base_to_compare = "HEAD~1" if not getattr(ticket, "enforce_contraction", False) else self.state.base_branch
-            no_refactor_flag = ["--no-refactor"] if (not getattr(ticket, "enforce_contraction", False) or getattr(ticket, "track", "core") == "feature") else []
             cmd = [
                 sys.executable,
                 str(gate_script),
                 str(eff_repo),
                 "--base", base_to_compare,
                 "--track", ticket.track,
-                "--allow-scaffolding", str(ticket.scaffolding_allowance),
                 "--skip-verify",
-            ] + target_file_flag + no_refactor_flag
+            ] + no_refactor_flag
 
         code, stdout, stderr = self._run_cmd(cmd)
         if code != 0:
@@ -740,9 +725,8 @@ class BrigadeFSM:
 
         base_constraints = [
             "MigrationGate Invariant: NEVER touch `src/db/schema/*` or `drizzle/` migrations.",
-            "Database Leak Elimination: Zero direct `db.select`, `db.insert`, `db.update`, `db.delete` in action controller.",
-            f"Target Contraction: `{file_path}` must strictly shrink in net SLOC.",
-            f"Scaffolding Budget: Scaffolding allowance is +{scaffolding} lines.",
+            "Layer Leakage Gate: Do not introduce direct DB calls (`db.select`, `db.insert`, `db.update`, `db.delete`, `db.transaction`, `db.query`) in action controllers (`after_leaks <= before_leaks`, 0 in new actions).",
+            "Max CC Non-Regression: Modified production files must not regress max cyclomatic complexity (healthy ceiling CC <= 10 for clean/new files).",
             "Zero-Wrapper Left Behind: Do not create shallow 1-line pass-through services.",
         ]
         all_constraints = base_constraints + [c for c in prior_constraints if c not in base_constraints]

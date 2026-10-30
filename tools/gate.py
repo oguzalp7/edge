@@ -5,20 +5,21 @@ Enforces Matt Pocock's Deep Module & Seam Principles, Poteto's Kitchen Rules,
 and Kun Chen's Deterministic Review Gates.
 
 Stage: MigrationGate Invariant Gate (Never touch schemas/migrations in refactors)
-Stage: Net SLOC Budget Gate (Refactoring must not inflate code, with scaffolding budget)
-Stage: Target SLOC Contraction Gate (Target action/controller must strictly shrink)
+Stage: Max CC Non-Regression Gate (No cyclomatic complexity regression; CC <= 10 ceiling on clean/new files)
+Stage: Layer Leakage Gate (No new direct DB calls in action/controller layer)
 Stage: Zero-Wrapper Left Behind Gate (No pass-through shallow modules)
 Stage: Domain Purity Gate (No hardcoded canonical arrays / magic headers in UI)
 Stage: Hermetic Verification Gate (TypeScript + Unit Tests)
 """
 
+import ast
 import sys
 import os
 import re
 import argparse
 import subprocess
 from pathlib import Path
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Any
 
 # Add project root to sys.path
 root_dir = Path(__file__).resolve().parent.parent
@@ -26,8 +27,238 @@ if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
 
 from tools.common import setup_utf8_console, normalize_target_path, run_command
-from tools.rules import RAW_TH_PATTERN, CANONICAL_ARRAY_PATTERN, SHALLOW_WRAPPER_PATTERN
+from tools.rules import (
+    RAW_TH_PATTERN,
+    CANONICAL_ARRAY_PATTERN,
+    SHALLOW_WRAPPER_PATTERN,
+    SQL_LEAK_PATTERN,
+)
+from tools.audit import crapper as _crapper
+
 setup_utf8_console()
+
+TREE_SITTER_AVAILABLE: bool = bool(getattr(_crapper, "TREE_SITTER_AVAILABLE", False))
+
+_PRODUCTION_CODE_SUFFIXES: Tuple[str, ...] = (".ts", ".tsx", ".js", ".jsx", ".py")
+_ACTION_CODE_SUFFIXES: Tuple[str, ...] = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
+
+_JS_BRANCH_PATTERNS: List[re.Pattern[str]] = [
+    re.compile(r"\bif\b"),
+    re.compile(r"\bfor\b"),
+    re.compile(r"\bwhile\b"),
+    re.compile(r"\bcase\b"),
+    re.compile(r"\bcatch\b"),
+    re.compile(r"&&"),
+    re.compile(r"\|\|"),
+    re.compile(r"(?<!\?)\?(?![?.:])"),
+]
+
+_JS_FUNC_DECL_RE: re.Pattern[str] = re.compile(
+    r"\bfunction\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*(?:<[^>]*>)?\s*\("
+)
+_JS_VAR_FUNC_RE: re.Pattern[str] = re.compile(
+    r"\b(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*(?::[^=]+)?=\s*(?:async\s*)?"
+    r"(?:function\b|(?:\([^)]*\)|[A-Za-z_$][A-Za-z0-9_$]*)\s*(?::[^=]+)?=>)"
+)
+_JS_METHOD_RE: re.Pattern[str] = re.compile(
+    r"^\s*(?:public\s+|private\s+|protected\s+|static\s+|readonly\s+|override\s+|async\s+)*"
+    r"([A-Za-z_$][A-Za-z0-9_$]*)\s*(?:<[^>]*>)?\s*\([^;]*\)\s*(?::\s*[^{;=]+)?\{"
+)
+_JS_CONTROL_KEYWORDS = {"if", "for", "while", "switch", "catch", "function", "return"}
+
+
+_JS_COMMENT_OR_STRING_RE: re.Pattern[str] = re.compile(
+    r"//[^\n]*|/\*[\s\S]*?\*/|'(?:\\.|[^'\\\n])*'|\"(?:\\.|[^\"\\\n])*\"|`(?:\\.|[^`\\])*`"
+)
+
+
+def _mask_non_newlines(match: re.Match[str]) -> str:
+    return "".join("\n" if ch == "\n" else " " for ch in match.group(0))
+
+
+def _strip_js_comments_and_strings(text: str) -> str:
+    """
+    Replaces JS/TS comments and string literal contents with spaces while preserving
+    newlines so brace matching and branch keyword counting stay deterministic.
+    """
+    return _JS_COMMENT_OR_STRING_RE.sub(_mask_non_newlines, text)
+
+
+def _count_js_branches(sanitized_block: str) -> int:
+    score = 1
+    for pat in _JS_BRANCH_PATTERNS:
+        score += len(pat.findall(sanitized_block))
+    return score
+
+
+def _ast_py_node_complexity(root_node: ast.AST) -> int:
+    comp = 1
+    for node in ast.walk(root_node):
+        if isinstance(node, (ast.If, ast.For, ast.AsyncFor, ast.While, ast.ExceptHandler, ast.IfExp)):
+            comp += 1
+        elif isinstance(node, ast.BoolOp):
+            comp += max(1, len(node.values) - 1)
+        elif hasattr(ast, "Match") and isinstance(node, ast.Match):
+            comp += len(node.cases)
+    return comp
+
+
+def _compute_py_fallback_max_cc(source_text: str) -> Optional[Tuple[int, str]]:
+    try:
+        tree = ast.parse(source_text)
+    except SyntaxError:
+        return None
+
+    funcs: List[Tuple[int, str]] = []
+
+    def _visit_stmts(stmts: List[ast.stmt]) -> None:
+        for stmt in stmts:
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                funcs.append((_ast_py_node_complexity(stmt), stmt.name))
+            elif isinstance(stmt, ast.ClassDef):
+                _visit_stmts(stmt.body)
+
+    _visit_stmts(tree.body)
+    if funcs:
+        return max(funcs, key=lambda item: item[0])
+    return (_ast_py_node_complexity(tree), "<module>")
+
+
+def _compute_js_fallback_max_cc(source_text: str) -> Tuple[int, str]:
+    sanitized = _strip_js_comments_and_strings(source_text)
+    lines = sanitized.splitlines()
+    funcs: List[Tuple[int, str]] = []
+
+    idx = 0
+    total_lines = len(lines)
+    while idx < total_lines:
+        line = lines[idx]
+        m = _JS_FUNC_DECL_RE.search(line) or _JS_VAR_FUNC_RE.search(line)
+        name: Optional[str] = None
+        if m:
+            name = m.group(1)
+        else:
+            m_meth = _JS_METHOD_RE.search(line)
+            if m_meth and m_meth.group(1) not in _JS_CONTROL_KEYWORDS:
+                name = m_meth.group(1)
+
+        if name:
+            brace_count = 0
+            started = False
+            end_idx = idx
+            for scan_idx in range(idx, total_lines):
+                scan_line = lines[scan_idx]
+                opens = scan_line.count("{")
+                closes = scan_line.count("}")
+                if opens > 0:
+                    started = True
+                brace_count += opens - closes
+                if started and brace_count <= 0:
+                    end_idx = scan_idx
+                    break
+                if not started and ";" in scan_line:
+                    end_idx = scan_idx
+                    break
+
+            body = "\n".join(lines[idx : end_idx + 1])
+            funcs.append((_count_js_branches(body), name))
+            idx = end_idx + 1
+            continue
+
+        idx += 1
+
+    if funcs:
+        return max(funcs, key=lambda item: item[0])
+    return (_count_js_branches(sanitized), "<module>")
+
+
+def _compute_source_max_cc(source_text: str, suffix: str) -> Tuple[int, str]:
+    """
+    Deterministically computes the maximum per-function cyclomatic complexity (CC)
+    and corresponding symbol name for a source string.
+    Uses tree-sitter AST via tools.audit.crapper when available, and falls back
+    to Python AST / sanitized JS-TS block branch counting when tree-sitter is absent.
+    """
+    if not source_text or not source_text.strip():
+        return (0, "<empty>")
+
+    ext = suffix.lower() if suffix.startswith(".") else f".{suffix.lower()}"
+
+    ts_enabled = TREE_SITTER_AVAILABLE and bool(getattr(_crapper, "TREE_SITTER_AVAILABLE", False))
+    if ts_enabled:
+        parser, _ = _crapper._get_parser_for_ext(ext)
+        if parser is not None:
+            source_bytes = source_text.encode("utf-8")
+            tree = parser.parse(source_bytes)
+            root = tree.root_node
+            function_types = {
+                "function_declaration",
+                "function_definition",
+                "arrow_function",
+                "method_definition",
+                "function_expression",
+            }
+            found_funcs: List[Tuple[int, str]] = []
+
+            def _visit(node: Any) -> None:
+                if node.type in function_types:
+                    sym = _crapper._find_function_symbol(node, source_bytes)
+                    cc = _crapper._calc_node_complexity(node, source_bytes)
+                    found_funcs.append((cc, sym))
+                    return
+                for child in node.children:
+                    _visit(child)
+
+            _visit(root)
+            if found_funcs:
+                return max(found_funcs, key=lambda item: item[0])
+            return (_crapper._calc_node_complexity(root, source_bytes), "<module>")
+
+    if ext == ".py":
+        py_res = _compute_py_fallback_max_cc(source_text)
+        if py_res is not None:
+            return py_res
+
+    return _compute_js_fallback_max_cc(source_text)
+
+
+def _is_excluded_non_prod_path(rel_path: str) -> bool:
+    norm = rel_path.strip().replace("\\", "/").lstrip("./")
+    if not norm:
+        return True
+    name = Path(norm).name.lower()
+    if (
+        ".test." in norm
+        or ".spec." in norm
+        or norm.startswith("tests/")
+        or "/tests/" in norm
+        or norm.startswith("__tests__/")
+        or "/__tests__/" in norm
+        or name.startswith("test_")
+        or name.endswith("_test.py")
+        or norm.endswith(".md")
+        or norm.endswith(".json")
+        or norm.startswith(".edge/")
+        or "/.edge/" in norm
+    ):
+        return True
+    return False
+
+
+def _is_action_controller_path(rel_path: str) -> bool:
+    norm = rel_path.strip().replace("\\", "/").lstrip("./")
+    if _is_excluded_non_prod_path(norm):
+        return False
+    suffix = Path(norm).suffix.lower()
+    if suffix not in _ACTION_CODE_SUFFIXES:
+        return False
+    parts = norm.split("/")
+    return "actions" in parts[:-1]
+
+
+def _count_sql_leaks(source_text: str) -> int:
+    sanitized = _strip_js_comments_and_strings(source_text)
+    return len(SQL_LEAK_PATTERN.findall(sanitized))
 
 
 class GateResult:
@@ -55,6 +286,45 @@ class EdgeVerificationGate:
         """Run a command in target repo or specified directory using tools.common.runner."""
         work_dir = cwd or self.target_repo
         return run_command(cmd, cwd=work_dir)
+
+    @staticmethod
+    def _compute_source_max_cc(source_text: str, suffix: str) -> Tuple[int, str]:
+        return _compute_source_max_cc(source_text, suffix)
+
+    def _get_changed_rel_paths(self, base_ref: str = "HEAD~1") -> Tuple[Optional[List[str]], str, str]:
+        """
+        Returns (rel_paths, effective_base_ref, error_message) between base_ref and current state.
+        Includes untracked files when operating inside a real git repository/worktree.
+        """
+        eff_base = base_ref
+        code, stdout, stderr = self._run_cmd(["git", "diff", "--name-only", base_ref])
+        if code != 0:
+            eff_base = "HEAD"
+            code, stdout, stderr = self._run_cmd(["git", "diff", "--name-only", "HEAD"])
+            if code != 0:
+                code, stdout, stderr = self._run_cmd(["git", "diff", "--name-only"])
+                if code != 0:
+                    return None, eff_base, stderr.strip()
+
+        seen: Dict[str, None] = {}
+        for line in stdout.splitlines():
+            norm = line.strip().replace("\\", "/")
+            if norm.startswith("./"):
+                norm = norm[2:]
+            if norm:
+                seen[norm] = None
+
+        if (self.target_repo / ".git").exists():
+            u_code, u_out, _ = self._run_cmd(["git", "ls-files", "--others", "--exclude-standard"])
+            if u_code == 0 and u_out:
+                for line in u_out.splitlines():
+                    norm = line.strip().replace("\\", "/")
+                    if norm.startswith("./"):
+                        norm = norm[2:]
+                    if norm:
+                        seen[norm] = None
+
+        return list(seen.keys()), eff_base, ""
 
     # =========================================================================
     # STAGE: MigrationGate Invariant Gate
@@ -104,179 +374,153 @@ class EdgeVerificationGate:
         )
 
     # =========================================================================
-    # STAGE: Net SLOC Budget Gate
+    # STAGE: Max CC Non-Regression Gate
     # =========================================================================
-    def check_net_sloc_budget(
+    def check_complexity_non_regression(
         self,
         base_ref: str = "HEAD~1",
-        is_refactor: bool = True,
-        scaffolding_allowance: int = 0,
+        healthy_cc_ceiling: int = 10,
     ) -> GateResult:
         """
-        Calculates Net SLOC (Insertions - Deletions) in non-test, non-doc files.
-        If is_refactor is True, net_sloc must be <= scaffolding_allowance (default 0).
+        Enforces Cyclomatic Complexity Non-Regression across modified/added production files:
+        - Existing files: after_max_cc <= max(before_max_cc, healthy_cc_ceiling)
+        - Newly created files: after_max_cc <= healthy_cc_ceiling
         """
-        code, stdout, stderr = self._run_cmd(["git", "diff", "--numstat", base_ref, "HEAD"])
-        if code != 0:
-            # Fallback to checking working tree against HEAD
-            code, stdout, stderr = self._run_cmd(["git", "diff", "--numstat", "HEAD"])
-            if code != 0:
-                code, stdout, stderr = self._run_cmd(["git", "diff", "--numstat"])
-                if code != 0:
-                    return GateResult(1, "Net SLOC Budget Gate", False, f"Git diff failed: {stderr.strip()}")
-
-        insertions = 0
-        deletions = 0
-        inspected_files = []
-
-        for line in stdout.strip().splitlines():
-            parts = line.split(maxsplit=2)
-            if len(parts) < 3:
-                continue
-            add_str, del_str, file_path = parts[0], parts[1], parts[2]
-            if add_str == "-" or del_str == "-":
-                continue  # Binary file
-
-            # Filter out tests and markdown documentation from code budget
-            if (
-                ".test." in file_path
-                or ".spec." in file_path
-                or file_path.startswith("tests/")
-                or file_path.endswith(".md")
-                or file_path.endswith(".json")
-            ):
-                continue
-
-            add = int(add_str)
-            del_ = int(del_str)
-            insertions += add
-            deletions += del_
-            inspected_files.append(f"{file_path}: +{add}/-{del_}")
-
-        net_sloc = insertions - deletions
-
-        if is_refactor and net_sloc > 0:
-            if scaffolding_allowance > 0 and net_sloc <= scaffolding_allowance:
-                details = [
-                    f"Scaffolding allowance used: +{net_sloc} lines (limit: {scaffolding_allowance})",
-                    f"Gross additions: +{insertions}, deletions: -{deletions} across {len(inspected_files)} production files.",
-                    "Notice: One-time scaffolding allowance granted for new domain repository setup.",
-                ]
-                return GateResult(
-                    1,
-                    "Net SLOC Budget Gate",
-                    True,
-                    f"Scaffolding allowance used: +{net_sloc} lines (limit: {scaffolding_allowance})",
-                    details,
-                )
-
-            details = [
-                f"Net Code Inflation: +{net_sloc} lines (Added: {insertions}, Deleted: {deletions})",
-                f"Rule: Pruning and refactoring tasks MUST NOT inflate production code (allowance: {scaffolding_allowance}).",
-                "Top file changes:",
-            ] + inspected_files[:8]
+        rel_paths, eff_base, err = self._get_changed_rel_paths(base_ref)
+        if rel_paths is None:
             return GateResult(
                 1,
-                "Net SLOC Budget Gate",
+                "Max CC Non-Regression Gate",
                 False,
-                f"Code inflation detected: Net +{net_sloc} production lines added." + (
-                    f" (Exceeds scaffolding allowance of {scaffolding_allowance} lines)" if scaffolding_allowance > 0 else ""
-                ),
-                details,
+                f"Git diff failed: {err}",
             )
 
-        details = [
-            f"Net SLOC delta: {net_sloc} (Added: {insertions}, Deleted: {deletions}) across {len(inspected_files)} production files.",
-        ]
-        return GateResult(1, "Net SLOC Budget Gate", True, f"Net SLOC delta: {net_sloc} (budget satisfied).", details)
+        violations: List[str] = []
+        inspected_details: List[str] = []
 
-    # =========================================================================
-    # STAGE: Target SLOC Contraction Gate
-    # =========================================================================
-    def check_target_sloc(self, target_file: str, base_ref: str = "HEAD~1") -> GateResult:
-        """
-        Enforces Target SLOC Contraction:
-        The target action/controller file being refactored must strictly shrink:
-        insertions - deletions < 0 (i.e. deletions > insertions).
-        """
-        # Normalize target file path for matching
-        norm_target = target_file.replace("\\", "/").strip()
-        if norm_target.startswith("./"):
-            norm_target = norm_target[2:]
+        for rel_path in rel_paths:
+            if _is_excluded_non_prod_path(rel_path):
+                continue
 
-        # Handle absolute path if within target_repo
-        try:
-            target_path_obj = Path(target_file)
-            if target_path_obj.is_absolute():
-                norm_target = str(target_path_obj.relative_to(self.target_repo)).replace("\\", "/")
-        except Exception:
-            pass
+            suffix = Path(rel_path).suffix.lower()
+            if suffix not in _PRODUCTION_CODE_SUFFIXES:
+                continue
 
-        code, stdout, stderr = self._run_cmd(["git", "diff", "--numstat", base_ref])
-        if code != 0:
-            code, stdout, stderr = self._run_cmd(["git", "diff", "--numstat", "HEAD"])
-            if code != 0:
-                code, stdout, stderr = self._run_cmd(["git", "diff", "--numstat"])
-                if code != 0:
-                    return GateResult(
-                        1,
-                        "Target SLOC Contraction Gate",
-                        False,
-                        f"Git diff failed: {stderr.strip()}",
+            full_path = self.target_repo / rel_path
+            if not full_path.exists() or not full_path.is_file():
+                continue
+
+            try:
+                after_text = full_path.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+
+            after_max_cc, after_sym = _compute_source_max_cc(after_text, suffix)
+            show_code, before_text, _ = self._run_cmd(["git", "show", f"{eff_base}:{rel_path}"])
+
+            if show_code == 0:
+                before_max_cc, _ = _compute_source_max_cc(before_text, suffix)
+                allowed_cc = max(before_max_cc, healthy_cc_ceiling)
+                inspected_details.append(
+                    f"{rel_path} ({after_sym}): max CC {before_max_cc} -> {after_max_cc} (ceiling: {allowed_cc})"
+                )
+                if after_max_cc > allowed_cc:
+                    violations.append(
+                        f"{rel_path} [symbol: {after_sym}]: max CC regressed {before_max_cc} -> {after_max_cc} (allowed ceiling: {allowed_cc})"
+                    )
+            else:
+                inspected_details.append(
+                    f"{rel_path} ({after_sym}, new): max CC {after_max_cc} (ceiling: {healthy_cc_ceiling})"
+                )
+                if after_max_cc > healthy_cc_ceiling:
+                    violations.append(
+                        f"{rel_path} [symbol: {after_sym}]: new file max CC 0 -> {after_max_cc} exceeds ceiling of {healthy_cc_ceiling}"
                     )
 
-        found = False
-        target_ins = 0
-        target_del = 0
-        matched_path = ""
+        if violations:
+            return GateResult(
+                1,
+                "Max CC Non-Regression Gate",
+                False,
+                f"Cyclomatic complexity violation(s) detected in {len(violations)} production file(s).",
+                violations,
+            )
 
-        for line in stdout.strip().splitlines():
-            parts = line.split(maxsplit=2)
-            if len(parts) < 3:
+        return GateResult(
+            1,
+            "Max CC Non-Regression Gate",
+            True,
+            f"Max CC non-regression satisfied across {len(inspected_details)} production file(s) (healthy ceiling: {healthy_cc_ceiling}).",
+            inspected_details[:8],
+        )
+
+    # =========================================================================
+    # STAGE: Layer Leakage Gate
+    # =========================================================================
+    def check_layer_leakage(self, base_ref: str = "HEAD~1") -> GateResult:
+        """
+        Enforces Controller/Action Layer Leakage Non-Regression:
+        - Newly created action files (src/actions/**, app/actions/**, */actions/*.ts*): 0 SQL_LEAK_PATTERN matches allowed.
+        - Existing action files: after_leaks <= before_leaks (monotonically non-increasing DB leakage).
+        """
+        rel_paths, eff_base, err = self._get_changed_rel_paths(base_ref)
+        if rel_paths is None:
+            return GateResult(
+                1,
+                "Layer Leakage Gate",
+                False,
+                f"Git diff failed: {err}",
+            )
+
+        violations: List[str] = []
+        inspected_details: List[str] = []
+
+        for rel_path in rel_paths:
+            if not _is_action_controller_path(rel_path):
                 continue
-            add_str, del_str, file_path = parts[0], parts[1], parts[2]
-            p = file_path.replace("\\", "/").strip()
 
-            if p == norm_target or p.endswith("/" + norm_target) or norm_target.endswith("/" + p):
-                found = True
-                matched_path = p
-                if add_str != "-" and del_str != "-":
-                    target_ins = int(add_str)
-                    target_del = int(del_str)
-                break
+            full_path = self.target_repo / rel_path
+            if not full_path.exists() or not full_path.is_file():
+                continue
 
-        if not found:
+            try:
+                after_text = full_path.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+
+            after_leaks = _count_sql_leaks(after_text)
+            show_code, before_text, _ = self._run_cmd(["git", "show", f"{eff_base}:{rel_path}"])
+
+            if show_code != 0:
+                inspected_details.append(f"{rel_path} (new action): {after_leaks} direct DB call(s)")
+                if after_leaks > 0:
+                    violations.append(
+                        f"{rel_path}: newly created action controller contains {after_leaks} direct DB leak(s) (0 allowed)."
+                    )
+            else:
+                before_leaks = _count_sql_leaks(before_text)
+                inspected_details.append(f"{rel_path}: direct DB leaks {before_leaks} -> {after_leaks}")
+                if after_leaks > before_leaks:
+                    violations.append(
+                        f"{rel_path}: DB layer leakage increased {before_leaks} -> {after_leaks} direct DB call(s)."
+                    )
+
+        if violations:
             return GateResult(
                 1,
-                "Target SLOC Contraction Gate",
+                "Layer Leakage Gate",
                 False,
-                f"Target file '{target_file}' was not modified in git diff. Target file must be refactored and contracted.",
-                [f"Target file: {target_file}", "Diff check found 0 changes for this file."],
+                f"Action/controller DB layer leakage detected in {len(violations)} file(s).",
+                violations,
             )
 
-        delta = target_ins - target_del
-        details = [
-            f"Target file: {matched_path}",
-            f"Insertions: +{target_ins}, Deletions: -{target_del}",
-            f"Target Net Delta: {delta} lines (Requirement: insertions - deletions < 0)",
-        ]
-
-        if delta < 0:
-            return GateResult(
-                1,
-                "Target SLOC Contraction Gate",
-                True,
-                f"Target file '{matched_path}' contracted by {abs(delta)} lines (+{target_ins}/-{target_del}).",
-                details,
-            )
-        else:
-            return GateResult(
-                1,
-                "Target SLOC Contraction Gate",
-                False,
-                f"Target file contraction failed: '{matched_path}' delta is +{delta} lines (+{target_ins}/-{target_del}). Must be strictly negative (insertions - deletions < 0).",
-                details,
-            )
+        return GateResult(
+            1,
+            "Layer Leakage Gate",
+            True,
+            f"Controller layer DB leakage check passed across {len(inspected_details)} action file(s).",
+            inspected_details[:8],
+        )
 
     def _get_modified_files(self, base_ref: Optional[str] = None) -> Optional[List[Path]]:
         """Get list of files modified between base_ref and current worktree/HEAD."""
@@ -335,10 +579,10 @@ class EdgeVerificationGate:
             # 1. Imports another component
             # 2. Total non-comment lines < 45
             # 3. Main return statement is a single JSX element wrapping children with same/mapped props
-            
+
             # Pattern check: return <SomeModal ...>{children}</SomeModal>
             pass_through_matches = SHALLOW_WRAPPER_PATTERN.findall(content)
-            
+
             # Detect explicit wrapper adapter notes or pass-through delegation
             is_delegating = bool(pass_through_matches)
             if is_delegating and len(lines) < 55:
@@ -467,17 +711,16 @@ class EdgeVerificationGate:
         print(f"🛡️  EDGE VERIFICATION GATE — ARCHITECTURAL AUDIT [{track.upper()} TRACK]")
         print("=" * 70)
 
-        results = [
-            self.check_migration_gate(base_ref=base_ref),
-            self.check_net_sloc_budget(
-                base_ref=base_ref,
-                is_refactor=is_refactor,
-                scaffolding_allowance=scaffolding_allowance,
-            ),
-        ]
+        results: List[GateResult] = []
 
-        if target_file:
-            results.append(self.check_target_sloc(target_file=target_file, base_ref=base_ref))
+        if is_refactor and track != "feature":
+            results.append(self.check_migration_gate(base_ref=base_ref))
+
+        results.append(self.check_complexity_non_regression(base_ref=base_ref))
+
+        # Core track specific gates
+        if track in ("core", "all"):
+            results.append(self.check_layer_leakage(base_ref=base_ref))
 
         # UI track specific gates
         if track in ("ui", "all"):
@@ -508,15 +751,15 @@ class EdgeVerificationGate:
         return all_passed
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Edge Architectural Quality & Anti-Bloat Gate")
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Edge Architectural Quality & Complexity Gate")
     parser.add_argument("target", nargs="?", default=".", help="Target repository directory (e.g. /home/oguz/my-project or .)")
     parser.add_argument("--base", default="HEAD~1", help="Base commit/branch to compare diff against (default: HEAD~1)")
-    parser.add_argument("--no-refactor", action="store_true", help="Set if this is a feature addition (allows positive net SLOC)")
+    parser.add_argument("--no-refactor", action="store_true", help="Set if this is a feature addition (skips refactor-only schema lock)")
     parser.add_argument("--skip-verify", action="store_true", help="Skip running tsc and unit tests (fast static audit only)")
-    parser.add_argument("--target-file", default=None, help="Target action/controller file to enforce strict contraction (insertions - deletions < 0)")
-    parser.add_argument("--allow-scaffolding", type=int, default=0, help="Scaffolding budget tolerance for new domain repositories (lines)")
-    parser.add_argument("--track", choices=["core", "ui", "all", "feature"], default="all", help="Refactoring track: core, ui, all, or feature (default: all)")
+    parser.add_argument("--target-file", default=None, help="(Deprecated/Legacy) Retained for CLI compatibility; SLOC contraction is retired")
+    parser.add_argument("--allow-scaffolding", type=int, default=0, help="(Deprecated/Legacy) Retained for CLI compatibility; SLOC budget is retired")
+    parser.add_argument("--track", choices=["core", "ui", "all", "feature"], default="all", help="Audit track: core, ui, all, or feature (default: all)")
 
     args = parser.parse_args()
     target_path = normalize_target_path(args.target)

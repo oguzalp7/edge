@@ -77,7 +77,7 @@ class StationRegistry:
         if is_ui:
             neg_constraints = "\n".join([f"- {c}" for c in ticket.negative_constraints]) or (
                 "- MigrationGate Invariant: NEVER touch `src/db/schema/*` or `drizzle/` migrations.\n"
-                "- Structural Cleanliness: Consolidate repetitive markup into centralized primitives without unnecessary bloat.\n"
+                "- Max CC Non-Regression: Modified/extracted functions must not regress max cyclomatic complexity (healthy ceiling CC <= 10 for clean/new files).\n"
                 "- Pure Tailwind Standard: Do NOT introduce external UI component libraries (no Radix, no shadcn).\n"
                 "- Zero-Wrapper Left Behind: Delete legacy shallow wrappers (e.g. `ModalDialog.tsx`) and migrate callers directly.\n"
                 "- Domain Purity: No hardcoded canonical arrays or raw <th> headers in UI components."
@@ -90,22 +90,23 @@ class StationRegistry:
 6. Gate Verification: Run `python tools/gate.py . --track ui --base {base_branch}`.
 7. Commit: Stage modified files and commit with message:
    `refactor(ui): {ticket.description.lower()} ({ticket.ticket_id})`
-8. Output: Report git diff summary, test output, and line count change."""
+8. Output: Report git diff summary, test output, and gate verification status."""
         else:
             neg_constraints = "\n".join([f"- {c}" for c in ticket.negative_constraints]) or (
                 "- MigrationGate Invariant: NEVER touch `src/db/schema/*` or `drizzle/` migrations unless explicitly allowed.\n"
-                "- Leak Elimination: Zero direct `db.select`, `db.insert`, `db.update`, `db.delete` in action controller.\n"
+                "- Layer Leakage Gate: Action controllers must not introduce direct DB calls (`after_leaks <= before_leaks`, 0 leaks in new actions).\n"
+                "- Max CC Non-Regression: Modified/extracted functions must not regress max cyclomatic complexity (healthy ceiling CC <= 10 for clean/new files).\n"
                 "- Structural Cleanliness: Extract business and query logic cleanly into domain repository/services.\n"
-                f"- Scaffolding Allowance: Up to +{ticket.scaffolding_allowance} lines allowed for new domain repository.\n"
                 "- Zero-Wrapper Left Behind: Do not create 1-line pass-through services."
             )
             protocol = f"""1. Git Isolation: Check out isolated branch `{ticket.branch_name}`.
 2. Characterization Test: Run `{ticket.test_seam_command}` to verify test baseline before changes.
 3. Surgery: Extract queries/mutations to domain repository (`src/lib/{ticket.domain}/repository.ts`). Thin `{ticket.target_file}`.
 4. Hermetic Verification: Run `{ticket.test_seam_command}` and `npx tsc --noEmit`. Both must pass with exit code 0.
-5. Commit: Stage modified files (`git add {ticket.target_file} src/lib/{ticket.domain}/repository.ts`) and commit with message:
+5. Gate Verification: Run `python tools/gate.py . --track core --base {base_branch}`.
+6. Commit: Stage modified files (`git add {ticket.target_file} src/lib/{ticket.domain}/repository.ts`) and commit with message:
    `refactor({ticket.domain}): {ticket.description.lower()} ({ticket.ticket_id})`
-6. Output: Report git diff summary, test output, and line count change."""
+7. Output: Report git diff summary, test output, and gate verification status."""
 
         wt_block = ""
         if ticket.worktree_path:
@@ -137,7 +138,6 @@ TICKET SPECIFICATION:
 - Suggested Fix: {ticket.suggested_fix}
 - Branch Name: {ticket.branch_name}
 - Worktree Path: {ticket.worktree_path or 'Primary'}
-- Scaffolding Allowance: +{ticket.scaffolding_allowance} lines
 - Characterization Test Seam: `{ticket.test_seam_command}`
 
 NEGATIVE CONSTRAINTS (STRICT):
@@ -275,8 +275,8 @@ Axis 1 (Standards & Fowler Smells):
 
 Axis 2 (Architectural & Spec Boundaries):
 1. MigrationGate Invariant: Did the diff touch any file in `src/db/schema/*` or `drizzle/*`? (Immediate failure).
-2. Database Leak Elimination: Did any `db.select`, `db.insert`, `db.update`, `db.delete` remain in action controller?
-3. Target File Contraction: Did `{ticket.target_file}` contract?
+2. Layer Leakage Gate: Did any direct `db.select`, `db.insert`, `db.update`, `db.delete`, `db.transaction`, or `db.query` increase in action controllers (`after_leaks <= before_leaks`, 0 in new actions)?
+3. Max CC Non-Regression: Did modified/new files stay within cyclomatic complexity bounds (no regression above baseline hotspot CC; CC <= 10 ceiling for clean/new files)?
 4. Zero-Wrapper: Are there useless pass-through services?
 5. Scope Creep: Did the diff touch anything outside the ticket domain?
 
@@ -303,7 +303,7 @@ FINDINGS TO FIX:
 {findings_text}
 
 INSTRUCTIONS:
-1. Address each finding strictly without violating MigrationGate or Target Contraction.
+1. Address each finding strictly without violating MigrationGate, Max CC Non-Regression, or Layer Leakage Gate.
 2. Run `{ticket.test_seam_command}` and `npx tsc --noEmit` to verify hermetic cleanliness.
 3. Commit the changes:
    `git commit -am "refactor({ticket.domain}): polish review findings ({ticket.ticket_id})"`

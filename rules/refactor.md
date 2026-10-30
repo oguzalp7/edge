@@ -8,7 +8,7 @@ Bu doküman, otonom ve yarı-otonom refaktör görevlerini icra eden tüm alt-aj
 
 * **Girdi:** `.edge/ledger/core.json` veya `.edge/ledger/ui.json` defterindeki bilet.
 * **Amaç:** Davranışı milimetrik olarak koruyarak, monolitik ve sızıntılı kodları temiz katmanlara ayrıştırmak veya tekrar eden UI yapılarını merkezi primitiflere toplamak.
-* **Çıktı:** Net satır sayısı azalmış, testleri yeşil, `gate.py` onaylı atomik git commit.
+* **Çıktı:** `MigrationGate`, `Max CC Non-Regression` (maksimum döngüsel karmaşıklık kötüleşmemesi) ve `Layer Leakage Gate` (katman sızıntısı kontrolü) kapılarından geçmiş, testleri yeşil, `gate.py` onaylı atomik git commit.
 
 ---
 
@@ -28,7 +28,11 @@ Bu doküman, otonom ve yarı-otonom refaktör görevlerini icra eden tüm alt-aj
 3. **İçten Dışa Adım (Inside-Out):**
    * **Core Track:** Önce domain repository ve saf iş mantığı ayrıştırılır, ardından controller/action ince bir orkestratöre dönüştürülür (`skills/edge-core-refactor`).
    * **UI Track:** Önce merkezi primitif (`src/components/ui/`) oluşturulur, ardından ham JSX blokları bu bileşene taşınarak sığ sarmalayıcılar (`Zero-Wrapper`) silinir (`skills/edge-ui-refactor`).
-4. **Tip Güvenliği ve Standart Uyumu:**
+4. **Deterministik Mimari Kapılar (`MigrationGate`, `Max CC Non-Regression`, `Layer Leakage`):**
+   * **`MigrationGate`:** Refaktör sırasında `src/db/schema/*` veya `drizzle/*` dosyalarına kesinlikle dokunulmaz.
+   * **`Max CC Non-Regression`:** Yapay satır sayısı küçültme (`ΔSLOC < 0`) zorunluluğu uygulanmaz; temiz arayüz ve katman ayrıştırmaları toplam satır sayısını artırabilir. Bunun yerine mevcut dosyalarda maksimum döngüsel karmaşıklık (`Max CC`) kötüleşemez (`after_max_cc <= max(before_max_cc, 10)`) ve yeni üretim dosyalarında `Max CC <= 10` tavanı korunur.
+   * **`Layer Leakage Gate`:** Action/controller dosyalarında (`src/actions/**`, `app/actions/**`, `*/actions/*.ts*`) doğrudan DB sızıntısı (`db.select`, `db.insert`, `db.update`, `db.delete`, `db.transaction`, `db.query`) artamaz (`after_leaks <= before_leaks`) ve yeni action dosyalarında `0` olmalıdır.
+5. **Tip Güvenliği ve Standart Uyumu:**
    * Projenin `coding_standards.md` dosyasına riayet edilir; `any` veya gevşek tip kaçamakları yasaktır.
-5. **Kapı Kontrolü (Gate Execution):**
+6. **Kapı Kontrolü (Gate Execution):**
    * Değişiklik bittiğinde `python tools/gate.py <repo>` ve görsel regresyon kontrolleri (UI için) 0 exit code ile geçmelidir.

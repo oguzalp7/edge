@@ -24,7 +24,7 @@ This skill guides a bounded, single-purpose subagent through extracting bloated,
                                   ▼
                     ┌────────────────────────────┐
                     │ Server Action (Controller) │ <─── src/actions/<domain>.ts
-                    │ (Validation, Auth, Coord)  │      (Target Contraction: ΔSLOC < 0)
+                    │ (Validation, Auth, Coord)  │      (Layer Leakage Gate & Max CC Non-Regression)
                     └───────┬────────────┬───────┘
                             │            │
             Domain Queries  │            │ Pure Domain Rules
@@ -45,32 +45,29 @@ This skill guides a bounded, single-purpose subagent through extracting bloated,
 
 ## 🛑 Strict Guardrails & Safety Invariants
 
-Every refactoring iteration MUST adhere to all 6 non-negotiable architectural invariants:
+Every refactoring iteration MUST adhere to all 5 non-negotiable architectural invariants:
 
 1. **MigrationGate Invariant (Zero Schema Changes):**
    - **NEVER** modify or touch files under `src/db/schema/*` or `drizzle/` migrations.
    - Refactoring tasks must NEVER alter database schemas, columns, constraints, or table structures.
    - Any diff touching migration or schema files will be immediately rejected at Stage 1 of the Verification Gate.
 
-2. **Database Leak Elimination:**
-   - **Zero** direct `db.select`, `db.insert`, `db.update`, `db.delete`, or `db.transaction` calls inside `src/actions/`.
+2. **Layer Leakage Gate (Controller DB Leak Non-Regression):**
+   - Action controllers (`src/actions/**`, `app/actions/**`, `*/actions/*.ts*`) must never introduce new direct `db.select`, `db.insert`, `db.update`, `db.delete`, `db.transaction`, or `db.query` calls (`after_leaks <= before_leaks`).
+   - Brand-new action controllers must have **zero** (`0`) direct DB calls.
    - Actions must delegate persistence strictly to domain repositories (`src/lib/<domain>/repository.ts`).
-   - Leaking raw SQL/Drizzle calls into the controller layer violates separation of concerns and fails automated audit.
 
-3. **Target File Contraction ($\Delta\text{SLOC}_{\text{target}} < 0$):**
-   - The target action file being refactored must strictly shrink:
-     $$\Delta\text{SLOC}_{\text{target}} = \text{Insertions} - \text{Deletions} < 0$$
-   - Controllers must become lean dispatchers. Any refactoring where the target action expands or stays neutral will fail the Target SLOC Contraction Gate.
+3. **Max CC Non-Regression Gate (Complexity Ceiling, Not Line Contraction):**
+   - Artificial line-count reduction rules (`ΔSLOC < 0`) are retired: legitimate layer extractions (TypeScript interfaces, domain repositories, pure core functions) may naturally add net lines.
+   - Instead, cyclomatic complexity must never regress on modified production files:
+     $$\text{CC}_{\text{after}} \le \max(\text{CC}_{\text{before}}, 10)$$
+   - Newly created production files must strictly maintain a healthy per-function complexity ceiling ($\text{CC}_{\text{after}} \le 10$).
 
-4. **Scaffolding Budget Tolerance:**
-   - When establishing a **new** domain repository (`src/lib/<domain>/repository.ts`), a one-time allowance up to **+25 lines** is permitted for repository interface and factory setup (`--allow-scaffolding 25`).
-   - Subsequent extractions in that domain must maintain net non-inflation across production code ($\Delta\text{SLOC} \le 0$).
-
-5. **Zero-Wrapper Left Behind (No Shallow Pass-Throughs):**
+4. **Zero-Wrapper Left Behind (No Shallow Pass-Throughs):**
    - Do not create shallow pass-through services, 1-line re-exports, or redundant abstraction layers.
    - Every module must represent a **Deep Module** (Ousterhout): simple interface hiding substantive implementation details.
 
-6. **Poteto Hillclimbing Prensibi (1 Borç = 1 Mikro-Commit):**
+5. **Poteto Hillclimbing Prensibi (1 Borç = 1 Mikro-Commit):**
    - Focus on **1 specific debt item** from `.edge/ledger/core.json` per subagent iteration.
    - Ensure strictly monotonic debt improvement:
      $$\text{Debt}_{t+1} < \text{Debt}_t$$
@@ -198,13 +195,9 @@ If any compilation or test failure occurs, revert and fix immediately before con
 
 ### Step 6: Edge Verification Gate & Ledger Update
 1. **Run Edge Verification Gate:**
-   Run the deterministic verification gate with target file contraction and applicable scaffolding allowance:
+   Run the deterministic verification gate (`MigrationGate` + `Max CC Non-Regression` + `Layer Leakage Gate`):
    ```bash
-   # For existing repository updates:
-   python3 tools/gate.py /home/oguz/MS-Randevu-monolith --base HEAD~1 --target-file src/actions/<domain>.ts
-
-   # For brand-new domain repository creation (with scaffolding allowance):
-   python3 tools/gate.py /home/oguz/MS-Randevu-monolith --base HEAD~1 --target-file src/actions/<domain>.ts --allow-scaffolding 25
+   python3 tools/gate.py /home/oguz/MS-Randevu-monolith --base HEAD~1 --track core
    ```
 
 2. **Verify Ledger Status & Hillclimbing Monotonicity:**

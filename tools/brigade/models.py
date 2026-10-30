@@ -85,7 +85,7 @@ class Ticket:
     suggested_fix: str
     branch_name: str
     test_seam_command: str
-    scaffolding_allowance: int = 0
+    scaffolding_allowance: int = 0            # Deprecated/legacy: retained strictly for backward JSON schema compatibility
     target_symbol: Optional[str] = None
     negative_constraints: List[str] = field(default_factory=list)
     worktree_path: Optional[str] = None
@@ -99,7 +99,7 @@ class Ticket:
     attempt_count: int = 1
     max_attempts: int = 2
     status: str = "OPEN"                      # "OPEN" | "RESOLVED" | "STAGNATED" | "ESCALATED"
-    enforce_contraction: bool = False         # Decoupled from hard line reduction requirement
+    enforce_contraction: bool = False         # Deprecated/legacy: retained strictly for backward JSON schema compatibility
     allow_schema_migration: bool = False      # Allowed for feature track or schema expansion
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -113,7 +113,8 @@ class Ticket:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Ticket":
-        return cls(**data)
+        valid_fields = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
+        return cls(**valid_fields)
 
 
 @dataclass

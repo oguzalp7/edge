@@ -389,7 +389,7 @@ class TestBrigadeFSM(unittest.TestCase):
             suggested_fix="fix",
             branch_name="refactor/core-customers-test",
             test_seam_command="vitest",
-            enforce_contraction=True,
+            enforce_contraction=True,  # Legacy flag is retired; must never block positive SLOC
         )
         self.fsm.state.active_ticket = ticket
         self.fsm.state.current_state = CycleState.SURGERY
@@ -399,21 +399,16 @@ class TestBrigadeFSM(unittest.TestCase):
                 if "--name-only" in cmd:
                     return (0, "src/actions/customers.ts", "")
                 if "--numstat" in cmd:
-                    # 50 insertions, 10 deletions -> net +40 inflation!
+                    # 50 insertions, 10 deletions -> net +40 lines!
                     return (0, "50\t10\tsrc/actions/customers.ts", "")
                 return (0, "", "")
 
             mock_cmd.side_effect = side_effect
-            # 1. When enforce_contraction is True, it catches the violation
-            passed, msg, _ = self.fsm.guard_surgery_to_verify()
-            self.assertFalse(passed)
-            self.assertIn("Target Contraction VIOLATION", msg)
-
-            # 2. When enforce_contraction is False (the new default), it passes!
-            ticket.enforce_contraction = False
+            # Positive SLOC (+40 lines) passes guard_surgery_to_verify and records telemetry
             passed, msg, details = self.fsm.guard_surgery_to_verify()
             self.assertTrue(passed)
             self.assertEqual(details["target_delta"], 40)
+            self.assertEqual(details["total_net"], 40)
 
     def test_guard_surgery_success(self):
         ticket = Ticket(
@@ -793,6 +788,7 @@ class TestBrigadeFSM(unittest.TestCase):
 
     def test_fsm_gate_appends_skip_verify(self):
         from unittest.mock import MagicMock, patch
+        self.fsm.state.base_branch = "development"
         self.fsm.state.active_ticket = MagicMock()
         self.fsm.state.active_ticket.track = "core"
         self.fsm.state.active_ticket.worktree_path = self.repo_path
@@ -805,6 +801,16 @@ class TestBrigadeFSM(unittest.TestCase):
             mock_cmd.assert_called_once()
             invoked_cmd = mock_cmd.call_args[0][0]
             self.assertIn("--skip-verify", invoked_cmd, "gate.py must be invoked with --skip-verify to prevent 120s timeouts")
+            self.assertIn("development", invoked_cmd)
+            self.assertNotIn("--no-refactor", invoked_cmd)
+
+        # Feature track passes --no-refactor
+        self.fsm.state.active_ticket.track = "feature"
+        with patch.object(self.fsm, "_run_cmd", return_value=(0, "Gate ok", "")) as mock_cmd:
+            passed, _, _ = self.fsm.guard_gate_to_staging()
+            self.assertTrue(passed)
+            invoked_cmd = mock_cmd.call_args[0][0]
+            self.assertIn("--no-refactor", invoked_cmd)
 
     def test_calculate_token_estimate(self):
         mock_transcript = self.repo_path / "mock_transcript.jsonl"
