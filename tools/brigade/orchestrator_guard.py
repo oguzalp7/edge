@@ -701,7 +701,125 @@ def get_target_file(args: dict) -> str:
     return str(path_val).replace("\\", "/").lower()
 
 
+def _detect_transcript_afk_signal(transcript_path: Optional[str]) -> Tuple[bool, str]:
+    if not transcript_path:
+        return False, ""
+    tp = to_wsl_path(str(transcript_path))
+    if not (tp.exists() and tp.is_file()):
+        return False, ""
+    try:
+        with open(tp, "r", encoding="utf-8", errors="ignore") as f:
+            for idx, line in enumerate(f):
+                if idx >= 25:
+                    break
+                line_lower = line.lower()
+                if "[edge_afk" in line_lower:
+                    mode = "yolo" if "[edge_afk:yolo]" in line_lower else ("strict" if "[edge_afk:strict]" in line_lower else "")
+                    return True, mode
+    except Exception:
+        pass
+    return False, ""
+
+
+def is_afk_session(payload: Dict[str, Any]) -> Tuple[bool, str]:
+    """
+    Evaluates Dual-Signal detection:
+    1. Signal A: os.environ.get("EDGE_AFK") == "1"
+    2. Signal B: transcript.jsonl first 25 lines contain [EDGE_AFK] tag.
+
+    Returns:
+        (is_afk, mode) where mode is 'strict' or 'yolo'.
+    """
+    signal_a = os.environ.get("EDGE_AFK") == "1"
+    env_mode = os.environ.get("EDGE_AFK_MODE", "").lower().strip()
+    transcript_path = payload.get("transcriptPath") if isinstance(payload, dict) else None
+    signal_b, transcript_mode = _detect_transcript_afk_signal(transcript_path)
+    if not (signal_a or signal_b):
+        return False, "strict"
+    mode = "yolo" if (env_mode == "yolo" or transcript_mode == "yolo") else "strict"
+    return True, mode
+
+
+def _is_hitl_state_target(target_file: str) -> bool:
+    protected = (".edge/brigade.json", ".edge/checkpoint.json", "edge_active_stations.json")
+    return any(p in target_file for p in protected)
+
+
+def _is_schema_target(target_file: str) -> bool:
+    schema_patterns = ("db/schema/", "drizzle/")
+    return any(p in target_file for p in schema_patterns) or target_file.startswith("db/schema/") or target_file.startswith("drizzle/")
+
+
+def _is_test_target(target_file: str) -> bool:
+    test_patterns = ("tests/", "test/", ".test.", ".spec.")
+    return any(p in target_file for p in test_patterns) or target_file.startswith("tests/") or target_file.startswith("test/")
+
+
+def apply_afk_guard(payload: Dict[str, Any], afk_mode: str) -> Optional[Dict[str, Any]]:
+    """
+    Enforces AFK invariants:
+    - Hard DENY on toolCall.name == 'invoke_subagent'
+    - Hard DENY on writes to .edge/brigade.json, .edge/checkpoint.json, edge_active_stations.json
+    - In STRICT mode:
+        - Hard DENY on db/schema/**, drizzle/**
+        - Hard DENY on tests/**, *.test.*, *.spec.*
+    """
+    tool_call = payload.get("toolCall", {}) if isinstance(payload, dict) else {}
+    tool_name = tool_call.get("name", "")
+    args = tool_call.get("args", {})
+
+    if tool_name == "invoke_subagent":
+        return {
+            "decision": "deny",
+            "reason": (
+                "❌ [EDGE AFK GUARD]: Autonomous overnight sessions run strictly as a single agent. "
+                "Spawning child subagents via invoke_subagent is strictly prohibited to prevent quota leaks and zombie loops."
+            ),
+        }
+
+    mutation_tools = ("write_file", "edit_file", "write_to_file", "replace_file_content")
+    if tool_name not in mutation_tools:
+        return None
+
+    target_file = get_target_file(args)
+    if _is_hitl_state_target(target_file):
+        return {
+            "decision": "deny",
+            "reason": (
+                "❌ [EDGE AFK STATE GUARD]: Autonomous overnight sessions cannot mutate human-in-the-loop "
+                "coordination state (.edge/brigade.json, .edge/checkpoint.json, edge_active_stations.json)."
+            ),
+        }
+
+    if afk_mode == "strict":
+        if _is_schema_target(target_file):
+            return {
+                "decision": "deny",
+                "reason": (
+                    f"❌ [MIGRATIONGATE GUARD]: Target '{target_file}' is locked in strict mode. "
+                    "Autonomous overnight sessions cannot mutate database schemas or migrations."
+                ),
+            }
+        if _is_test_target(target_file):
+            return {
+                "decision": "deny",
+                "reason": (
+                    f"❌ [TEST IMMUTABILITY GUARD]: Target '{target_file}' is a test file. "
+                    "In strict mode, tests cannot be modified or weakened by autonomous overnight sessions."
+                ),
+            }
+
+    return None
+
+
 def handle_pre_tool(payload: dict) -> dict:
+    is_afk, afk_mode = is_afk_session(payload)
+    if is_afk:
+        afk_decision = apply_afk_guard(payload, afk_mode)
+        if afk_decision is not None:
+            return afk_decision
+        return {"decision": "allow"}
+
     tool_call = payload.get("toolCall", {})
     tool_name = tool_call.get("name", "")
     args = tool_call.get("args", {})
@@ -856,6 +974,10 @@ def handle_pre_tool(payload: dict) -> dict:
 
 
 def handle_post_tool(payload: dict) -> dict:
+    is_afk, _ = is_afk_session(payload)
+    if is_afk:
+        return {}
+
     tool_call = payload.get("toolCall", {})
     tool_name = tool_call.get("name", "")
     args = tool_call.get("args", {})
@@ -923,6 +1045,10 @@ def handle_post_tool(payload: dict) -> dict:
 
 
 def handle_pre_invocation(payload: dict) -> dict:
+    is_afk, _ = is_afk_session(payload)
+    if is_afk:
+        return {}
+
     role, source = detect_session_role(payload)
 
     if role == "ORCHESTRATOR":

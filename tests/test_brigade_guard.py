@@ -5,6 +5,7 @@ Unit Tests for Brigade Guard & Station Persistence Protocol.
 
 import unittest
 from unittest.mock import patch
+import os
 import json
 import tempfile
 from pathlib import Path
@@ -922,6 +923,308 @@ class TestStationSelectorRotation(unittest.TestCase):
         )
         self.assertEqual(res["decision"], "deny")
         self.assertIn("cid-repo-coder-555", res["reason"])
+
+
+class TestAfkSessionArmor(unittest.TestCase):
+    def setUp(self):
+        self.orig_env = os.environ.copy()
+        os.environ.pop("EDGE_AFK", None)
+        os.environ.pop("EDGE_AFK_MODE", None)
+
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.temp_path = Path(self.temp_dir.name)
+        self.temp_stations_file = self.temp_path / "edge_active_stations.json"
+        self.orig_file = guard.ACTIVE_STATIONS_FILE
+        guard.ACTIVE_STATIONS_FILE = self.temp_stations_file
+
+        self.store = guard.StationStore(self.temp_stations_file)
+
+    def tearDown(self):
+        guard.ACTIVE_STATIONS_FILE = self.orig_file
+        self.temp_dir.cleanup()
+        os.environ.clear()
+        os.environ.update(self.orig_env)
+
+    # 1. Dual-Signal Detection & Mode Resolution
+    def test_afk_detection_via_signal_a_env_default_strict(self):
+        self.assertTrue(hasattr(guard, "is_afk_session"), "guard.is_afk_session must exist")
+        os.environ["EDGE_AFK"] = "1"
+        is_afk, mode = guard.is_afk_session({})
+        self.assertTrue(is_afk)
+        self.assertEqual(mode, "strict")
+
+    def test_afk_detection_via_signal_a_env_yolo_mode(self):
+        self.assertTrue(hasattr(guard, "is_afk_session"), "guard.is_afk_session must exist")
+        os.environ["EDGE_AFK"] = "1"
+        os.environ["EDGE_AFK_MODE"] = "yolo"
+        is_afk, mode = guard.is_afk_session({})
+        self.assertTrue(is_afk)
+        self.assertEqual(mode, "yolo")
+
+    def test_afk_detection_via_signal_b_transcript_strict(self):
+        self.assertTrue(hasattr(guard, "is_afk_session"), "guard.is_afk_session must exist")
+        transcript_file = self.temp_path / "transcript.jsonl"
+        with open(transcript_file, "w", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "step_index": 1,
+                "source": "USER_EXPLICIT",
+                "content": "[EDGE_AFK:strict]\nOBJECTIVE: Refactor billing actions"
+            }) + "\n")
+
+        payload = {"transcriptPath": str(transcript_file)}
+        is_afk, mode = guard.is_afk_session(payload)
+        self.assertTrue(is_afk)
+        self.assertEqual(mode, "strict")
+
+    def test_afk_detection_via_signal_b_transcript_yolo(self):
+        self.assertTrue(hasattr(guard, "is_afk_session"), "guard.is_afk_session must exist")
+        transcript_file = self.temp_path / "transcript.jsonl"
+        with open(transcript_file, "w", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "step_index": 1,
+                "source": "USER_EXPLICIT",
+                "content": "[EDGE_AFK:yolo]\nOBJECTIVE: Overhaul tests and migrations"
+            }) + "\n")
+
+        payload = {"transcriptPath": str(transcript_file)}
+        is_afk, mode = guard.is_afk_session(payload)
+        self.assertTrue(is_afk)
+        self.assertEqual(mode, "yolo")
+
+    def test_afk_detection_non_afk_session(self):
+        self.assertTrue(hasattr(guard, "is_afk_session"), "guard.is_afk_session must exist")
+        transcript_file = self.temp_path / "transcript.jsonl"
+        with open(transcript_file, "w", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "step_index": 1,
+                "source": "USER_EXPLICIT",
+                "content": "Please check the status of our project"
+            }) + "\n")
+
+        payload = {"transcriptPath": str(transcript_file)}
+        is_afk, mode = guard.is_afk_session(payload)
+        self.assertFalse(is_afk)
+
+    # 2. Universal AFK Denials in Both Strict and YOLO Modes
+    def test_afk_universal_blocks_invoke_subagent_in_strict_and_yolo(self):
+        for mode in ("strict", "yolo"):
+            os.environ["EDGE_AFK"] = "1"
+            os.environ["EDGE_AFK_MODE"] = mode
+            payload = {
+                "conversationId": "afk-session-1",
+                "toolCall": {
+                    "name": "invoke_subagent",
+                    "args": {"Role": "CODER", "Prompt": "Write some code"}
+                }
+            }
+            res = guard.handle_pre_tool(payload)
+            self.assertEqual(res["decision"], "deny", f"Mode {mode} must deny invoke_subagent")
+            self.assertIn("[EDGE AFK GUARD]", res["reason"])
+
+    def test_afk_universal_blocks_hitl_state_files(self):
+        protected_files = [
+            ".edge/brigade.json",
+            "foo/.edge/brigade.json",
+            ".edge/checkpoint.json",
+            "edge_active_stations.json",
+            "/home/oguz/.gemini/antigravity/edge_active_stations.json",
+        ]
+        tool_names = ["write_file", "edit_file", "write_to_file", "replace_file_content"]
+
+        for mode in ("strict", "yolo"):
+            os.environ["EDGE_AFK"] = "1"
+            os.environ["EDGE_AFK_MODE"] = mode
+            for filepath in protected_files:
+                for tool in tool_names:
+                    arg_key = "Path" if tool in ("write_file", "edit_file") else "TargetFile"
+                    payload = {
+                        "conversationId": "afk-session-1",
+                        "toolCall": {
+                            "name": tool,
+                            "args": {arg_key: filepath, "Content": "{}"}
+                        }
+                    }
+                    res = guard.handle_pre_tool(payload)
+                    self.assertEqual(res["decision"], "deny", f"Mode {mode} with tool {tool} on {filepath} must be denied")
+                    self.assertIn("[EDGE AFK STATE GUARD]", res["reason"])
+
+    def test_afk_post_tool_never_registers_station(self):
+        os.environ["EDGE_AFK"] = "1"
+        repo_dir = self.temp_path / "mock_repo"
+        repo_dir.mkdir(parents=True, exist_ok=True)
+
+        payload = {
+            "conversationId": "afk-session-1",
+            "cwd": str(repo_dir),
+            "toolCall": {
+                "name": "invoke_subagent",
+                "args": {"role": "CODER"}
+            },
+            "toolResponse": {
+                "conversationId": "afk-subagent-999"
+            }
+        }
+        guard.handle_post_tool(payload)
+        envelope = self.store.load()
+        self.assertNotIn("afk-subagent-999", envelope["stations"])
+        self.assertNotIn("afk-session-1", envelope["stations"])
+
+        brigade_json = repo_dir / ".edge" / "brigade.json"
+        self.assertFalse(brigade_json.exists())
+
+    def test_afk_pre_invocation_never_injects_orchestrator(self):
+        os.environ["EDGE_AFK"] = "1"
+        transcript_file = self.temp_path / "transcript.jsonl"
+        with open(transcript_file, "w", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "step_index": 0,
+                "source": "USER_EXPLICIT",
+                "content": "[EDGE_AFK:strict]\nOBJECTIVE: Autonomous loop"
+            }) + "\n")
+
+        payload = {
+            "conversationId": "afk-session-root",
+            "transcriptPath": str(transcript_file),
+        }
+        res = guard.handle_pre_invocation(payload)
+        injected = res.get("injectSteps", [])
+        for step in injected:
+            msg = step.get("ephemeralMessage", "")
+            self.assertNotIn("ORCHESTRATOR", msg)
+            self.assertNotIn("Sovereign Commander", msg)
+            self.assertNotIn("Canonical Brigade Stations", msg)
+
+    # 3. Strict Mode File Boundaries
+    def test_afk_strict_denies_schema_and_migrations(self):
+        os.environ["EDGE_AFK"] = "1"
+        os.environ["EDGE_AFK_MODE"] = "strict"
+        schema_targets = [
+            "src/db/schema/users.ts",
+            "db/schema/posts.ts",
+            "drizzle/0001_initial.sql",
+            "drizzle/meta/_journal.json",
+        ]
+        for target in schema_targets:
+            payload = {
+                "conversationId": "afk-session-strict",
+                "toolCall": {
+                    "name": "write_file",
+                    "args": {"Path": target, "Content": "export const users = ..."}
+                }
+            }
+            res = guard.handle_pre_tool(payload)
+            self.assertEqual(res["decision"], "deny", f"Strict mode must deny schema target {target}")
+            self.assertIn("[MIGRATIONGATE GUARD]", res["reason"])
+
+    def test_afk_strict_denies_tests(self):
+        os.environ["EDGE_AFK"] = "1"
+        os.environ["EDGE_AFK_MODE"] = "strict"
+        test_targets = [
+            "tests/unit/billing.test.ts",
+            "src/services/billing.spec.ts",
+            "test/integration/auth.test.js",
+        ]
+        for target in test_targets:
+            payload = {
+                "conversationId": "afk-session-strict",
+                "toolCall": {
+                    "name": "edit_file",
+                    "args": {"Path": target, "Target": "foo", "Replacement": "bar"}
+                }
+            }
+            res = guard.handle_pre_tool(payload)
+            self.assertEqual(res["decision"], "deny", f"Strict mode must deny test target {target}")
+            self.assertIn("[TEST IMMUTABILITY GUARD]", res["reason"])
+
+    def test_afk_strict_allows_implementation_and_scratchpad(self):
+        # Even when running as root session (which standard guard treats as ORCHESTRATOR),
+        # an AFK session must be allowed to read and write implementation files and scratchpad.
+        os.environ["EDGE_AFK"] = "1"
+        os.environ["EDGE_AFK_MODE"] = "strict"
+
+        transcript_file = self.temp_path / "transcript.jsonl"
+        with open(transcript_file, "w", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "step_index": 0,
+                "source": "USER_EXPLICIT",
+                "content": "[EDGE_AFK:strict]\nOBJECTIVE: Refactor services"
+            }) + "\n")
+
+        allowed_targets = [
+            "src/services/billing.ts",
+            "lib/utils.ts",
+            "app/api/route.ts",
+            ".gnhf/notes.md",
+        ]
+        for target in allowed_targets:
+            payload_write = {
+                "conversationId": "afk-session-strict-root",
+                "transcriptPath": str(transcript_file),
+                "toolCall": {
+                    "name": "write_file",
+                    "args": {"Path": target, "Content": "// refactored"}
+                }
+            }
+            res_write = guard.handle_pre_tool(payload_write)
+            self.assertEqual(res_write.get("decision"), "allow", f"Strict mode must allow writing {target}")
+
+            payload_read = {
+                "conversationId": "afk-session-strict-root",
+                "transcriptPath": str(transcript_file),
+                "toolCall": {
+                    "name": "read_file",
+                    "args": {"Path": target}
+                }
+            }
+            res_read = guard.handle_pre_tool(payload_read)
+            self.assertEqual(res_read.get("decision"), "allow", f"Strict mode must allow reading {target}")
+
+    # 4. YOLO Mode File Boundaries
+    def test_afk_yolo_allows_implementation_tests_and_schemas_but_blocks_subagents_and_state(self):
+        os.environ["EDGE_AFK"] = "1"
+        os.environ["EDGE_AFK_MODE"] = "yolo"
+
+        targets = [
+            "src/services/billing.ts",
+            "tests/unit/foo.test.ts",
+            "src/foo.spec.ts",
+            "src/db/schema/users.ts",
+            "drizzle/0001.sql",
+        ]
+        for target in targets:
+            payload = {
+                "conversationId": "afk-session-yolo",
+                "toolCall": {
+                    "name": "edit_file",
+                    "args": {"Path": target, "Target": "old", "Replacement": "new"}
+                }
+            }
+            res = guard.handle_pre_tool(payload)
+            self.assertEqual(res.get("decision"), "allow", f"YOLO mode must allow editing {target}")
+
+        # Subagents still denied in YOLO
+        payload_subagent = {
+            "conversationId": "afk-session-yolo",
+            "toolCall": {
+                "name": "invoke_subagent",
+                "args": {"Role": "CODER"}
+            }
+        }
+        res_sub = guard.handle_pre_tool(payload_subagent)
+        self.assertEqual(res_sub["decision"], "deny")
+        self.assertIn("[EDGE AFK GUARD]", res_sub["reason"])
+
+        # State files still denied in YOLO
+        payload_state = {
+            "conversationId": "afk-session-yolo",
+            "toolCall": {
+                "name": "write_file",
+                "args": {"Path": ".edge/brigade.json", "Content": "{}"}
+            }
+        }
+        res_state = guard.handle_pre_tool(payload_state)
+        self.assertEqual(res_state["decision"], "deny")
+        self.assertIn("[EDGE AFK STATE GUARD]", res_state["reason"])
 
 
 if __name__ == "__main__":

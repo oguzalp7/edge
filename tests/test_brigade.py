@@ -99,6 +99,23 @@ class TestBrigadeModels(unittest.TestCase):
         self.assertEqual(restored.name, "Chef Surgeon")
         self.assertEqual(restored.status, "IDLE")
 
+    def test_station_from_dict_extra_fields_resilience(self):
+        # Station.from_dict must gracefully ignore unexpected/legacy fields (e.g. conversationId, updated_at)
+        data = {
+            "role": "surgeon",
+            "conversation_id": "conv-resilience-123",
+            "name": "Chef Surgeon",
+            "status": "BUSY",
+            "conversationId": "legacy-alias-cid",
+            "updated_at": "2026-10-31T00:00:00Z",
+            "extra_custom_metadata": {"foo": "bar"},
+        }
+        restored = Station.from_dict(data)
+        self.assertEqual(restored.role, "surgeon")
+        self.assertEqual(restored.conversation_id, "conv-resilience-123")
+        self.assertEqual(restored.name, "Chef Surgeon")
+        self.assertEqual(restored.status, "BUSY")
+
     def test_ticket_id_generation_and_serialization(self):
         tid = Ticket.generate_id("core", "customers", "RULE-DB-LEAK", 100)
         self.assertTrue(tid.startswith("TICK-"))

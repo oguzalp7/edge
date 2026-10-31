@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, fields
 from enum import Enum
 from typing import List, Dict, Any, Optional
 import hashlib
@@ -50,7 +50,12 @@ class Station:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Station":
-        return cls(**data)
+        raw = dict(data)
+        if "conversation_id" not in raw and "conversationId" in raw:
+            raw["conversation_id"] = raw["conversationId"]
+        valid_fields = {f.name for f in fields(cls)}
+        filtered = {k: v for k, v in raw.items() if k in valid_fields}
+        return cls(**filtered)
 
 
 @dataclass
