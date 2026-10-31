@@ -48,6 +48,23 @@ def _build_env(options: GnhfRunOptions) -> Dict[str, str]:
     return env
 
 
+def _print_dry_run_preview(options: GnhfRunOptions, cmd: List[str], prompt: str) -> None:
+    """Outputs resolved configuration and synthesized prompt for dry-run inspection."""
+    mode_str = options.mode.value if isinstance(options.mode, AfkMode) else str(options.mode)
+    cmd_str = " ".join(cmd[:-1])
+    print("🌙 [DRY-RUN] Edge-GNHF Autonomous Run Preview")
+    print("━" * 60)
+    print(f"Repository: {options.repo_path}")
+    print(f"Agent:      {options.agent}")
+    print(f"Model:      {options.model}")
+    print(f"Mode:       {mode_str}")
+    print(f"Track:      {options.track}")
+    print(f"Command:    {cmd_str}")
+    print("━" * 60)
+    print(f"Synthesized Prompt:\n{prompt}")
+    print("━" * 60)
+
+
 def execute_gnhf_run(options: GnhfRunOptions) -> int:
     """
     Validates git repository, builds prompt, sets up ephemeral shim,
@@ -65,10 +82,12 @@ def execute_gnhf_run(options: GnhfRunOptions) -> int:
         test_cmd=options.test_cmd,
     )
 
+    cmd = _build_command(options, prompt)
+
     if options.dry_run:
+        _print_dry_run_preview(options, cmd, prompt)
         return 0
 
-    cmd = _build_command(options, prompt)
     env = _build_env(options)
 
     if options.agent in ("agy", "antigravity"):

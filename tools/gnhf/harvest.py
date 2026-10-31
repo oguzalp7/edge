@@ -188,9 +188,20 @@ def _perform_merge(repo_path: Path, base_branch: str, branch_name: str) -> Tuple
     return True, None
 
 
+def _cleanup_empty_parent_dir(worktree_path: Path) -> None:
+    parent = worktree_path.parent
+    if parent.name.endswith("-gnhf-worktrees") and parent.exists():
+        try:
+            if not any(parent.iterdir()):
+                parent.rmdir()
+        except OSError:
+            pass
+
+
 def _perform_cleanup(repo_path: Path, worktree_path: Path, branch_name: str) -> bool:
     subprocess.run(["git", "worktree", "remove", "--force", str(worktree_path)], cwd=repo_path, capture_output=True)
     subprocess.run(["git", "branch", "-D", branch_name], cwd=repo_path, capture_output=True)
+    _cleanup_empty_parent_dir(worktree_path)
     return True
 
 

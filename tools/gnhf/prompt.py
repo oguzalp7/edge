@@ -31,16 +31,19 @@ def build_gnhf_prompt(
     test_cmd: Optional[str] = None
 ) -> str:
     """
-    Synthesizes the deterministic AFK prompt with [EDGE_AFK:<mode>] header,
-    atomic step constraints, blocker triage instructions, and quality gate commands.
+    Synthesizes the deterministic AFK prompt with objective on 1st line (for gnhf branch slug),
+    followed by [EDGE_AFK:<mode>] header, atomic step constraints, blocker triage, and quality gate commands.
     """
+    clean_obj = objective.strip()
     gate_path = get_edge_gate_path()
     test_instruction = _format_test_instruction(test_cmd)
     mode_boundary = _format_mode_boundary(mode)
 
-    return f"""[EDGE_AFK:{mode}]
+    return f"""{clean_obj}
+[EDGE_AFK:{mode}]
+
 OBJECTIVE:
-{objective}
+{clean_obj}
 
 OPERATIONAL CONSTRAINTS (AFK Autonomous Session):
 1. ATOMIC ITERATION: Take exactly ONE atomic, verifiable refactor/fix step per turn.

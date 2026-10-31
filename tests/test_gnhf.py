@@ -4,12 +4,13 @@ Hermetic Unit and Contract Tests for Edge-GNHF Subsystems (SPEC-EDGE-GNHF-001).
 
 Tests coverage:
 1. tools.gnhf.shim: Ephemeral agy wrapper, model injection, PATH management, guaranteed cleanup.
-2. tools.gnhf.prompt: Deterministic AFK prompt builder, [EDGE_AFK:<mode>] headers, absolute gate.py paths.
-3. tools.gnhf.runner: WSLENV injection, subprocess flag composition, dry-run safety.
-4. tools.gnhf.harvest: Porcelain worktree parsing, blocker triage extraction, gate-verified merge and teardown.
-5. tools.gnhf.cli: CLI argument parsing for run, status, and harvest.
+2. tools.gnhf.prompt: Deterministic AFK prompt builder, objective-first header for gnhf slug, absolute gate.py paths.
+3. tools.gnhf.runner: WSLENV injection, subprocess flag composition, dry-run safety and stdout reporting.
+4. tools.gnhf.harvest: Porcelain worktree parsing, blocker triage extraction, gate-verified merge, worktree & parent dir cleanup.
+5. tools.gnhf.cli: CLI argument parsing and end-to-end dry-run execution.
 """
 
+import io
 import os
 import sys
 import json
@@ -18,6 +19,7 @@ import tempfile
 import subprocess
 import unittest
 from pathlib import Path
+from contextlib import redirect_stdout
 from unittest.mock import patch, MagicMock
 
 # Add project root to sys.path
@@ -114,6 +116,78 @@ class TestGnhfShim(unittest.TestCase):
         self.assertIn("--model custom-model", calls)
         self.assertNotIn("gemini-3.8-flash-medium", calls)
 
+    def test_shim_execution_strips_verbose_flags_and_injects_model(self):
+        from tools.gnhf.shim import create_agy_shim
+
+        log_file = self.temp_path / "real_agy_verbose_calls.log"
+        mock_real_agy = self.temp_path / "real_agy_bin"
+        with open(mock_real_agy, "w", encoding="utf-8") as f:
+            f.write(f"#!/usr/bin/env bash\necho \"$@\" >> '{log_file}'\n")
+        mock_real_agy.chmod(0o755)
+
+        with patch("shutil.which", return_value=str(mock_real_agy)):
+            with create_agy_shim("gemini-3.8-flash-medium") as shim_dir:
+                agy_script = Path(shim_dir) / "agy"
+                # gnhf cli.mjs sends: -p <prompt> --verbose --output-format stream-json --dangerously-skip-permissions
+                args = [
+                    str(agy_script),
+                    "-p", "hello world",
+                    "--verbose",
+                    "--output-format", "stream-json",
+                    "-verbose",
+                    "--dangerously-skip-permissions"
+                ]
+                res = subprocess.run(args, capture_output=True, text=True)
+                self.assertEqual(res.returncode, 0)
+
+        with open(log_file, "r", encoding="utf-8") as f:
+            calls = f.read()
+
+        # 1. --verbose and -verbose must be stripped completely to prevent Antigravity CLI 2.0 crashes
+        self.assertNotIn("--verbose", calls, "--verbose flag must be filtered out by shim")
+        self.assertNotIn("-verbose", calls, "-verbose flag must be filtered out by shim")
+
+        # 2. --model gemini-3.8-flash-medium must be injected
+        self.assertIn("--model gemini-3.8-flash-medium", calls)
+
+        # 3. All other flags must be preserved intact
+        self.assertIn("-p hello world", calls)
+        self.assertIn("--output-format stream-json", calls)
+        self.assertIn("--dangerously-skip-permissions", calls)
+
+    def test_shim_provides_antigravity_executable_or_symlink(self):
+        from tools.gnhf.shim import create_agy_shim
+
+        log_file = self.temp_path / "real_antigravity_calls.log"
+        mock_real_agy = self.temp_path / "real_agy_bin"
+        with open(mock_real_agy, "w", encoding="utf-8") as f:
+            f.write(f"#!/usr/bin/env bash\necho \"$@\" >> '{log_file}'\n")
+        mock_real_agy.chmod(0o755)
+
+        with patch("shutil.which", return_value=str(mock_real_agy)):
+            with create_agy_shim("gemini-3.8-flash-medium") as shim_dir:
+                antigravity_script = Path(shim_dir) / "antigravity"
+                self.assertTrue(
+                    antigravity_script.exists(),
+                    "Shim directory must provide 'antigravity' executable or symlink alongside 'agy'"
+                )
+                self.assertTrue(
+                    os.access(str(antigravity_script), os.X_OK),
+                    "'antigravity' in shim directory must be executable"
+                )
+
+                # Calling antigravity must also strip --verbose and inject default model
+                args = [str(antigravity_script), "-p", "testing antigravity binary", "--verbose"]
+                res = subprocess.run(args, capture_output=True, text=True)
+                self.assertEqual(res.returncode, 0)
+
+        with open(log_file, "r", encoding="utf-8") as f:
+            calls = f.read()
+
+        self.assertNotIn("--verbose", calls)
+        self.assertIn("--model gemini-3.8-flash-medium", calls)
+        self.assertIn("-p testing antigravity binary", calls)
+
 
 class TestGnhfPrompt(unittest.TestCase):
     def test_build_gnhf_prompt_strict_mode(self):
@@ -122,12 +196,12 @@ class TestGnhfPrompt(unittest.TestCase):
         objective = "Decouple legacy Stripe webhook handlers into repository pattern"
         prompt = build_gnhf_prompt(objective=objective, mode="strict", track="core")
 
-        # 1. Deterministic Signal B Header
-        self.assertTrue(prompt.startswith("[EDGE_AFK:strict]"), "Prompt must start with [EDGE_AFK:strict]")
+        # 1. First line must be the exact objective for human-friendly gnhf branch slug derivation
+        lines = [line.strip() for line in prompt.strip().splitlines() if line.strip()]
+        self.assertEqual(lines[0], objective, "1st line of prompt must be the objective for branch slug derivation")
 
-        # 2. Objective presence
-        self.assertIn("OBJECTIVE:", prompt)
-        self.assertIn(objective, prompt)
+        # 2. Deterministic Signal B Header within top 3 lines
+        self.assertTrue(any(line == "[EDGE_AFK:strict]" for line in lines[:3]), "[EDGE_AFK:strict] tag must be within top 3 lines")
 
         # 3. Single Atomic Step Mandate
         self.assertIn("ATOMIC", prompt)
@@ -141,12 +215,10 @@ class TestGnhfPrompt(unittest.TestCase):
         self.assertIn("invoke_subagent", prompt)
 
         # 6. Embedded Quality Gate WSL Absolute Path
-        # Target project won't have tools/gate.py, so prompt must refer to Edge's absolute gate.py path
         self.assertIn("/tools/gate.py", prompt)
         self.assertIn("--track core", prompt)
         self.assertIn("--skip-verify", prompt)
 
-        # Must NOT use relative 'python3 tools/gate.py'
         self.assertNotIn("python3 tools/gate.py .", prompt)
         self.assertNotIn("python tools/gate.py .", prompt)
 
@@ -156,7 +228,9 @@ class TestGnhfPrompt(unittest.TestCase):
         objective = "Refactor schema and add integration tests"
         prompt = build_gnhf_prompt(objective=objective, mode="yolo", track="ui")
 
-        self.assertTrue(prompt.startswith("[EDGE_AFK:yolo]"), "Prompt must start with [EDGE_AFK:yolo]")
+        lines = [line.strip() for line in prompt.strip().splitlines() if line.strip()]
+        self.assertEqual(lines[0], objective, "1st line of prompt must be the objective for branch slug derivation")
+        self.assertTrue(any(line == "[EDGE_AFK:yolo]" for line in lines[:3]), "[EDGE_AFK:yolo] tag must be within top 3 lines")
         self.assertIn("YOLO MODE", prompt)
         self.assertIn("/tools/gate.py", prompt)
         self.assertIn("--track ui", prompt)
@@ -167,6 +241,32 @@ class TestGnhfPrompt(unittest.TestCase):
         test_cmd = "npx vitest run src/billing.test.ts"
         prompt = build_gnhf_prompt(objective="Fix billing", test_cmd=test_cmd)
         self.assertIn(test_cmd, prompt)
+
+    def test_prompt_objective_first_preserves_orchestrator_guard_detection(self):
+        from tools.gnhf.prompt import build_gnhf_prompt
+        from tools.brigade import orchestrator_guard as guard
+
+        objective = "Refactor duplicate modal skeleton"
+        prompt = build_gnhf_prompt(objective=objective, mode="strict")
+
+        with tempfile.TemporaryDirectory() as td:
+            tfile = Path(td) / "transcript.jsonl"
+            tfile.write_text(json.dumps({
+                "step_index": 0,
+                "source": "USER_EXPLICIT",
+                "content": prompt
+            }) + "\n", encoding="utf-8")
+
+            orig_env = os.environ.copy()
+            try:
+                os.environ.pop("EDGE_AFK", None)
+                os.environ.pop("EDGE_AFK_MODE", None)
+                is_afk, mode = guard.is_afk_session({"transcriptPath": str(tfile)})
+                self.assertTrue(is_afk, "orchestrator_guard must detect AFK from prompt even when objective is on 1st line")
+                self.assertEqual(mode, "strict")
+            finally:
+                os.environ.clear()
+                os.environ.update(orig_env)
 
 
 class TestGnhfRunner(unittest.TestCase):
@@ -190,17 +290,31 @@ class TestGnhfRunner(unittest.TestCase):
         os.environ.update(self.orig_env)
         self.temp_dir.cleanup()
 
-    def test_execute_gnhf_run_dry_run(self):
+    def test_execute_gnhf_run_dry_run_never_calls_subprocess_and_outputs_spec(self):
         from tools.gnhf.runner import execute_gnhf_run, GnhfRunOptions, AfkMode
 
         options = GnhfRunOptions(
             repo_path=self.mock_repo,
-            objective="Refactor auth",
+            objective="Refactor duplicate modal skeleton",
             mode=AfkMode.STRICT,
+            agent="agy",
+            model="gemini-3.8-flash-medium",
+            track="ui",
             dry_run=True,
         )
-        exit_code = execute_gnhf_run(options)
-        self.assertEqual(exit_code, 0, "dry-run must return 0 without spawning subprocesses")
+
+        with patch("subprocess.run") as mock_subproc:
+            f = io.StringIO()
+            with redirect_stdout(f):
+                exit_code = execute_gnhf_run(options)
+
+            self.assertEqual(exit_code, 0, "dry-run must return exit code 0")
+            mock_subproc.assert_not_called()
+
+            output = f.getvalue()
+            self.assertIn("Refactor duplicate modal skeleton", output, "dry-run must output the objective/prompt")
+            self.assertIn("gemini-3.8-flash-medium", output, "dry-run must output resolved model")
+            self.assertIn("gnhf", output, "dry-run must output resolved command")
 
     def test_execute_gnhf_run_env_and_flags_injection(self):
         from tools.gnhf.runner import execute_gnhf_run, GnhfRunOptions, AfkMode
@@ -329,7 +443,6 @@ class TestGnhfHarvest(unittest.TestCase):
             capture_output=True
         )
 
-        # Mock gate.py returning exit code 1 (failure)
         orig_run = subprocess.run
 
         def subproc_side_effect(cmd, *args, **kwargs):
@@ -396,6 +509,78 @@ class TestGnhfHarvest(unittest.TestCase):
             # Worktree directory must be removed
             self.assertFalse(wt_path.exists(), "Worktree directory must be removed after cleanup")
 
+    def test_harvest_cleanup_removes_empty_parent_gnhf_worktrees_dir(self):
+        from tools.gnhf.harvest import harvest_worktree
+
+        # gnhf creates worktrees in <parent>/<repo>-gnhf-worktrees/<slug>
+        parent_worktrees_dir = self.temp_path / f"{self.mock_repo.name}-gnhf-worktrees"
+        parent_worktrees_dir.mkdir(parents=True, exist_ok=True)
+        wt_path = parent_worktrees_dir / "refactor-modal-123"
+
+        subprocess.run(
+            ["git", "worktree", "add", "-b", "gnhf/refactor-modal", str(wt_path), "development"],
+            cwd=self.mock_repo,
+            check=True,
+            capture_output=True
+        )
+        (wt_path / "modal.tsx").write_text("// refactored modal\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=wt_path, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "Refactor modal"], cwd=wt_path, check=True, capture_output=True)
+
+        orig_run = subprocess.run
+        def subproc_side_effect(cmd, *args, **kwargs):
+            cmd_str = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+            if "gate.py" in cmd_str:
+                return subprocess.CompletedProcess(cmd, 0, stdout="Gate OK", stderr="")
+            return orig_run(cmd, *args, **kwargs)
+
+        with patch("subprocess.run", side_effect=subproc_side_effect):
+            res = harvest_worktree(
+                repo_path=self.mock_repo,
+                branch_name="gnhf/refactor-modal",
+                base_branch="development",
+                merge=True,
+                cleanup=True
+            )
+
+            self.assertTrue(res.gate_passed)
+            self.assertTrue(res.merged)
+            self.assertTrue(res.cleaned_up)
+            self.assertFalse(wt_path.exists(), "Worktree directory must be removed")
+            self.assertFalse(parent_worktrees_dir.exists(), "Empty parent *-gnhf-worktrees folder must be cleaned up")
+
+    def test_harvest_cleanup_preserves_parent_gnhf_worktrees_dir_if_other_worktrees_remain(self):
+        from tools.gnhf.harvest import harvest_worktree
+
+        parent_worktrees_dir = self.temp_path / f"{self.mock_repo.name}-gnhf-worktrees"
+        parent_worktrees_dir.mkdir(parents=True, exist_ok=True)
+        wt_path1 = parent_worktrees_dir / "wt-one"
+        wt_path2 = parent_worktrees_dir / "wt-two"
+
+        subprocess.run(["git", "worktree", "add", "-b", "gnhf/branch-one", str(wt_path1), "development"], cwd=self.mock_repo, check=True, capture_output=True)
+        subprocess.run(["git", "worktree", "add", "-b", "gnhf/branch-two", str(wt_path2), "development"], cwd=self.mock_repo, check=True, capture_output=True)
+
+        orig_run = subprocess.run
+        def subproc_side_effect(cmd, *args, **kwargs):
+            cmd_str = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+            if "gate.py" in cmd_str:
+                return subprocess.CompletedProcess(cmd, 0, stdout="Gate OK", stderr="")
+            return orig_run(cmd, *args, **kwargs)
+
+        with patch("subprocess.run", side_effect=subproc_side_effect):
+            res = harvest_worktree(
+                repo_path=self.mock_repo,
+                branch_name="gnhf/branch-one",
+                base_branch="development",
+                merge=True,
+                cleanup=True
+            )
+
+            self.assertTrue(res.cleaned_up)
+            self.assertFalse(wt_path1.exists(), "Cleaned worktree 1 must be removed")
+            self.assertTrue(wt_path2.exists(), "Uncleaned worktree 2 must remain")
+            self.assertTrue(parent_worktrees_dir.exists(), "Parent *-gnhf-worktrees directory must NOT be deleted when other worktrees remain")
+
     def test_harvest_dry_run_does_not_mutate(self):
         from tools.gnhf.harvest import harvest_worktree
 
@@ -431,6 +616,21 @@ class TestGnhfHarvest(unittest.TestCase):
 
 
 class TestGnhfCLI(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.temp_path = Path(self.temp_dir.name)
+        self.mock_repo = self.temp_path / "cli_repo"
+        self.mock_repo.mkdir()
+        subprocess.run(["git", "init"], cwd=self.mock_repo, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@test.local"], cwd=self.mock_repo, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test User"], cwd=self.mock_repo, check=True, capture_output=True)
+        (self.mock_repo / "README.md").write_text("# Test Repo\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=self.mock_repo, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=self.mock_repo, check=True, capture_output=True)
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
     def test_cli_run_argument_parsing(self):
         from tools.gnhf.cli import parse_args
 
@@ -466,6 +666,21 @@ class TestGnhfCLI(unittest.TestCase):
         args = parse_args(["run", "/home/oguz/project", "Do work", "--yolo"])
         self.assertEqual(args.command, "run")
         self.assertEqual(args.mode, "yolo")
+
+    def test_cli_run_dry_run_end_to_end_no_subprocess(self):
+        from tools.gnhf.cli import main
+
+        with patch("subprocess.run") as mock_subproc:
+            f = io.StringIO()
+            with redirect_stdout(f):
+                exit_code = main(["run", str(self.mock_repo), "Refactor duplicate modal skeleton", "--dry-run"])
+
+            self.assertEqual(exit_code, 0, "CLI run --dry-run must exit 0")
+            mock_subproc.assert_not_called()
+
+            output = f.getvalue()
+            self.assertIn("Refactor duplicate modal skeleton", output, "CLI output must contain objective")
+            self.assertIn("gemini-3.8-flash-medium", output, "CLI output must contain model")
 
     def test_cli_status_argument_parsing(self):
         from tools.gnhf.cli import parse_args

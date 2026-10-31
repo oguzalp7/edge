@@ -49,6 +49,9 @@ edge-gnhf run /home/oguz/next-enterprise "Decouple legacy Stripe webhook handler
 # Test ve şema mutasyonuna izin veren koşu (yolo mod)
 edge-gnhf run /home/oguz/next-enterprise "Overhaul auth models and update integration tests" --yolo
 
+# Önizleme (dry-run - prompt ve çözümlenen komutu ekrana basar, alt-işlem başlatmaz)
+edge-gnhf run /home/oguz/next-enterprise "Decouple stripe webhook" --dry-run
+
 # Özel kısıtlamalar ve komutlar ile
 edge-gnhf run /home/oguz/next-enterprise "Migrate server actions" \
   --mode strict \
@@ -114,7 +117,7 @@ Sohbet ajanı `/edge-gnhf` komutunu aldığında aşağıdaki iki fazlı el sık
 ### 🌙 Faz 1: Akşam Hazırlığı (Evening Preparation)
 1. **Hedef Kapsam Belirleme:**
    - Eğer kullanıcı belirli bir hedef belirtmediyse:
-     - Salt-okunur olarak `python3 tools/audit/cli.py` veya `python3 tools/radar/scanner.py` çalıştırır.
+     - Salt-okunur olarak `python3 /mnt/c/Users/oguz_/.gemini/config/plugins/edge/tools/audit/cli.py` veya `python3 /mnt/c/Users/oguz_/.gemini/config/plugins/edge/tools/radar/scanner.py` çalıştırır.
      - En çok teknik borç barındıran (God files, yüksek cyclomatic complexity, CRAP skoru yüksek) Top-3 hedefi kullanıcıya sunar.
 2. **Güvenlik Modu Hizalaması:**
    - Kod kalitesi ve mimari refaktör için `--mode strict` önerir.
