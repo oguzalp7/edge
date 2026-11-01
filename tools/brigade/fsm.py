@@ -155,11 +155,59 @@ class BrigadeFSM:
 
         return True, f"Ticket {ticket.ticket_id} validated. Worktree leased at {ticket.worktree_path} on branch {ticket.branch_name}.", {"worktree_path": ticket.worktree_path}
 
+    def guard_red_to_surgery(self) -> Tuple[bool, str, Dict[str, Any]]:
+        """
+        Validates that Seam Architect has established a genuine, failing red test baseline.
+        Rejects pass-before-code (exit 0) and harness/syntax failures (fake red).
+        """
+        ticket = self.state.active_ticket
+        if not ticket:
+            return False, "No active ticket found in RED_TEST state.", {}
+
+        test_cmd = ticket.test_seam_command if ticket.test_seam_command else "npm run test:unit"
+        test_code, test_out, test_err = self._run_cmd(test_cmd.split())
+
+        # 1. Pass-Before-Code Rejection
+        if test_code == 0:
+            return (
+                False,
+                "RED_BASELINE VIOLATION: Test suite exited 0 before implementation! SEAM_ARCHITECT must write a genuinely failing test.",
+                {"exit_code": 0},
+            )
+
+        # 2. Anti-Fake-Red Guard (broken syntax or harness failure)
+        combined = f"{test_out}\n{test_err}".lower()
+        fake_red_markers = (
+            "syntaxerror",
+            "indentationerror",
+            "taberror",
+            "transform failed",
+            "parse error",
+            "command not found",
+            "no test files found",
+            "no tests found",
+            "collected 0 items",
+        )
+        if test_code in (126, 127) or any(marker in combined for marker in fake_red_markers):
+            return (
+                False,
+                f"FAKE RED DETECTED (exit {test_code}): Test runner failed due to syntax/harness error rather than a valid assertion failure.\n{test_err or test_out}",
+                {"exit_code": test_code},
+            )
+
+        # 3. Valid Red Baseline
+        return (
+            True,
+            f"RED_BASELINE verified (exit code {test_code}): Failing TDD anchor confirmed. Advancing to SURGERY.",
+            {"exit_code": test_code},
+        )
+
     def guard_surgery_to_verify(self) -> Tuple[bool, str, Dict[str, Any]]:
         """
         Validates surgery invariants via git diff:
         1. MigrationGate Invariant: Zero schema or drizzle files touched (on refactor tracks).
-        2. Target File Modification: Verifies target_file was touched and records SLOC delta telemetry.
+        2. Target File Modification / Multi-file / New-file scope verification.
+        3. Records SLOC delta telemetry.
         """
         ticket = self.state.active_ticket
         if not ticket:
@@ -176,10 +224,45 @@ class BrigadeFSM:
             code, stdout, stderr = self._run_cmd(["git", "diff", "--name-only", "HEAD~1"])
 
         modified_files = [f.strip().replace("\\", "/") for f in stdout.splitlines() if f.strip()]
-        
+        modified_files = [f[2:] if f.startswith("./") else f for f in modified_files]
+
+        # Combine with untracked/modified paths from git status --porcelain
+        porcelain_files: List[str] = []
+        p_code, p_out, _ = self._run_cmd(["git", "status", "--porcelain"])
+        if p_code == 0 and p_out.strip():
+            for line in p_out.splitlines():
+                line = line.strip()
+                if len(line) >= 3:
+                    p = line[3:].strip().strip('"').replace("\\", "/")
+                    if " -> " in p:
+                        p = p.split(" -> ")[-1].strip().strip('"').replace("\\", "/")
+                    if p.startswith("./"):
+                        p = p[2:]
+                    if p:
+                        porcelain_files.append(p)
+
+        all_changed_files = list(dict.fromkeys(modified_files + porcelain_files))
+
+        def _is_non_prod(f: str) -> bool:
+            norm = f.replace("\\", "/").strip()
+            if norm.startswith("./"):
+                norm = norm[2:]
+            return (
+                ".test." in norm
+                or ".spec." in norm
+                or norm.startswith("tests/")
+                or "/tests/" in norm
+                or norm.startswith(".edge/")
+                or "/.edge/" in norm
+                or norm.endswith(".md")
+                or norm.endswith(".json")
+            )
+
+        prod_changed_files = [f for f in all_changed_files if not _is_non_prod(f)]
+
         # 1. MigrationGate Invariant check (Enforced unless feature track or explicitly permitted)
         if not getattr(ticket, "allow_schema_migration", False) and getattr(ticket, "track", "core") != "feature":
-            schema_violations = [f for f in modified_files if f.startswith("src/db/schema") or f.startswith("drizzle/")]
+            schema_violations = [f for f in all_changed_files if f.startswith("src/db/schema") or f.startswith("drizzle/")]
             if schema_violations:
                 details = {"schema_violations": schema_violations}
                 return False, f"MigrationGate Invariant VIOLATION: Refactor touched database schemas: {schema_violations}", details
@@ -193,43 +276,129 @@ class BrigadeFSM:
         if numstat_code != 0 or not numstat_out.strip():
             numstat_code, numstat_out, _ = self._run_cmd(["git", "diff", "--numstat", "HEAD~1"])
 
-        target_file_norm = ticket.target_file.replace("\\", "/")
+        target_file_norm = ticket.target_file.replace("\\", "/").strip() if ticket.target_file else ""
+        if target_file_norm.startswith("./"):
+            target_file_norm = target_file_norm[2:]
+
         target_found = False
         target_delta = 0
         total_net = 0
+        seen_numstat_files = set()
 
         for line in numstat_out.splitlines():
             parts = line.strip().split("\t")
             if len(parts) >= 3:
-                ins_str, del_str, file_name = parts[0], parts[1], parts[2].replace("\\", "/")
+                ins_str, del_str, file_name = parts[0], parts[1], parts[2].replace("\\", "/").strip()
+                if file_name.startswith("./"):
+                    file_name = file_name[2:]
+                seen_numstat_files.add(file_name)
                 if ins_str.isdigit() and del_str.isdigit():
                     ins, dels = int(ins_str), int(del_str)
 
-                    if file_name == target_file_norm:
+                    if target_file_norm and file_name == target_file_norm:
                         target_found = True
                         target_delta = ins - dels
 
                     # Filter out tests, docs, json ledgers, and .edge from net production SLOC telemetry
-                    if (
-                        ".test." in file_name
-                        or ".spec." in file_name
-                        or file_name.startswith("tests/")
-                        or file_name.endswith(".md")
-                        or file_name.endswith(".json")
-                        or file_name.startswith(".edge/")
-                    ):
+                    if _is_non_prod(file_name):
                         continue
 
                     total_net += (ins - dels)
 
-        if not target_found:
-            return False, f"Target file '{ticket.target_file}' was not modified in the diff.", {"modified_files": modified_files}
+        # Count lines in newly created untracked production files not captured in numstat
+        eff_dir = normalize_target_path(ticket.worktree_path) if ticket.worktree_path else self.target_repo
+        for pf in prod_changed_files:
+            if pf not in seen_numstat_files:
+                fpath = eff_dir / pf
+                if fpath.exists() and fpath.is_file():
+                    try:
+                        line_count = len(fpath.read_text(encoding="utf-8", errors="ignore").splitlines())
+                        total_net += line_count
+                        if target_file_norm and pf == target_file_norm:
+                            target_found = True
+                            target_delta = line_count
+                    except Exception:
+                        pass
 
-        return True, f"Surgery invariants passed: Target file delta {target_delta:+d} lines (Net SLOC: {total_net:+d}).", {
-            "target_delta": target_delta,
-            "total_net": total_net,
-            "modified_files": modified_files,
-        }
+        # 3. Track-specific verification
+        if getattr(ticket, "track", "core") == "feature":
+            if ticket.expected_files:
+                from tools.drift.models import matches_tracked_paths
+
+                # Literal path check: verify all literal entries (no * or ?) are in all_changed_files
+                missing = []
+                for entry in ticket.expected_files:
+                    norm_entry = entry.replace("\\", "/").strip()
+                    if norm_entry.startswith("./"):
+                        norm_entry = norm_entry[2:]
+                    if "*" not in norm_entry and "?" not in norm_entry:
+                        if norm_entry not in all_changed_files:
+                            missing.append(entry)
+                if missing:
+                    return (
+                        False,
+                        f"Incomplete Feature Implementation: Expected file(s) not modified/created: {missing}",
+                        {"missing_files": missing, "changed_files": all_changed_files},
+                    )
+
+                # Scope drift check: verify all modified production files match expected_files or target_file
+                allowed_patterns = list(ticket.expected_files)
+                if target_file_norm and target_file_norm not in allowed_patterns:
+                    allowed_patterns.append(target_file_norm)
+
+                unexpected = []
+                for pf in prod_changed_files:
+                    if not matches_tracked_paths([pf], allowed_patterns):
+                        unexpected.append(pf)
+                if unexpected:
+                    return (
+                        False,
+                        f"Deterministic Spec-Code Scope Drift: Modified production files outside expected_files: {unexpected}",
+                        {"unexpected_files": unexpected, "changed_files": all_changed_files},
+                    )
+
+            elif target_file_norm:
+                if target_file_norm not in all_changed_files:
+                    return (
+                        False,
+                        f"Target file '{ticket.target_file}' was not modified or created.",
+                        {"modified_files": all_changed_files},
+                    )
+            else:
+                if len(prod_changed_files) == 0:
+                    return (
+                        False,
+                        "No production files were modified or created in feature slice.",
+                        {"changed_files": all_changed_files},
+                    )
+
+            return (
+                True,
+                f"Surgery invariants passed: Target file delta {target_delta:+d} lines (Net SLOC: {total_net:+d}).",
+                {
+                    "target_delta": target_delta,
+                    "total_net": total_net,
+                    "modified_files": all_changed_files,
+                },
+            )
+
+        else:
+            if not target_found:
+                return (
+                    False,
+                    f"Target file '{ticket.target_file}' was not modified in the diff.",
+                    {"modified_files": modified_files},
+                )
+
+            return (
+                True,
+                f"Surgery invariants passed: Target file delta {target_delta:+d} lines (Net SLOC: {total_net:+d}).",
+                {
+                    "target_delta": target_delta,
+                    "total_net": total_net,
+                    "modified_files": modified_files,
+                },
+            )
 
     def guard_verify_to_review(self) -> Tuple[bool, str, Dict[str, Any]]:
         """
@@ -321,6 +490,46 @@ class BrigadeFSM:
 
         return True, "Edge Verification Gate PASSED all invariant stages.", {"output": stdout}
 
+    def _archive_ticket_spec(self, ticket: Ticket) -> None:
+        """Archives ephemeral slice spec from .edge/specs/ to .edge/archive/specs/."""
+        try:
+            from tools.drift.scanner import archive_ephemeral_spec
+        except ImportError:
+            return
+
+        candidates: List[Path] = []
+        edge_specs_dir = (self.target_repo / ".edge" / "specs").resolve()
+
+        if ticket.spec_path:
+            p = Path(ticket.spec_path)
+            if not p.is_absolute():
+                p = self.target_repo / p
+            if p.exists() and p.is_file():
+                try:
+                    p_resolved = p.resolve()
+                    if edge_specs_dir in p_resolved.parents or p_resolved.parent == edge_specs_dir:
+                        candidates.append(p)
+                except Exception:
+                    pass
+
+        branch_slug = ticket.branch_name.split("/")[-1] if ticket.branch_name else ""
+        if branch_slug:
+            cand1 = self.target_repo / ".edge" / "specs" / f"{branch_slug}.md"
+            if cand1.exists() and cand1.is_file() and cand1 not in candidates:
+                candidates.append(cand1)
+
+        ticket_slug = ticket.ticket_id.lower() if ticket.ticket_id else ""
+        if ticket_slug:
+            cand2 = self.target_repo / ".edge" / "specs" / f"{ticket_slug}.md"
+            if cand2.exists() and cand2.is_file() and cand2 not in candidates:
+                candidates.append(cand2)
+
+        for c in candidates:
+            try:
+                archive_ephemeral_spec(self.target_repo, c)
+            except Exception as e:
+                print(f"[WARN] Failed to archive spec {c}: {e}")
+
     def guard_staging_to_completed(self) -> Tuple[bool, str, Dict[str, Any]]:
         """
         Executes local codebase fast-forward synchronization and cleanup:
@@ -329,7 +538,8 @@ class BrigadeFSM:
         3. Executes git merge --ff-only into base_branch in primary repo.
         4. Returns worktree to Treehouse pool.
         5. Marks FlightRecorder status as RESOLVED.
-        6. Triggers radar ledger rescan.
+        6. Archives ephemeral slice specs.
+        7. Triggers radar ledger rescan.
         """
         ticket = self.state.active_ticket
         if not ticket:
@@ -337,6 +547,7 @@ class BrigadeFSM:
 
         # If not a git repository (e.g. mock test environment), skip git merge operations
         if not (self.target_repo / ".git").exists():
+            self._archive_ticket_spec(ticket)
             return True, f"Ticket {ticket.ticket_id} delivered (non-git workspace).", {}
 
         # 1. Primary checkout clean status check
@@ -385,6 +596,9 @@ class BrigadeFSM:
         except Exception as e:
             print(f"[WARN] Failed to mark flight recorder RESOLVED: {e}")
 
+        # Archive ephemeral slice spec
+        self._archive_ticket_spec(ticket)
+
         # 6. Refresh radar ledger to resolve debt
         radar_cli = Path(__file__).resolve().parent.parent / "radar" / "cli.py"
         target_path_str = str(self.target_repo)
@@ -424,6 +638,13 @@ class BrigadeFSM:
             passed, msg, details = self.guard_triage_to_surgery()
             if not passed and not force:
                 return False, curr, f"Triage validation failed: {msg}"
+            self._transition(CycleState.SURGERY, msg, details)
+            return True, self.state.current_state, msg
+
+        elif curr == CycleState.RED_TEST:
+            passed, msg, details = self.guard_red_to_surgery()
+            if not passed and not force:
+                return False, curr, f"Red test guard blocked advancement: {msg}"
             self._transition(CycleState.SURGERY, msg, details)
             return True, self.state.current_state, msg
 
@@ -766,6 +987,8 @@ class BrigadeFSM:
         test_seam_command: str = "npm run test:unit",
         allow_schema_migration: bool = True,
         auto_lease_worktree: bool = True,
+        expected_files: Optional[List[str]] = None,
+        spec_path: Optional[str] = None,
     ) -> Tuple[bool, Optional[Ticket], str]:
         """
         Deterministically initiates a live feature or refactor slice:
@@ -774,7 +997,7 @@ class BrigadeFSM:
         3. Derives branch name (e.g. feat/<name> or refactor/<name>).
         4. If auto_lease_worktree is True and treehouse is installed, acquires an isolated worktree slot.
         5. Initializes FlightRecorder.
-        6. Sets FSM state to SURGERY (ready for Coder or Surgeon).
+        6. Sets FSM state to RED_TEST (feature) or SURGERY (refactor/core).
         """
         if self.state.active_ticket and self.state.current_state != CycleState.IDLE:
             return False, self.state.active_ticket, f"Cannot start slice: Active ticket {self.state.active_ticket.ticket_id} is currently in progress (State: {self.state.current_state.value}). Finish or abort it first."
@@ -816,6 +1039,8 @@ class BrigadeFSM:
             scaffolding_allowance=50 if track == "feature" else 15,
             enforce_contraction=False,
             allow_schema_migration=allow_schema_migration,
+            expected_files=list(expected_files or []),
+            spec_path=spec_path,
             negative_constraints=all_constraints,
         )
 
@@ -842,10 +1067,16 @@ class BrigadeFSM:
 
         self.state.active_ticket = ticket
         self.state.active_branch = branch_name
-        self.state.current_state = CycleState.SURGERY
-        self.save()
+        if track == "feature":
+            self.state.current_state = CycleState.RED_TEST
+            self._transition(CycleState.RED_TEST, "Initialized feature slice in RED_TEST state")
+            state_label = "RED_TEST"
+        else:
+            self.state.current_state = CycleState.SURGERY
+            self.save()
+            state_label = "SURGERY"
 
-        return True, ticket, f"Slice '{name}' initiated successfully.{worktree_msg} Branch: {branch_name} (State: SURGERY)."
+        return True, ticket, f"Slice '{name}' initiated successfully.{worktree_msg} Branch: {branch_name} (State: {state_label})."
 
     def finish_slice(self) -> Tuple[bool, str]:
         """
@@ -880,6 +1111,8 @@ class BrigadeFSM:
             return [], ["triage_next_ticket"], "Run 'brigade triage' to pick next ticket from radar."
         elif state == CycleState.TRIAGE:
             return ["ticket_triaged"], ["git_branch_created", "baseline_compiler_verified", "surgery"], "Run 'brigade advance' to transition to SURGERY and dispatch Surgeon."
+        elif state == CycleState.RED_TEST:
+            return ["slice_started"], ["write_red_tests", "verify_red_baseline"], f"Author failing unit/contract tests for {target} to establish red baseline before advancing to SURGERY."
         elif state == CycleState.SURGERY:
             return ["ticket_triaged", "git_branch_created"], ["code_modifications", "hermetic_verification", "gate_verification"], f"Execute bounded surgery on {target}, then verify with tests and tsc before advancing to VERIFY."
         elif state == CycleState.VERIFY:

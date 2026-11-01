@@ -42,10 +42,12 @@ class TestBrigadeModels(unittest.TestCase):
             "surgeon",
             "examiner",
             "qa_engineer",
+            "spec_critic",
         }
         actual_roles = {r.value for r in StationRole}
         self.assertEqual(actual_roles, expected_roles)
-        self.assertEqual(len(StationRole), 7)
+        self.assertEqual(len(StationRole), 8)
+        self.assertEqual(StationRole.SPEC_CRITIC.value, "spec_critic")
         self.assertEqual(StationRole.EXAMINER.value, "examiner")
         self.assertFalse(hasattr(StationRole, "EXPEDITER"))
         self.assertFalse(hasattr(StationRole, "STANDARDS_EXAMINER"))
@@ -895,6 +897,324 @@ class TestBrigadeCLIPrototype(unittest.TestCase):
         import argparse
         args = argparse.Namespace(repo=str(self.repo_path), action="poll", file=None)
         self.assertEqual(cmd_prototype(args), 1)
+
+
+class TestBrigadeWave2FsmAndCli(unittest.TestCase):
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.repo_path = Path(self.test_dir)
+        self.fsm = BrigadeFSM(self.repo_path)
+        self.ticket = Ticket(
+            ticket_id="TICK-FEAT-STAFF-ALLOC",
+            track="feature",
+            domain="staff",
+            rule_id="RULE-STAFF",
+            severity="NORMAL",
+            target_file="src/staff/alloc.ts",
+            line_number=1,
+            fingerprint="fp-staff",
+            description="Staff allocation feature",
+            suggested_fix="Implement allocation logic",
+            branch_name="feat/staff-alloc",
+            test_seam_command="npm run test:unit",
+        )
+        self.fsm.state.active_ticket = self.ticket
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    # -------------------------------------------------------------------------
+    # a) RED_TEST guard rejecting exit 0, fake red, and advancing on genuine exit 1
+    # -------------------------------------------------------------------------
+    def test_red_test_guard_pass_before_code_rejection(self):
+        self.fsm.state.current_state = CycleState.RED_TEST
+        with patch.object(self.fsm, "_run_cmd", return_value=(0, "All 5 tests passed", "")):
+            passed, msg, details = self.fsm.guard_red_to_surgery()
+            self.assertFalse(passed)
+            self.assertIn("RED_BASELINE VIOLATION", msg)
+            self.assertEqual(details["exit_code"], 0)
+
+            # Advance must be blocked
+            adv_ok, state, adv_msg = self.fsm.advance()
+            self.assertFalse(adv_ok)
+            self.assertEqual(state, CycleState.RED_TEST)
+
+    def test_red_test_guard_fake_red_syntax_and_harness_rejection(self):
+        self.fsm.state.current_state = CycleState.RED_TEST
+
+        # SyntaxError rejection
+        with patch.object(self.fsm, "_run_cmd", return_value=(1, "", "SyntaxError: Unexpected identifier")):
+            passed, msg, details = self.fsm.guard_red_to_surgery()
+            self.assertFalse(passed)
+            self.assertIn("FAKE RED DETECTED", msg)
+
+        # Collected 0 items rejection
+        with patch.object(self.fsm, "_run_cmd", return_value=(1, "collected 0 items\nno tests ran", "")):
+            passed, msg, details = self.fsm.guard_red_to_surgery()
+            self.assertFalse(passed)
+            self.assertIn("FAKE RED DETECTED", msg)
+
+        # Exit 127 command not found
+        with patch.object(self.fsm, "_run_cmd", return_value=(127, "", "bash: npm: command not found")):
+            passed, msg, details = self.fsm.guard_red_to_surgery()
+            self.assertFalse(passed)
+            self.assertIn("FAKE RED DETECTED", msg)
+
+    def test_red_test_guard_advances_on_genuine_assertion_failure(self):
+        self.fsm.state.current_state = CycleState.RED_TEST
+        genuine_failure_out = "FAIL tests/staff/alloc.test.ts\nAssertionError: expected false to be true\n  at test (tests/staff/alloc.test.ts:12:7)"
+        with patch.object(self.fsm, "_run_cmd", return_value=(1, genuine_failure_out, "")):
+            passed, msg, details = self.fsm.guard_red_to_surgery()
+            self.assertTrue(passed)
+            self.assertIn("RED_BASELINE verified", msg)
+            self.assertEqual(details["exit_code"], 1)
+
+            # advance() moves to SURGERY
+            adv_ok, state, adv_msg = self.fsm.advance()
+            self.assertTrue(adv_ok)
+            self.assertEqual(state, CycleState.SURGERY)
+            self.assertEqual(self.fsm.state.current_state, CycleState.SURGERY)
+
+    # -------------------------------------------------------------------------
+    # b) guard_surgery_to_verify on track="feature"
+    # -------------------------------------------------------------------------
+    def test_guard_surgery_to_verify_feature_brand_new_files(self):
+        self.fsm.state.current_state = CycleState.SURGERY
+        self.ticket.track = "feature"
+        self.ticket.target_file = ""
+        self.ticket.expected_files = []
+
+        # 1. When no production files are touched -> fail
+        with patch.object(self.fsm, "_run_cmd", return_value=(0, "", "")):
+            passed, msg, details = self.fsm.guard_surgery_to_verify()
+            self.assertFalse(passed)
+            self.assertIn("No production files were modified or created", msg)
+
+        # 2. When new production file exists in porcelain status -> pass
+        src_dir = self.repo_path / "src" / "staff"
+        src_dir.mkdir(parents=True, exist_ok=True)
+        new_prod_file = src_dir / "new_alloc.ts"
+        new_prod_file.write_text("export const alloc = 1;\nexport const free = 2;\n", encoding="utf-8")
+
+        with patch.object(self.fsm, "_run_cmd") as mock_cmd:
+            def side_effect(cmd, cwd=None):
+                if "status" in cmd:
+                    return (0, "?? src/staff/new_alloc.ts\n", "")
+                return (0, "", "")
+
+            mock_cmd.side_effect = side_effect
+            passed, msg, details = self.fsm.guard_surgery_to_verify()
+            self.assertTrue(passed)
+            self.assertIn("Surgery invariants passed", msg)
+            self.assertEqual(details["total_net"], 2)
+
+    def test_guard_surgery_to_verify_feature_expected_files_missing_rejection(self):
+        self.fsm.state.current_state = CycleState.SURGERY
+        self.ticket.track = "feature"
+        self.ticket.target_file = ""
+        self.ticket.expected_files = ["src/staff/alloc.ts", "src/staff/types.ts"]
+
+        # Only one of the expected files is modified
+        with patch.object(self.fsm, "_run_cmd") as mock_cmd:
+            def side_effect(cmd, cwd=None):
+                if "--name-only" in cmd:
+                    return (0, "src/staff/alloc.ts\n", "")
+                if "--numstat" in cmd:
+                    return (0, "10\t0\tsrc/staff/alloc.ts\n", "")
+                return (0, "", "")
+
+            mock_cmd.side_effect = side_effect
+            passed, msg, details = self.fsm.guard_surgery_to_verify()
+            self.assertFalse(passed)
+            self.assertIn("Incomplete Feature Implementation", msg)
+            self.assertIn("src/staff/types.ts", details["missing_files"])
+
+    def test_guard_surgery_to_verify_feature_scope_drift_rejection(self):
+        self.fsm.state.current_state = CycleState.SURGERY
+        self.ticket.track = "feature"
+        self.ticket.target_file = ""
+        self.ticket.expected_files = ["src/staff/**"]
+
+        # Rogue file outside expected_files was modified
+        with patch.object(self.fsm, "_run_cmd") as mock_cmd:
+            def side_effect(cmd, cwd=None):
+                if "--name-only" in cmd:
+                    return (0, "src/staff/alloc.ts\nsrc/rogue/unrelated.ts\ntests/staff/alloc.test.ts\n", "")
+                if "--numstat" in cmd:
+                    return (0, "10\t0\tsrc/staff/alloc.ts\n5\t0\tsrc/rogue/unrelated.ts\n20\t0\ttests/staff/alloc.test.ts\n", "")
+                return (0, "", "")
+
+            mock_cmd.side_effect = side_effect
+            passed, msg, details = self.fsm.guard_surgery_to_verify()
+            self.assertFalse(passed)
+            self.assertIn("Deterministic Spec-Code Scope Drift", msg)
+            self.assertIn("src/rogue/unrelated.ts", details["unexpected_files"])
+            # Note tests/ is non-prod, so it should not be in unexpected_files
+            self.assertNotIn("tests/staff/alloc.test.ts", details["unexpected_files"])
+
+    # -------------------------------------------------------------------------
+    # c) cmd_ticket --prompt dispatching
+    # -------------------------------------------------------------------------
+    def test_cmd_ticket_prompt_routing(self):
+        import argparse
+        from io import StringIO
+        from tools.brigade.cli import cmd_ticket
+
+        args = argparse.Namespace(repo=str(self.repo_path), prompt=True, format="toon")
+
+        # 1. In RED_TEST -> SEAM_ARCHITECT prompt
+        self.fsm.state.current_state = CycleState.RED_TEST
+        self.fsm.save()
+        with patch("sys.stdout", new=StringIO()) as fake_out:
+            code = cmd_ticket(args)
+            self.assertEqual(code, 0)
+            self.assertIn("SEAM_ARCHITECT", fake_out.getvalue())
+
+        # 2. In SURGERY, feature track -> CODER prompt
+        self.fsm.state.current_state = CycleState.SURGERY
+        self.ticket.track = "feature"
+        self.fsm.save()
+        with patch("sys.stdout", new=StringIO()) as fake_out:
+            code = cmd_ticket(args)
+            self.assertEqual(code, 0)
+            self.assertIn("CODER", fake_out.getvalue())
+
+        # 3. In SURGERY, core track -> SURGEON prompt
+        self.ticket.track = "core"
+        self.fsm.save()
+        with patch("sys.stdout", new=StringIO()) as fake_out:
+            code = cmd_ticket(args)
+            self.assertEqual(code, 0)
+            self.assertIn("SURGEON", fake_out.getvalue())
+
+        # 4. In POLISH, feature track -> CODER polish prompt
+        self.fsm.state.current_state = CycleState.POLISH
+        self.ticket.track = "feature"
+        self.fsm.save()
+        with patch("sys.stdout", new=StringIO()) as fake_out:
+            code = cmd_ticket(args)
+            self.assertEqual(code, 0)
+            self.assertIn("CODER", fake_out.getvalue())
+            self.assertIn("Test Immutability", fake_out.getvalue())
+
+        # 5. In POLISH, core track -> SURGEON polish prompt
+        self.ticket.track = "core"
+        self.fsm.save()
+        with patch("sys.stdout", new=StringIO()) as fake_out:
+            code = cmd_ticket(args)
+            self.assertEqual(code, 0)
+            self.assertIn("SURGEON", fake_out.getvalue())
+
+    # -------------------------------------------------------------------------
+    # d) cmd_critique_spec CLI integration with mocked run_spec_critique
+    # -------------------------------------------------------------------------
+    def test_cmd_critique_spec_cli_integration(self):
+        import argparse
+        from io import StringIO
+        from tools.brigade.cli import cmd_critique_spec
+        from tools.brigade.spec_critic import SpecCritiqueResult
+
+        args = argparse.Namespace(
+            repo=str(self.repo_path),
+            spec=".edge/specs/feat-staff.md",
+            model="claude-opus-5-5-high",
+            fallback_model="gemini-3.8-flash-high",
+            timeout=180,
+        )
+
+        with patch("tools.brigade.cli.run_spec_critique") as mock_crit:
+            # Success path
+            mock_crit.return_value = SpecCritiqueResult(
+                success=True,
+                model_used="claude-opus-5-5-high",
+                fallback_triggered=False,
+                report_path=".edge/specs/feat-staff.critique.md",
+                summary="Paraphrase: Clean staff slice with sound boundaries.",
+                error=None,
+            )
+            with patch("sys.stdout", new=StringIO()) as fake_out:
+                ret = cmd_critique_spec(args)
+                self.assertEqual(ret, 0)
+                out = fake_out.getvalue()
+                self.assertIn("SUCCESS", out)
+                self.assertIn("claude-opus-5-5-high", out)
+                self.assertIn("feat-staff.critique.md", out)
+
+            # Failure path
+            mock_crit.return_value = SpecCritiqueResult(
+                success=False,
+                model_used="gemini-3.8-flash-high",
+                fallback_triggered=True,
+                report_path="",
+                summary="",
+                error="Quota exceeded on both models",
+            )
+            with patch("sys.stdout", new=StringIO()) as fake_out:
+                ret = cmd_critique_spec(args)
+                self.assertEqual(ret, 1)
+                out = fake_out.getvalue()
+                self.assertIn("FAILED", out)
+                self.assertIn("Quota exceeded", out)
+
+    def test_cmd_start_slice_cli_expected_files_and_spec(self):
+        import argparse
+        from io import StringIO
+        from tools.brigade.cli import cmd_start_slice
+
+        # Feature track
+        args = argparse.Namespace(
+            repo=str(self.repo_path),
+            name="bundle-modal",
+            track="feature",
+            target_file="src/components/BundleModal.tsx",
+            domain="bundle",
+            test_cmd="npm run test:unit",
+            allow_migration=True,
+            expected_files="src/components/BundleModal.tsx,src/types/bundle.ts",
+            spec=".edge/specs/bundle-modal.md",
+        )
+        self.fsm.state.active_ticket = None
+        self.fsm.state.current_state = CycleState.IDLE
+        self.fsm.save()
+
+        with patch("sys.stdout", new=StringIO()) as fake_out:
+            ret = cmd_start_slice(args)
+            self.assertEqual(ret, 0)
+            out = fake_out.getvalue()
+            self.assertIn("RED_TEST", out)
+            self.assertIn("Expected Files:", out)
+            self.assertIn("Spec Path:", out)
+
+        # Reload FSM from disk to verify persistence
+        reloaded_fsm = BrigadeFSM(self.repo_path)
+        ticket = reloaded_fsm.state.active_ticket
+        self.assertIsNotNone(ticket)
+        self.assertEqual(ticket.expected_files, ["src/components/BundleModal.tsx", "src/types/bundle.ts"])
+        self.assertEqual(ticket.spec_path, ".edge/specs/bundle-modal.md")
+        self.assertEqual(reloaded_fsm.state.current_state, CycleState.RED_TEST)
+
+    # -------------------------------------------------------------------------
+    # e) Automatic .edge/specs/<slice>.md -> .edge/archive/specs/ archival
+    # -------------------------------------------------------------------------
+    def test_ephemeral_spec_archiving_on_guard_staging_to_completed(self):
+        specs_dir = self.repo_path / ".edge" / "specs"
+        specs_dir.mkdir(parents=True, exist_ok=True)
+        spec_file = specs_dir / "staff-alloc.md"
+        spec_file.write_text("# Staff Allocation Spec\n\nINVEST slice spec content.", encoding="utf-8")
+
+        self.ticket.branch_name = "feat/staff-alloc"
+        self.ticket.spec_path = str(spec_file)
+
+        # Call guard_staging_to_completed in non-git test environment
+        self.fsm.state.active_ticket = self.ticket
+        passed, msg, _ = self.fsm.guard_staging_to_completed()
+        self.assertTrue(passed)
+
+        # Verify spec was archived
+        self.assertFalse(spec_file.exists(), "Source spec should have been archived/moved")
+        archived_spec = self.repo_path / ".edge" / "archive" / "specs" / "staff-alloc.md"
+        self.assertTrue(archived_spec.exists(), "Archived spec must exist in .edge/archive/specs/")
+        self.assertIn("Staff Allocation Spec", archived_spec.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

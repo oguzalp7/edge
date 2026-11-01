@@ -238,7 +238,7 @@ class TestFsmEscalationAndAbort(unittest.TestCase):
         fsm.state.current_state = CycleState.IDLE
         fsm.save()
 
-        # 1. Start slice
+        # 1. Start slice (feature track -> RED_TEST)
         ok, ticket, msg = fsm.start_slice(
             name="staff-allocation",
             track="feature",
@@ -251,7 +251,7 @@ class TestFsmEscalationAndAbort(unittest.TestCase):
         self.assertEqual(ticket.domain, "staff")
         self.assertEqual(ticket.branch_name, "feat/staff-allocation")
         self.assertEqual(ticket.worktree_path, "/tmp/mock-slot-42")
-        self.assertEqual(fsm.state.current_state, CycleState.SURGERY)
+        self.assertEqual(fsm.state.current_state, CycleState.RED_TEST)
         self.assertEqual(fsm.state.active_worktree, "/tmp/mock-slot-42")
 
         # Ensure flight recorder was initialized
@@ -266,6 +266,16 @@ class TestFsmEscalationAndAbort(unittest.TestCase):
             self.assertEqual(fsm.state.current_state, CycleState.IDLE)
             self.assertIsNone(fsm.state.active_ticket)
             self.assertIsNone(fsm.state.active_worktree)
+
+        # 3. Core track slice starts in SURGERY for backward compatibility
+        ok_core, ticket_core, msg_core = fsm.start_slice(
+            name="staff-cleanup",
+            track="core",
+            target_file="src/core/modules/staff/allocation.ts",
+            domain="staff",
+        )
+        self.assertTrue(ok_core)
+        self.assertEqual(fsm.state.current_state, CycleState.SURGERY)
 
 
 if __name__ == "__main__":

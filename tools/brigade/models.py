@@ -13,11 +13,13 @@ class StationRole(str, Enum):
     SURGEON = "surgeon"                       # Chef de Partie: Code refactoring & DB leak extraction
     EXAMINER = "examiner"                     # Sous Chef / Maître d': Unified standards & spec verification
     QA_ENGINEER = "qa_engineer"               # Sommelier: E2E Browser QA & Visual QA
+    SPEC_CRITIC = "spec_critic"               # Goldfish Spec Critic: Cross-provider advisory spec auditor
 
 
 class CycleState(str, Enum):
     IDLE = "IDLE"                             # Ready for next ticket
     TRIAGE = "TRIAGE"                         # Ticket prepared from radar debt ledger
+    RED_TEST = "RED_TEST"                     # Seam Architect establishing failing TDD anchor
     SURGERY = "SURGERY"                       # Refactor branch active, surgeon operating
     VERIFY = "VERIFY"                         # Characterization test & compiler verification
     REVIEW = "REVIEW"                         # Dual-axis review by standards & spec examiners
@@ -31,9 +33,9 @@ class CycleState(str, Enum):
 
 
 class ContextHeatZone(str, Enum):
-    GREEN = "GREEN"                           # < 180k tokens: Normal execution
-    YELLOW = "YELLOW"                         # 180k - 250k tokens: Drain active ticket, freeze triage
-    RED = "RED"                               # > 250k tokens: Emergency checkpoint, stop immediately
+    GREEN = "GREEN"                           # < 45k tokens: Normal execution
+    YELLOW = "YELLOW"                         # 45k - 75k tokens: Drain active ticket, freeze triage
+    RED = "RED"                               # >= 75k tokens: Emergency checkpoint, stop immediately
 
 
 @dataclass
@@ -106,6 +108,8 @@ class Ticket:
     status: str = "OPEN"                      # "OPEN" | "RESOLVED" | "STAGNATED" | "ESCALATED"
     enforce_contraction: bool = False         # Deprecated/legacy: retained strictly for backward JSON schema compatibility
     allow_schema_migration: bool = False      # Allowed for feature track or schema expansion
+    expected_files: List[str] = field(default_factory=list)
+    spec_path: Optional[str] = None
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     @staticmethod

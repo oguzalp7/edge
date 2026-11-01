@@ -25,12 +25,14 @@ try:
     from .stations import StationRegistry
     from .worktree import get_pool_status, is_treehouse_installed
     from .flight_recorder import FlightRecorder
+    from .spec_critic import run_spec_critique, PRIMARY_CRITIC_MODEL, FALLBACK_CRITIC_MODEL
 except ImportError:
     from tools.brigade.models import StationRole, CycleState, ReviewFinding, Ticket
     from tools.brigade.fsm import BrigadeFSM
     from tools.brigade.stations import StationRegistry
     from tools.brigade.worktree import get_pool_status, is_treehouse_installed
     from tools.brigade.flight_recorder import FlightRecorder
+    from tools.brigade.spec_critic import run_spec_critique, PRIMARY_CRITIC_MODEL, FALLBACK_CRITIC_MODEL
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -152,13 +154,21 @@ def cmd_ticket(args: argparse.Namespace) -> int:
         print(f"\n--- PROMPT PAYLOAD FOR STATE [{curr.value}] ---")
         if alert_block:
             print(alert_block)
-        if curr == CycleState.SURGERY or curr == CycleState.TRIAGE:
-            print(StationRegistry.build_surgeon_prompt(ticket, fsm.state.base_branch))
+        if curr == CycleState.RED_TEST:
+            print(StationRegistry.build_seam_architect_prompt(ticket, ticket.description or ticket.suggested_fix))
+        elif curr == CycleState.SURGERY or curr == CycleState.TRIAGE:
+            if getattr(ticket, "track", "core") == "feature":
+                print(StationRegistry.build_coder_prompt(ticket, ticket.test_seam_command))
+            else:
+                print(StationRegistry.build_surgeon_prompt(ticket, fsm.state.base_branch))
         elif curr == CycleState.REVIEW:
             print("=== EXAMINER REVIEW PROMPT ===")
             print(StationRegistry.build_examiner_prompt(ticket, fsm.state.base_branch))
         elif curr == CycleState.POLISH:
-            print(StationRegistry.build_polish_prompt(ticket, fsm.state.review_findings))
+            if getattr(ticket, "track", "core") == "feature":
+                print(StationRegistry.build_coder_polish_prompt(ticket, fsm.state.review_findings))
+            else:
+                print(StationRegistry.build_polish_prompt(ticket, fsm.state.review_findings))
         elif curr == CycleState.STAGING:
             print(f"STAGING STATE: Run deterministic CLI delivery command:\nbrigade finish-slice {repo_path}")
         else:
@@ -237,6 +247,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     state_icons = {
         CycleState.IDLE: "⚪ IDLE",
         CycleState.TRIAGE: "🔍 TRIAGE",
+        CycleState.RED_TEST: "🔴 RED_TEST",
         CycleState.SURGERY: "🔪 SURGERY",
         CycleState.VERIFY: "🧪 VERIFY",
         CycleState.REVIEW: "🧐 REVIEW",
@@ -350,6 +361,7 @@ def cmd_graph(args: argparse.Namespace) -> int:
         StationRole.SURGEON,
         StationRole.EXAMINER,
         StationRole.QA_ENGINEER,
+        StationRole.SPEC_CRITIC,
     ]:
         s = stations.get(role.value)
         status_dot = "🟢" if s and s.status == "IDLE" else ("🟡" if s else "⚪")
@@ -525,7 +537,14 @@ def cmd_worktree(args: argparse.Namespace) -> int:
 def cmd_start_slice(args: argparse.Namespace) -> int:
     repo_path = normalize_target_path(args.repo)
     fsm = BrigadeFSM(repo_path)
-    
+
+    expected_files = (
+        [f.strip() for f in args.expected_files.split(",") if f.strip()]
+        if getattr(args, "expected_files", None)
+        else None
+    )
+    spec_path = getattr(args, "spec", None)
+
     ok, ticket, msg = fsm.start_slice(
         name=args.name,
         track=getattr(args, "track", "feature"),
@@ -534,6 +553,8 @@ def cmd_start_slice(args: argparse.Namespace) -> int:
         test_seam_command=getattr(args, "test_cmd", "npm run test:unit"),
         allow_schema_migration=getattr(args, "allow_migration", True),
         auto_lease_worktree=True,
+        expected_files=expected_files,
+        spec_path=spec_path,
     )
     if not ok:
         print(f"❌ {msg}")
@@ -543,10 +564,15 @@ def cmd_start_slice(args: argparse.Namespace) -> int:
     print("🚀  EDGE BRIGADE — VERTICAL SLICE INITIATED")
     print("=======================================================")
     print(f"Ticket ID:       {ticket.ticket_id}")
+    print(f"Initial State:   {fsm.state.current_state.value}")
     print(f"Track:           {ticket.track.upper()}")
     print(f"Domain:          {ticket.domain}")
     print(f"Branch:          {ticket.branch_name}")
     print(f"Target File:     {ticket.target_file}")
+    if ticket.expected_files:
+        print(f"Expected Files:  {', '.join(ticket.expected_files)}")
+    if ticket.spec_path:
+        print(f"Spec Path:       {ticket.spec_path}")
     print(f"Test Seam:       {ticket.test_seam_command}")
     print(f"Worktree Path:   {ticket.worktree_path or 'Primary (no treehouse)'}")
     print("=======================================================")
@@ -554,6 +580,31 @@ def cmd_start_slice(args: argparse.Namespace) -> int:
         print(f"\n🛡️ ZERO-TOUCH INVARIANT: Coder/Surgeon MUST work strictly inside:")
         print(f"   cd {ticket.worktree_path}\n")
     return 0
+
+
+def cmd_critique_spec(args: argparse.Namespace) -> int:
+    repo_path = normalize_target_path(args.repo)
+    res = run_spec_critique(
+        repo_path=repo_path,
+        spec_path=args.spec,
+        primary_model=getattr(args, "model", PRIMARY_CRITIC_MODEL),
+        fallback_model=getattr(args, "fallback_model", FALLBACK_CRITIC_MODEL),
+        timeout=getattr(args, "timeout", 180),
+    )
+    print("\n=======================================================")
+    print("🐟  EDGE BRIGADE — SPEC CRITIC (GOLDFISH CRITIC)")
+    print("=======================================================")
+    print(f"Status:             {'SUCCESS' if res.success else 'FAILED'}")
+    print(f"Model Used:         {res.model_used}")
+    print(f"Fallback Triggered: {res.fallback_triggered}")
+    if res.report_path:
+        print(f"Report Path:        {res.report_path}")
+    if res.summary:
+        print(f"Summary:            {res.summary}")
+    if res.error:
+        print(f"Error:              {res.error}")
+    print("=======================================================\n")
+    return 0 if res.success else 1
 
 
 def cmd_finish_slice(args: argparse.Namespace) -> int:
@@ -884,6 +935,16 @@ def main() -> int:
     p_start.add_argument("--domain", default="", help="Domain module (e.g. bookings, staff)")
     p_start.add_argument("--test-cmd", default="npm run test:unit", help="Test seam command")
     p_start.add_argument("--allow-migration", action="store_true", default=True, help="Allow schema migrations")
+    p_start.add_argument("--expected-files", help="Comma-separated expected files to create or modify")
+    p_start.add_argument("--spec", help="Path to specification document")
+
+    # critique-spec
+    p_crit = subparsers.add_parser("critique-spec", help="Run advisory cross-provider Goldfish Spec Critic (Opus 5.5 -> Flash 3.8 fallback)")
+    p_crit.add_argument("repo", help="Path to target repository")
+    p_crit.add_argument("--spec", required=True, help="Path to specification document")
+    p_crit.add_argument("--model", default=PRIMARY_CRITIC_MODEL, help=f"Primary critic model (default: {PRIMARY_CRITIC_MODEL})")
+    p_crit.add_argument("--fallback-model", default=FALLBACK_CRITIC_MODEL, help=f"Fallback critic model (default: {FALLBACK_CRITIC_MODEL})")
+    p_crit.add_argument("--timeout", type=int, default=180, help="Critique timeout in seconds (default: 180)")
 
     # finish-slice
     p_fin = subparsers.add_parser("finish-slice", help="Fast-forward merge slice into development, release worktree, and resolve ticket")
@@ -957,6 +1018,7 @@ def main() -> int:
         "distill": cmd_distill,
         "qa-inspect": cmd_qa_inspect,
         "prototype": cmd_prototype,
+        "critique-spec": cmd_critique_spec,
     }
 
     func = commands.get(args.command)
