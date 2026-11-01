@@ -8,8 +8,8 @@ Enforces deterministic role boundaries and Anti-Graveyard station persistence:
    - Guarded: invoke_subagent -> MUST reuse existing idle station via send_message if already active!
    - Injected: PreInvocation reminder of canonical 7 Brigade stations and anti-graveyard protocol.
 
-2. EXAMINER / RESEARCHER:
-   - Denied: write_to_file, replace_file_content (Pure read-only!).
+2. EXAMINER / RESEARCHER / SPEC_CRITIC:
+   - Denied: write_to_file, replace_file_content, write_file, edit_file (Pure read-only!).
 
 3. SPEC_WRITER:
    - Allowed: specs/**, .edge/**, .lavish/**.
@@ -287,6 +287,15 @@ class StationStore:
             stations[conversation_id]["lastActiveAt"] = datetime.now(timezone.utc).isoformat()
             self.save(envelope)
 
+    def mark_rotated(self, conversation_id: str) -> None:
+        """Marks a worker as ROTATED upon fresh spawn."""
+        envelope = self.load()
+        stations = envelope.get_stations()
+        if conversation_id in stations:
+            stations[conversation_id]["status"] = "ROTATED"
+            stations[conversation_id]["lastActiveAt"] = datetime.now(timezone.utc).isoformat()
+            self.save(envelope)
+
 
 class TranscriptStationScanner:
     def __init__(self, brain_root: Path):
@@ -449,6 +458,27 @@ class StationSelector:
         envelope = store.load()
         stations = envelope.get_stations()
 
+        # Ephemeral Goldfish Roles: Always allow fresh zero-context spawns and rotate previous instances
+        if canonical in EPHEMERAL_GOLDFISH_ROLES:
+            for cid, info in stations.items():
+                if not isinstance(info, dict):
+                    continue
+                st_role = normalize_role(info.get("role", "") or info.get("canonicalRole", "")) or info.get("role", "").upper()
+                if st_role != canonical:
+                    continue
+                st_parent = info.get("parentConversationId", "")
+                if parent_cid and st_parent and st_parent != parent_cid:
+                    continue
+                status = info.get("status", "IDLE")
+                if status in ("EXHAUSTED", "ROTATED", "TERMINATED"):
+                    continue
+                store.mark_rotated(cid)
+
+            return {
+                "decision": "allow",
+                "reason": f"GOLDFISH_EPHEMERAL: Fresh zero-context {canonical} spawn permitted",
+            }
+
         matching_candidates = []
         for cid, info in stations.items():
             if not isinstance(info, dict):
@@ -556,7 +586,22 @@ CANONICAL_ROLES = {
     "SURGEON": ["surgeon", "refactor", "refactorer", "chef de partie", "decoupling"],
     "EXAMINER": ["examiner", "reviewer", "code reviewer", "standards_examiner", "standards examiner", "standards-examiner", "spec_examiner", "spec examiner", "spec-examiner", "sous chef", "maitre d"],
     "QA_ENGINEER": ["qa_engineer", "qa", "e2e", "e2e_tester", "sommelier", "inspector", "test_agent", "qa agent"],
+    "SPEC_CRITIC": ["spec_critic", "spec critic", "spec-critic", "goldfish_critic", "goldfish critic"],
 }
+
+PERSISTENT_ELEPHANT_ROLES = frozenset({
+    "SPEC_WRITER",
+    "RESEARCHER",
+    "SEAM_ARCHITECT",
+    "CODER",
+    "SURGEON",
+    "QA_ENGINEER",
+})
+
+EPHEMERAL_GOLDFISH_ROLES = frozenset({
+    "EXAMINER",
+    "SPEC_CRITIC",
+})
 
 
 def to_wsl_path(p_str: str) -> Path:
@@ -861,12 +906,14 @@ def handle_pre_tool(payload: dict) -> dict:
                     ),
                 }
 
-        # B. Pure Read-Only Stations: EXAMINER, RESEARCHER
-        if role in ("EXAMINER", "RESEARCHER"):
+        # B. Pure Read-Only Stations: EXAMINER, RESEARCHER, SPEC_CRITIC
+        canonical_role = normalize_role(role) or role
+        if canonical_role in ("EXAMINER", "RESEARCHER", "SPEC_CRITIC") or role in ("EXAMINER", "RESEARCHER", "SPEC_CRITIC"):
+            st_name = canonical_role if canonical_role in ("EXAMINER", "RESEARCHER", "SPEC_CRITIC") else role
             return {
                 "decision": "deny",
                 "reason": (
-                    f"❌ [STATION PURITY GUARD]: '{role}' istasyonu salt-okunur (read-only) denetçidir. "
+                    f"❌ [STATION PURITY GUARD]: '{st_name}' istasyonu salt-okunur (read-only) denetçidir. "
                     "Hiçbir dosyada değişiklik yapamaz / kod yazamaz!"
                 ),
             }

@@ -47,6 +47,12 @@ class TestBrigadeGuard(unittest.TestCase):
         self.assertEqual(guard.normalize_role("QA/E2E test agent"), "QA_ENGINEER")
         self.assertEqual(guard.normalize_role("Sommelier"), "QA_ENGINEER")
         self.assertEqual(guard.normalize_role("e2e_tester"), "QA_ENGINEER")
+        self.assertEqual(guard.normalize_role("spec_critic"), "SPEC_CRITIC")
+        self.assertEqual(guard.normalize_role("spec critic"), "SPEC_CRITIC")
+        self.assertEqual(guard.normalize_role("spec-critic"), "SPEC_CRITIC")
+        self.assertEqual(guard.normalize_role("goldfish_critic"), "SPEC_CRITIC")
+        self.assertEqual(guard.normalize_role("goldfish critic"), "SPEC_CRITIC")
+        self.assertEqual(guard.normalize_role("Goldfish Critic"), "SPEC_CRITIC")
 
     def test_orchestrator_denied_write(self):
         payload = {
@@ -188,7 +194,7 @@ class TestBrigadeGuard(unittest.TestCase):
             self.assertEqual(res["decision"], "allow")
 
     def test_examiners_denied_any_write(self):
-        for examiner in ["EXAMINER", "RESEARCHER"]:
+        for examiner in ["EXAMINER", "RESEARCHER", "SPEC_CRITIC"]:
             payload = {
                 "conversationId": "exam-1",
                 "toolCall": {
@@ -333,40 +339,40 @@ class TestBrigadeGuard(unittest.TestCase):
             self.assertEqual(res["decision"], "allow")
 
     def test_anti_graveyard_station_reuse(self):
-        # Step 1: No examiner active yet -> invoke_subagent allowed
+        # Step 1: No coder active yet -> invoke_subagent allowed
         payload_first = {
             "conversationId": "orch-parent",
             "toolCall": {
                 "name": "invoke_subagent",
                 "args": {
-                    "Subagents": json.dumps([{"Role": "Examiner", "Prompt": "Review diff"}])
+                    "Subagents": json.dumps([{"Role": "Coder", "Prompt": "Implement feature"}])
                 }
             }
         }
         res1 = guard.handle_pre_tool(payload_first)
         self.assertEqual(res1["decision"], "allow")
 
-        # Step 2: Register the spawned examiner subagent
+        # Step 2: Register the spawned coder subagent
         guard.register_station(
-            conversation_id="conv-exam-456",
-            role="EXAMINER",
+            conversation_id="conv-coder-456",
+            role="CODER",
             parent_cid="orch-parent"
         )
 
-        # Step 3: Second call to invoke_subagent for Examiner (using legacy alias) -> HARD DENIAL
+        # Step 3: Second call to invoke_subagent for Coder -> HARD DENIAL
         payload_second = {
             "conversationId": "orch-parent",
             "toolCall": {
                 "name": "invoke_subagent",
                 "args": {
-                    "Subagents": json.dumps([{"Role": "Standards Examiner", "Prompt": "Check standards"}])
+                    "Subagents": json.dumps([{"Role": "Coder", "Prompt": "Implement second slice"}])
                 }
             }
         }
         res2 = guard.handle_pre_tool(payload_second)
         self.assertEqual(res2["decision"], "deny")
         self.assertIn("PERSISTENT STATION REUSE REQUIRED", res2["reason"])
-        self.assertIn("conv-exam-456", res2["reason"])
+        self.assertIn("conv-coder-456", res2["reason"])
         self.assertIn("send_message", res2["reason"])
 
         # Step 4: Spawning another role (e.g. Surgeon) is allowed
@@ -1225,6 +1231,143 @@ class TestAfkSessionArmor(unittest.TestCase):
         res_state = guard.handle_pre_tool(payload_state)
         self.assertEqual(res_state["decision"], "deny")
         self.assertIn("[EDGE AFK STATE GUARD]", res_state["reason"])
+
+
+class TestGoldfishStationRotation(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.store_path = Path(self.temp_dir.name) / "edge_active_stations.json"
+        self.store = guard.StationStore(self.store_path)
+        self.brain_root = Path(self.temp_dir.name) / "brain"
+        self.brain_root.mkdir(parents=True, exist_ok=True)
+        self.scanner = guard.TranscriptStationScanner(self.brain_root)
+        self.orig_file = guard.ACTIVE_STATIONS_FILE
+        guard.ACTIVE_STATIONS_FILE = self.store_path
+
+    def tearDown(self):
+        guard.ACTIVE_STATIONS_FILE = self.orig_file
+        self.temp_dir.cleanup()
+
+    def test_role_classification_sets(self):
+        self.assertTrue(hasattr(guard, "PERSISTENT_ELEPHANT_ROLES"))
+        self.assertTrue(hasattr(guard, "EPHEMERAL_GOLDFISH_ROLES"))
+        self.assertEqual(
+            guard.PERSISTENT_ELEPHANT_ROLES,
+            frozenset({"SPEC_WRITER", "RESEARCHER", "SEAM_ARCHITECT", "CODER", "SURGEON", "QA_ENGINEER"})
+        )
+        self.assertEqual(
+            guard.EPHEMERAL_GOLDFISH_ROLES,
+            frozenset({"EXAMINER", "SPEC_CRITIC"})
+        )
+        self.assertTrue(guard.PERSISTENT_ELEPHANT_ROLES.isdisjoint(guard.EPHEMERAL_GOLDFISH_ROLES))
+
+    def test_goldfish_examiner_and_spec_critic_bypass_reuse_and_rotate_previous(self):
+        """Spawning EXAMINER or SPEC_CRITIC when active GREEN (<45k) instance exists returns allow and marks previous ROTATED."""
+        for role_name in ["EXAMINER", "SPEC_CRITIC"]:
+            cid_prev = f"cid-{role_name.lower()}-green"
+            store_data = {
+                "version": "1.0",
+                "initializedAt": "2026-10-15T00:00:00Z",
+                "sessions": {},
+                "stations": {
+                    cid_prev: {
+                        "conversationId": cid_prev,
+                        "role": role_name,
+                        "canonicalRole": role_name,
+                        "parentConversationId": "orch-parent",
+                        "status": "IDLE",
+                        "tokenHeat": {
+                            "tokens": 12000,
+                            "heatZone": "GREEN"
+                        }
+                    }
+                }
+            }
+            with open(self.store_path, "w", encoding="utf-8") as f:
+                json.dump(store_data, f)
+
+            # Spawn goldfish role
+            res = guard.StationSelector.evaluate_spawn_request(
+                self.store, self.scanner, "orch-parent", role_name
+            )
+            self.assertEqual(res["decision"], "allow")
+            self.assertIn("GOLDFISH_EPHEMERAL", res["reason"])
+            self.assertIn(f"Fresh zero-context {role_name} spawn permitted", res["reason"])
+
+            # Verify that previous instance is marked ROTATED in store
+            envelope = self.store.load()
+            self.assertEqual(envelope["stations"][cid_prev]["status"], "ROTATED")
+            self.assertIn("lastActiveAt", envelope["stations"][cid_prev])
+
+    def test_persistent_coder_and_surgeon_still_denied_when_green(self):
+        """Spawning CODER or SURGEON when active GREEN instance exists STILL returns deny directing reuse via send_message."""
+        for role_name in ["CODER", "SURGEON"]:
+            cid_green = f"cid-{role_name.lower()}-active-green"
+            store_data = {
+                "version": "1.0",
+                "initializedAt": "2026-10-15T00:00:00Z",
+                "sessions": {},
+                "stations": {
+                    cid_green: {
+                        "conversationId": cid_green,
+                        "role": role_name,
+                        "canonicalRole": role_name,
+                        "parentConversationId": "orch-parent",
+                        "status": "IDLE",
+                        "tokenHeat": {
+                            "tokens": 25000,
+                            "heatZone": "GREEN"
+                        }
+                    }
+                }
+            }
+            with open(self.store_path, "w", encoding="utf-8") as f:
+                json.dump(store_data, f)
+
+            res = guard.StationSelector.evaluate_spawn_request(
+                self.store, self.scanner, "orch-parent", role_name
+            )
+            self.assertEqual(res["decision"], "deny")
+            self.assertIn("PERSISTENT STATION REUSE REQUIRED", res["reason"])
+            self.assertIn(cid_green, res["reason"])
+            self.assertIn("send_message", res["reason"])
+
+            # Verify that elephant instance status was NOT changed
+            envelope = self.store.load()
+            self.assertEqual(envelope["stations"][cid_green]["status"], "IDLE")
+
+    def test_spec_critic_denied_file_mutations_in_handle_pre_tool(self):
+        """SPEC_CRITIC is denied file mutations (write_file / edit_file) in handle_pre_tool."""
+        mutation_tools = [
+            ("write_file", {"Path": "src/actions/foo.ts", "Content": "// code"}),
+            ("edit_file", {"Path": "specs/feature.md", "Target": "old", "Replacement": "new"}),
+            ("write_to_file", {"TargetFile": "lib/utils.ts"}),
+            ("replace_file_content", {"TargetFile": "package.json"}),
+        ]
+        for tool_name, args in mutation_tools:
+            payload = {
+                "conversationId": "critic-session-1",
+                "toolCall": {
+                    "name": tool_name,
+                    "args": args
+                }
+            }
+            with patch.object(guard, "detect_session_role", return_value=("SPEC_CRITIC", "test")):
+                res = guard.handle_pre_tool(payload)
+                self.assertEqual(res["decision"], "deny", f"Tool {tool_name} should be denied for SPEC_CRITIC")
+                self.assertIn("salt-okunur", res["reason"])
+                self.assertIn("SPEC_CRITIC", res["reason"])
+
+    def test_station_store_mark_rotated_atomic(self):
+        """StationStore.mark_rotated sets status to ROTATED and updates lastActiveAt."""
+        cid = "cid-spec-critic-mark-rot"
+        record = self.store.register(conversation_id=cid, role="SPEC_CRITIC", parent_cid="orch-parent")
+        self.assertEqual(record.status, "IDLE")
+
+        self.store.mark_rotated(cid)
+        envelope = self.store.load()
+        self.assertEqual(envelope["stations"][cid]["status"], "ROTATED")
+        self.assertIn("lastActiveAt", envelope["stations"][cid])
 
 
 if __name__ == "__main__":
