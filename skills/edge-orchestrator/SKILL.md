@@ -37,29 +37,34 @@ suggested_skills:
    > [!IMPORTANT]
    > İstasyon kuralları ve durum makinesi için doğrudan [**`skills/edge-brigade/SKILL.md`**](file:///C:/Users/oguz_/.gemini/config/plugins/edge/skills/edge-brigade/SKILL.md) el kitabını referans al.
    
+   - **Fil ve Japon Balığı Bellek Modeli (Elephant vs. Goldfish):**
+     - 🐘 **Kalıcı Fil İstasyonları (`PERSISTENT_ELEPHANT_ROLES`):** `SPEC_WRITER`, `RESEARCHER`, `SEAM_ARCHITECT`, `CODER`, `SURGEON`, `QA_ENGINEER` — alan bağlamını biriktirir ve YEŞİL bölgede (`< 45k` token) `send_message` ile sürekli yeniden kullanılır.
+     - 🐟 **Kısa Ömürlü Japon Balığı İstasyonları (`EPHEMERAL_GOLDFISH_ROLES`):** `EXAMINER` ve `SPEC_CRITIC` — teyit yanlılığını (confirmation bias) yok etmek için her inceleme/eleştiri turunda sıfır konuşma geçmişiyle taze (`invoke_subagent`) türetilir; `orchestrator_guard.py` YEŞİL bölgede dahi taze türetmeye izin verir ve önceki örneği `ROTATED` olarak işaretler.
+     - ⚡ **Kota Koruma Varsayılanı:** Alt-ajan türetirken (`invoke_subagent`), insan kaptan açıkça farklı bir model talep etmedikçe varsayılan olarak `Model: "flash"` kullanılır.
    - **Station Zero-Amnesia Protocol (Zorunlu İstasyon Yeniden Kullanımı):**
      1. **Önce Kontrol Et:** Bir istasyona iş sevk etmeden önce `manage_subagents(Action: 'list')` veya `brigade stations <repo>` çalıştır.
-     2. **Yeniden Kullan (`send_message`):** Hedef rol için aktif bir alt-ajan listeleniyorsa, **asla yeni bir `invoke_subagent` çağırma**; doğrudan o ajanın `conversationId`'sini kullanarak `send_message(Recipient: <id>, Message: ...)` ile görevi ilet.
-     3. **Yalnızca Yoksa Aç ve Kaydet:** Hedef rolde ajan henüz yoksa `invoke_subagent` çağır:
+     2. **Yeniden Kullan (`send_message`):** Hedef rol fil istasyonuysa ve aktif bir çalışan listeleniyorsa, **asla yeni bir `invoke_subagent` çağırma**; doğrudan o ajanın `conversationId`'sini kullanarak `send_message(Recipient: <id>, Message: ...)` ile görevi ilet.
+     3. **Yalnızca Yoksa veya Goldfish İse Aç:** Hedef rolde ajan henüz yoksa veya rol goldfish (`EXAMINER`, `SPEC_CRITIC`) ise `invoke_subagent` çağır:
         ```json
         invoke_subagent(
           TypeName: "self",
+          Model: "flash",
           Role: "<Kanonik İstasyon Rolü, örn: Seam Architect>",
           Prompt: "<İstasyon Yönergeleri & Görev Detayı>"
         )
         ```
         Dönen `conversationId`'yi hemen `brigade register <repo> --role <role> --conversation-id <id>` ile `.edge/brigade.json`'a kaydet.
-     4. **Kanonik İstasyon Zorunluluğu (Ad-Hoc Rol Yasağı):** Asla `Database Operator`, `Quality Worker` gibi ad-hoc roller türetme. 7 Kanonik İstasyon (`SPEC_WRITER`, `RESEARCHER`, `SEAM_ARCHITECT`, `CODER`, `SURGEON`, `EXAMINER`, `QA_ENGINEER`) kullan. Teslimat ve entegrasyon deterministik CLI (`brigade finish-slice`) ile yürütülür.
+     4. **Kanonik İstasyon Zorunluluğu (Ad-Hoc Rol Yasağı):** Asla `Database Operator`, `Quality Worker` gibi ad-hoc roller türetme. 8 Kanonik İstasyon (`SPEC_WRITER`, `SPEC_CRITIC`, `RESEARCHER`, `SEAM_ARCHITECT`, `CODER`, `SURGEON`, `EXAMINER`, `QA_ENGINEER`) kullan. Teslimat ve entegrasyon deterministik CLI (`brigade finish-slice`) ile yürütülür.
    - **İş Akışı Zincirleri:**
-     - **Feature İşi:** `SPEC_WRITER` $\rightarrow$ `SEAM_ARCHITECT` (Kırmızı Test) $\rightarrow$ **[TREEHOUSE WORKTREE GATE]** $\rightarrow$ `CODER` (Worktree'de Yeşil Test) $\rightarrow$ `EXAMINER` $\rightarrow$ `QA_ENGINEER` $\rightarrow$ Deterministik Teslimat (`brigade finish-slice`).
+     - **Feature İşi:** `SPEC_WRITER` $\rightarrow$ `SPEC_CRITIC` (`brigade critique-spec` Danışman Eleştiri) $\rightarrow$ **[TREEHOUSE WORKTREE GATE]** (`brigade start-slice --track feature` ile peşin kiralama & `RED_TEST`) $\rightarrow$ `SEAM_ARCHITECT` (Worktree'de Kırmızı Test, `brigade advance` ile doğrulama $\rightarrow$ `SURGERY`) $\rightarrow$ `CODER` (Worktree'de Yeşil Test) $\rightarrow$ `EXAMINER` $\rightarrow$ `QA_ENGINEER` $\rightarrow$ Deterministik Teslimat (`brigade finish-slice` ile birleştirme, şartname arşivleme, `/edge-drift` denetimi).
      - **Refactor İşi:** **[TREEHOUSE WORKTREE GATE]** $\rightarrow$ `SURGEON` (Worktree'de Cerrahi) $\rightarrow$ `EXAMINER` $\rightarrow$ Deterministik Teslimat (`brigade finish-slice`).
      - **Bug-Fix İşi:** `RESEARCHER` (RCA) $\rightarrow$ `SEAM_ARCHITECT` (Karakterizasyon Testi) $\rightarrow$ **[TREEHOUSE WORKTREE GATE]** $\rightarrow$ `CODER` $\rightarrow$ `EXAMINER` $\rightarrow$ `QA_ENGINEER` $\rightarrow$ Deterministik Teslimat (`brigade finish-slice`).
      - **QA / E2E Doğrulama:** `QA_ENGINEER` (`chrome-devtools-axi` + Fast-Forward Codegen Replay + Scraper Anomaly Journaling).
 
 5. **Bağlam Isısı & Güvenli Duraklatma (Context Heat Sentinel):**
-   - 🟢 **YEŞİL BÖLGE (< 180k token):** Görüşmeler ve biletlemeler normal seyreder.
-   - 🟡 **SARI BÖLGE (180k - 250k token):** Yeni bilet alımı durdurulur (`triage` dondurulur). Aktif iş biter bitmez checkpoint atılır (`python tools/brigade/cli.py pause`).
-   - 🔴 **KIRMIZI BÖLGE (> 250k token):** Acil durum dondurması. Mevcut durum `.edge/checkpoint.json`'a yazılır ve taze oturuma devredilir (Zero-Amnesia Pickup).
+   - 🟢 **YEŞİL BÖLGE (< 45k token, `GREEN_HEAT_THRESHOLD = 45,000`):** Görüşmeler ve biletlemeler normal seyreder. Fil istasyonları `send_message` ile korunur.
+   - 🟡 **SARI BÖLGE (45k - 75k token, `45,000 <= tokens < 75,000`):** Yeni bilet alımı durdurulur (`triage` dondurulur). Aktif iş biter bitmez checkpoint atılır (`python tools/brigade/cli.py pause`).
+   - 🔴 **KIRMIZI BÖLGE (>= 75k token, `YELLOW_HEAT_THRESHOLD = 75,000`):** Acil durum dondurması. Mevcut durum `.edge/checkpoint.json`'a yazılır ve taze oturuma devredilir (Zero-Amnesia Pickup).
 
 ---
 
@@ -76,16 +81,22 @@ brigade register <repo_path> --role coder --conversation-id <id>
 brigade register <repo_path> --role examiner --conversation-id <id>
 brigade register <repo_path> --role qa_engineer --conversation-id <id>
 
-# 3. Dikey Dilimi Başlat (Deterministik Olarak Treehouse Worktree Kiralar)
+# 3. Şartname Danışman Denetimi (Cross-Provider Spec Critic)
+brigade critique-spec <repo_path> --spec .edge/specs/<slice-adi>.md
+
+# 4. Dikey Dilimi Başlat (Treehouse Worktree Kiralar & RED_TEST Başlatır)
 brigade start-slice <repo_path> --name <slice-adi> --track feature
 
-# 4. İşi İlerlet (Deterministik Kapılar Geçişi Yönetir)
+# 5. İşi İlerlet (Deterministik Kapılar Geçişi Yönetir)
 brigade advance <repo_path>
 
-# 5. Dikey Dilimi Tamamla (development Dalına Fast-Forward Merge & Worktree İadesi)
+# 6. Dikey Dilimi Tamamla (development Dalına Fast-Forward Merge, Şartname Arşivleme & Worktree İadesi)
 brigade finish-slice <repo_path>
 
-# 6. Güvenli Duraklatma (Bağlam Isısı Sebebiyle)
+# 7. Yaşayan Alan Senetlerini Denetle (Drift Scanner)
+python3 tools/drift/cli.py check <repo_path>
+
+# 8. Güvenli Duraklatma (Bağlam Isısı Sebebiyle)
 brigade pause <repo_path> --reason CONTEXT_LIMIT_YELLOW
 ```
 
@@ -98,11 +109,11 @@ brigade pause <repo_path> --reason CONTEXT_LIMIT_YELLOW
 > `orchestrator_guard.py` hook'u Orkestratör'ün kaynak/test kodları üzerinde `write_file`, `edit_file` veya `read_file` çağırmasını fiziksel olarak ENGELLER (exit code deny).  
 > Kod okuma gerekiyorsa `RESEARCHER`'a, kod yazma gerekiyorsa `SEAM_ARCHITECT`/`CODER`/`SURGEON`'a delege etmek ZORUNLUDUR.
 
-* ❌ **Asla Ana Çalışma Ağacında Kodlama / Cerrahi Yapma (Zero-Touch Primary Invariant):** Kırmızı testler tamamlandıktan sonra `CODER`'a iş devredilmeden veya `SURGEON` çalıştırılmadan önce MUTLAKA Treehouse worktree kiralanmalıdır (`start-slice` veya `treehouse get --lease`). Ana repoda doğrudan üretim kodu değiştirmek KESİNLİKLE YASAKTIR.
+* ❌ **Asla Ana Çalışma Ağacında Kodlama / Cerrahi Yapma (Zero-Touch Primary Invariant):** Feature işlerinde `start-slice` ile worktree peşin kiralanır ve `RED_TEST` durumunda başlatılır. Kırmızı testler dahil tüm kodlama ve cerrahi izole worktree içinde icra edilir; ana repoda doğrudan üretim kodu değiştirmek KESİNLİKLE YASAKTIR.
 * ❌ **Asla Orkestratör Bağlamında Kod Üretme:** Cerrahiyi ve kodlamayı istasyon ajanlarına (`coder`, `surgeon`) bırak.
 * ❌ **Asla Orkestratör Bağlamında Üretim/Test Kodu Okuma:** Kod analizi için `RESEARCHER` istasyonunu sevk et. Orkestratör yalnızca `.edge/**`, `specs/**`, `coding_standards.md` ve artifact belgelerini okuyabilir.
 * ❌ **Asla Mükerrer İstasyon Ajanı Doğurma (Anti-Graveyard):** İlgili rolde aktif veya kayıtlı bir istasyon varsa `invoke_subagent` çağırma; `send_message(Recipient: <id>)` ile iletişimi sürdür.
-* ❌ **Asla Ad-Hoc Persona / Rol Türetme:** `Database Operator`, `Quality Worker` gibi keyfi roller açma; yalnızca 9 kanonik Brigade istasyonunu kullan.
+* ❌ **Asla Ad-Hoc Persona / Rol Türetme:** `Database Operator`, `Quality Worker` gibi keyfi roller açma; yalnızca 8 kanonik Brigade istasyonunu kullan.
 * ❌ **Asla UI'ı Onaysız Geçme:** `lavish-axi` prototipi insan tarafından onaylanmadan kodlama fazını başlatma.
 * ❌ **Asla Kırmızı Test Olmadan Coder'a İşi Verme:** `seam_architect` fail eden birim testi yazmadan kodlayıcı işe başlayamaz.
 * ❌ **Asla E2E Anomalilerini Doğrudan Düzeltmeye Çalışma:** `qa_engineer` bulduğu UI/UX anomalilerini `frontier-axi`'ye loglar, kod tabanını mutasyona uğratmaz.

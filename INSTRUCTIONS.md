@@ -41,17 +41,24 @@ Orkestratör, görevin türüne göre istasyonları sırayla devreye sokar:
 [Orkestratör] ──► 1. SPEC_WRITER (Şartname & Lavish UI Prototipi)
                      │ (Kullanıcı tarayıcıda UI'ı onaylar)
                      ▼
-                  2. SEAM_ARCHITECT (Kırmızı Birim/Sözleşme Testi)
-                     │ (Başlangıçta patlayan test mühürlenir)
+                  2. SPEC_CRITIC (`brigade critique-spec` Danışman Denetimi)
+                     │ (claude-opus-5-5-high / gemini-3.8-flash-high anti-borç analizi)
                      ▼
-                  3. CODER (Kırmızı Testi Yeşile Çevirir)
+                  3. START-SLICE (`RED_TEST` Başlangıcı & İzole Worktree Kiralama)
+                     │ (`brigade start-slice --name <slice> --track feature`)
+                     ▼
+                  4. SEAM_ARCHITECT (Kiralık Worktree'de Kırmızı Birim/Sözleşme Testi)
+                     │ (`brigade advance` hakiki non-zero fail doğrulaması)
+                     ▼
+                  5. CODER (Worktree'de Kırmızı Testi Yeşile Çevirir)
                      │ (Test assertion'larını gevşetmesi yasaktır)
                      ▼
-                  4. EXAMINER (Tek Geçişte Çift Eksenli Standart & Şartname İncelemesi)
+                  6. EXAMINER (Tek Geçişte Çift Eksenli Standart & Şartname İncelemesi)
                      ▼
-                  5. QA_ENGINEER (Canlı Tarayıcı E2E Testi)
+                  7. QA_ENGINEER (Canlı Tarayıcı E2E Testi)
                      ▼
-                  6. Deterministik Teslimat (`brigade finish-slice`)
+                  8. Deterministik Teslimat (`brigade finish-slice`)
+                     (development birleştirme, şartname arşivleme, /edge-drift denetimi)
 ```
 
 ### 🧬 B. Refaktör Akışı (Structural Refactor Track)
@@ -83,9 +90,15 @@ Geliştiricinin veya ajanın "bu ajanı kapatıp yenisini mi açayım?" diye dü
 
 * **İstasyon Hafızası (Reuse via `send_message`):**  
   Eğer ilgili rolde daha önce açılmış bir çalışan varsa, yeni bir alt-ajan türetilmez; görev doğrudan mevcut ajana `send_message` ile iletilir.
-* **Bağlam Isısı Eşikleri:**
-  * 🟢 **YEŞİL (< 180k token):** Çalışan dinçtir, görev aynı ajana verilir.
-  * 🟡 / 🔴 **SARI / KIRMIZI ($\ge 180k$ token):** Çalışan yorulmuştur (`EXHAUSTED`).
+* **Fil ve Japon Balığı Bellek Modeli (Elephant vs. Goldfish):**
+  * 🐘 **Kalıcı Fil İstasyonları (`PERSISTENT_ELEPHANT_ROLES`):** `SPEC_WRITER`, `RESEARCHER`, `SEAM_ARCHITECT`, `CODER`, `SURGEON`, `QA_ENGINEER` — alan bağlamını biriktirir ve YEŞİL bölgede (`< 45k` token) `send_message` ile sürekli yeniden kullanılır.
+  * 🐟 **Kısa Ömürlü Japon Balığı İstasyonları (`EPHEMERAL_GOLDFISH_ROLES`):** `EXAMINER` ve `SPEC_CRITIC` — teyit yanlılığını (confirmation bias) engellemek için her inceleme/eleştiri turunda sıfır konuşma geçmişiyle taze (`invoke_subagent`) türetilir; guard YEŞİL bölgede dahi taze türetmeye izin verir ve önceki örneği `ROTATED` olarak işaretler.
+* **Kota Koruma Politikası:**  
+  Alt-ajan başlatılırken (`invoke_subagent`), insan kaptan aksini belirtmedikçe varsayılan olarak `Model: "flash"` kullanılır.
+* **Bağlam Isısı Eşikleri (SSOT Thresholds):**
+  * 🟢 **YEŞİL BÖLGE (< 45k token, `GREEN_HEAT_THRESHOLD = 45,000`):** Çalışan dinçtir, görev aynı ajana `send_message` ile iletilir.
+  * 🟡 **SARI BÖLGE (45k - 75k token, `45,000 <= tokens < 75,000`):** Yeni bilet alımı durdurulur (`triage` dondurulur), aktif bilet tamamlanır.
+  * 🔴 **KIRMIZI BÖLGE ($\ge 75k$ token, `YELLOW_HEAT_THRESHOLD = 75,000`):** Çalışan yorulmuştur (`EXHAUSTED`); rotasyon izni verilir veya acil durum kontrol noktası alınır.
 * **Sıfır-Özet Devir (Zero-Handoff Invariant):**  
   Yorulan çalışan için pahalı ve hatalı "hafıza özeti" çıkarılmaz. Her iş paketi kendi dosya yolu ve test komutuyla bağımsız olduğu için, istasyon yeni ve soğuk (cold-start) bir çalışana temiz bir şekilde devreder.
 
@@ -125,6 +138,12 @@ wsl python3 tools/radar/cli.py <repo_path>
 
 # 4. Kriz Kaydedici & Operasyonel Playbook Çıkarımı (Distill)
 wsl python3 tools/distill/cli.py <repo_path>
+
+# 5. Şartname Danışman Denetimi (Cross-Provider Spec Critic)
+wsl python3 tools/brigade/cli.py critique-spec <repo_path> --spec <spec_path>
+
+# 6. Yaşayan Alan Sözleşmeleri ve Sapma Denetimi (Drift)
+wsl python3 tools/drift/cli.py check <repo_path>
 ```
 
 ---

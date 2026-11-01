@@ -31,7 +31,7 @@ Edge enforces four unshakeable operational invariants across all workflows:
 * 🍽️ **Michelin Station Specialization:**  
   *"Tatlıcı sadece tatlı yapar, çorbacı sadece çorba yapar."* Agents do not act as disposable generalists. Each station worker is a persistent specialist with immutable tool boundaries and domain contracts.
 * 🚫 **Zero-Handoff Rotation Invariant:**  
-  When an agent's context window reaches cognitive exhaustion ($\ge 180\text{k}$ tokens), it is cleanly retired. No slow, lossy LLM summarization or handoff compaction is performed; every work package is self-contained and hermetic.
+  When an agent's context window reaches cognitive exhaustion ($\ge 75\text{k}$ tokens, RED zone), it is cleanly retired. No slow, lossy LLM summarization or handoff compaction is performed; every work package is self-contained and hermetic.
 
 ---
 
@@ -83,6 +83,19 @@ Instead of spawning ephemeral subagents that attempt to solve entire problems in
 | **`EXAMINER`** | *Sous Chef / Maître d'* | Unified dual-axis review: `coding_standards.md`/Fowler smells and architectural invariants/scope-creep. | Strictly read-only; differentiates hard breaches from subjective nits. |
 | **`QA_ENGINEER`** | *Sommelier* | End-to-end browser verification via `chrome-devtools-axi`. | Zero production code mutation; parks defects to `frontier-axi`. |
 
+### Station Memory Models: Elephant vs. Goldfish
+
+Edge categorizes station roles into two distinct operational memory lifecycles:
+
+* 🐘 **Persistent Elephant Stations (`PERSISTENT_ELEPHANT_ROLES`):**  
+  `SPEC_WRITER`, `RESEARCHER`, `SEAM_ARCHITECT`, `CODER`, `SURGEON`, and `QA_ENGINEER`.  
+  These workers build and retain deep domain context across multiple steps of a slice. They are registered and reused via `send_message(Recipient: <conversationId>, ...)` as long as their context heat remains in the **GREEN zone** (`< 45k` tokens).
+* 🐟 **Ephemeral Goldfish Stations (`EPHEMERAL_GOLDFISH_ROLES`):**  
+  `EXAMINER` and `SPEC_CRITIC`.  
+  Reviewers and critics MUST have zero sycophancy and zero confirmation bias. They are spawned fresh with zero conversational history via `invoke_subagent` on every review or critique pass. `orchestrator_guard.py` permits fresh spawns for these roles even in the GREEN heat zone, automatically marking prior instances as `ROTATED`.
+* ⚡ **Quota Conservation Policy:**  
+  When spawning subagents via `invoke_subagent`, the runtime MUST default to `Model: "flash"` unless the human captain explicitly requests another tier.
+
 ---
 
 ## 3. The Orchestrator & Green-Zone Protection
@@ -113,7 +126,7 @@ To prevent **Subagent Graveyard Sprawl** (where dozens of disposable subagents a
                      │                                   │
                      │                     ┌─────────────┴─────────────┐
                      │                     ▼                           ▼
-                     │            Heat < 180k (GREEN)         Heat >= 180k (YELLOW/RED)
+                     │            Heat < 45k (GREEN)          Heat >= 75k (RED)
                      │                     │                           │
                      │                     ▼                           ▼
                      │            DENY invoke_subagent        ALLOW Rotation (Case C)
@@ -134,8 +147,14 @@ To prevent **Subagent Graveyard Sprawl** (where dozens of disposable subagents a
 3. **`StationSelector`:**
    Deterministic decision engine operating in `PreToolUse`:
    * **Case A (No Active Station):** Allows spawn (`{"decision": "allow"}`).
-   * **Case B (Active Station in Green Zone $< 180\text{k}$):** Denies spawn (`{"decision": "deny"}`), directing Orchestrator to reuse the existing worker via `send_message(Recipient: <cid>, Message: ...)`.
-   * **Case C (Active Station Saturated $\ge 180\text{k}$):** Allows cold rotation (`{"decision": "allow"}`). Marks the saturated worker `EXHAUSTED` and assigns the fresh cold worker to the station.
+   * **Case B (Active Station in Green Zone $< 45\text{k}$):** Denies spawn (`{"decision": "deny"}`), directing Orchestrator to reuse the existing worker via `send_message(Recipient: <cid>, Message: ...)`. (Ephemeral Goldfish stations `EXAMINER` and `SPEC_CRITIC` are exempted and allowed fresh spawn).
+   * **Case C (Active Station Saturated $\ge 75\text{k}$):** Allows cold rotation (`{"decision": "allow"}`). Marks the saturated worker `EXHAUSTED` and assigns the fresh cold worker to the station.
+
+### Authoritative SSOT Context Heat Zones:
+Edge defines strict, non-negotiable token heat thresholds enforced in `fsm.py` and `orchestrator_guard.py`:
+- 🟢 **GREEN Zone:** `< 45k tokens` (`GREEN_HEAT_THRESHOLD = 45,000`) — Normal execution. Elephant stations are preserved and reused via `send_message`.
+- 🟡 **YELLOW Zone:** `45k - 75k tokens` (`45,000 <= tokens < 75,000`) — Drain active ticket, freeze triage. No new feature slices started.
+- 🔴 **RED Zone:** `>= 75k tokens` (`YELLOW_HEAT_THRESHOLD = 75,000`) — Cognitive exhaustion. Emergency checkpoint via `brigade pause` or immediate cold rotation.
 
 ---
 
@@ -207,8 +226,8 @@ flowchart TD
     end
 
     Orch -->|invoke_subagent| Selector
-    Selector -->|Green < 180k: Deny & Redirect| Orch
-    Selector -->|Empty / Saturated >= 180k: Allow| Kitchen
+    Selector -->|Green < 45k: Deny & Redirect| Orch
+    Selector -->|Empty / Saturated >= 75k: Allow| Kitchen
 
     subgraph Kitchen ["Michelin Kitchen Stations"]
         direction TB
@@ -244,7 +263,7 @@ flowchart TD
 │   └── ...
 ├── specs/              # Formal engineering specifications
 │   └── antigraveyard_station_persistence.md
-├── tests/              # Comprehensive automated test suite (119 unit tests)
+├── tests/              # Comprehensive automated test suite (246 unit tests)
 │   ├── test_brigade.py
 │   ├── test_brigade_guard.py
 │   ├── test_distill.py

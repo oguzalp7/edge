@@ -6,9 +6,10 @@ Bu el kitapçığı, bağlam penceresi doygunluğa ulaştığında veya kullanı
 
 ## 🎯 1. Tetiklenme Koşulları (Trigger Matrix)
 
-1. **Bağlam Isı Seviyesi (Context Heat Zones):**
-   * **🟡 SARI BÖLGE (180k - 250k token):** Yeni bilet alımı durdurulur (`triage` dondurulur). Aktif bilet bitirilir (Gate ve Staging tamamlanır). Bilet merge edildikten hemen sonra otomatik olarak `brigade pause` tetiklenir.
-   * **🔴 KIRMIZI BÖLGE (> 250k token):** Acil durum kontrol noktası (Emergency Checkpoint). Aktif cerrahi/doğrulama anında dahi olsa bekletilmeden `brigade pause` çalıştırılır. Kirli dosyalar `wip(checkpoint)` commit'i ile güvenceye alınır.
+1. **Bağlam Isı Seviyesi (SSOT Context Heat Zones):**
+   * **🟢 YEŞİL BÖLGE (< 45k token, `GREEN_HEAT_THRESHOLD = 45,000`):** Normal operasyon. Kalıcı istasyonlar korunur ve `send_message` ile yeniden kullanılır.
+   * **🟡 SARI BÖLGE (45k - 75k token, `45,000 <= tokens < 75,000`):** Yeni bilet alımı durdurulur (`triage` dondurulur). Aktif bilet bitirilir (Gate ve Staging tamamlanır). Bilet merge edildikten hemen sonra otomatik olarak `brigade pause` tetiklenir.
+   * **🔴 KIRMIZI BÖLGE (>= 75k token, `YELLOW_HEAT_THRESHOLD = 75,000`):** Acil durum kontrol noktası (Emergency Checkpoint). Aktif cerrahi/doğrulama anında dahi olsa bekletilmeden `brigade pause` çalıştırılır. Kirli dosyalar `wip(checkpoint)` commit'i ile güvenceye alınır.
 
 2. **Kullanıcı Talebi (Human Pause):**
    * Kullanıcı *"dur"*, *"mola verelim"*, *"yarın devam ederiz"*, *"oturum aç/kapat yapalım"* dediğinde.
