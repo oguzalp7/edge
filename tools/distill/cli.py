@@ -8,7 +8,7 @@ import os
 import argparse
 import json
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Tuple
 
 # Add project root to sys.path
 root_dir = Path(__file__).resolve().parent.parent.parent
@@ -31,6 +31,7 @@ from tools.distill.state import (
     LexicalStackGate,
     CandidatePool,
     check_line_budget,
+    collect_budget_targets,
 )
 
 
@@ -117,23 +118,60 @@ def cmd_promote(args: argparse.Namespace) -> int:
     root = getattr(args, "plugin_root", None)
     force = getattr(args, "force", False)
     pool = CandidatePool(plugin_root=Path(root) if root else None)
-    pool.promote_candidate(candidate_id=cid, force=force)
-    return 0
+    try:
+        success = pool.promote_candidate(candidate_id=cid, force=force)
+        if success:
+            print(f"Promoted candidate {cid}")
+        else:
+            print(f"Candidate {cid} not eligible for promotion")
+        return 0
+    except ValueError as e:
+        print(f"Error promoting candidate {cid}: {e}", file=sys.stderr)
+        return 1
 
 
 def cmd_mark_processed(args: argparse.Namespace) -> int:
-    sid = getattr(args, "session", None)
-    if not sid:
+    raw_sessions = getattr(args, "session", [])
+    if isinstance(raw_sessions, str):
+        raw_sessions = [raw_sessions]
+    sessions = [s.strip() for raw in raw_sessions for s in raw.split(",") if s.strip()]
+    if not sessions:
         print("Error: --session is required", file=sys.stderr)
         return 1
     proj = getattr(args, "project", None)
+    proj_str = str(normalize_target_path(proj)) if proj else None
     manager = DistillStateManager()
-    manager.mark_session_processed(
-        session_id=sid,
-        project_path=str(normalize_target_path(proj)) if proj else None,
-    )
-    print(f"Marked session {sid} as processed")
+    for sid in sessions:
+        manager.mark_session_processed(
+            session_id=sid,
+            project_path=proj_str,
+        )
+        print(f"Marked session {sid} as processed")
     return 0
+
+
+def _resolve_budget_targets(p: Path, max_lines_override: Optional[int]) -> List[Tuple[Path, int]]:
+    targets = collect_budget_targets(p)
+    fallback_limit = max_lines_override or 60
+    if not targets and p.is_dir():
+        return [(f, fallback_limit) for f in sorted(p.glob("*.md"))]
+    if not targets:
+        return [(p, fallback_limit)]
+    return targets
+
+
+def _check_and_print_targets(targets: List[Tuple[Path, int]], override_limit: Optional[int]) -> bool:
+    all_ok = True
+    for f, def_limit in targets:
+        lim = override_limit or def_limit
+        lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
+        cnt = len(lines)
+        if cnt <= lim:
+            print(f"PASS: {f.name} has {cnt} lines (budget <= {lim})")
+        else:
+            print(f"FAIL: {f.name} has {cnt} lines (budget <= {lim} exceeded)", file=sys.stderr)
+            all_ok = False
+    return all_ok
 
 
 def cmd_check_budget(args: argparse.Namespace) -> int:
@@ -142,14 +180,14 @@ def cmd_check_budget(args: argparse.Namespace) -> int:
         print("Error: path is required", file=sys.stderr)
         return 1
     p = Path(raw_path).resolve()
-    max_lines = getattr(args, "max_lines", None)
-    ok, count, limit = check_line_budget(p, max_lines=max_lines)
-    if ok:
-        print(f"PASS: {p.name} has {count} lines (budget <= {limit})")
-        return 0
-    else:
-        print(f"FAIL: {p.name} has {count} lines (budget <= {limit} exceeded)", file=sys.stderr)
+    if not p.exists():
+        print(f"Error: path does not exist: {p}", file=sys.stderr)
         return 1
+
+    override_limit = getattr(args, "max_lines", None)
+    targets = _resolve_budget_targets(p, override_limit)
+    all_ok = _check_and_print_targets(targets, override_limit)
+    return 0 if all_ok else 1
 
 
 def _extract_brain_roots(args: argparse.Namespace) -> Optional[List[Path]]:
@@ -235,12 +273,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     # mark-processed
     p_mark = subparsers.add_parser("mark-processed", help="Mark session as processed")
-    p_mark.add_argument("--session", required=True, help="Session ID")
+    p_mark.add_argument("--session", action="append", required=True, help="Session ID(s)")
     p_mark.add_argument("--project", help="Project path")
 
     # check-budget
     p_budget = subparsers.add_parser("check-budget", help="Check physical line budget")
-    p_budget.add_argument("path", help="Path to rubric markdown file")
+    p_budget.add_argument("path", help="Path to rubric markdown file or directory")
     p_budget.add_argument("--max-lines", type=int, help="Optional line limit override")
 
     # sessions

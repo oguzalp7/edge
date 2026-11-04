@@ -16,6 +16,22 @@ from datetime import datetime, timezone
 from tools.distill.models import DistillWatermarkState, CandidateRule
 
 
+def _default_state_path() -> Path:
+    env_path = os.environ.get("EDGE_DISTILL_STATE_FILE")
+    if env_path:
+        return Path(env_path).resolve()
+    base_dir = Path.home() / ".gemini" / "antigravity"
+    return (base_dir / "edge_distill_state.json").resolve()
+
+
+def _default_candidates_path() -> Path:
+    env_path = os.environ.get("EDGE_DISTILL_CANDIDATES_FILE")
+    if env_path:
+        return Path(env_path).resolve()
+    base_dir = Path.home() / ".gemini" / "antigravity"
+    return (base_dir / "edge_distill_candidates.json").resolve()
+
+
 class DistillStateManager:
     """
     Manages atomic watermark state across harvest runs.
@@ -24,11 +40,7 @@ class DistillStateManager:
         if state_file_override:
             self.state_file = Path(state_file_override).resolve()
         else:
-            env_path = os.environ.get("EDGE_DISTILL_STATE_FILE")
-            if env_path:
-                self.state_file = Path(env_path).resolve()
-            else:
-                self.state_file = (Path.home() / ".edge" / "distill_watermark.json").resolve()
+            self.state_file = _default_state_path()
 
     def load_state(self) -> DistillWatermarkState:
         if not self.state_file.exists():
@@ -118,6 +130,9 @@ def _append_rule_to_agent_rubric(agent_file: Path, cand: CandidateRule) -> None:
     existing = agent_file.read_text(encoding="utf-8")
     if cand.rule_text not in existing:
         new_text = existing.rstrip() + f"\n\n### Distilled Invariant ({cand.candidate_id})\n- {cand.rule_text}\n"
+        new_lines = len(new_text.splitlines())
+        if new_lines > 60:
+            raise ValueError(f"Line budget exceeded (> 60 lines: {new_lines} lines)")
         agent_file.write_text(new_text, encoding="utf-8")
 
 
@@ -154,11 +169,7 @@ class CandidatePool:
         if candidates_file_override:
             self.candidates_file = Path(candidates_file_override).resolve()
         else:
-            env_path = os.environ.get("EDGE_DISTILL_CANDIDATES_FILE")
-            if env_path:
-                self.candidates_file = Path(env_path).resolve()
-            else:
-                self.candidates_file = (Path.home() / ".edge" / "candidates.json").resolve()
+            self.candidates_file = _default_candidates_path()
 
         self.plugin_root = (
             Path(plugin_root).resolve()
@@ -270,28 +281,92 @@ class CandidatePool:
         return candidates
 
 
-def check_line_budget(file_path: Path, max_lines: Optional[int] = None) -> Tuple[bool, int, int]:
+def _collect_dir_targets(p: Path) -> List[Tuple[Path, int]]:
+    targets: List[Tuple[Path, int]] = []
+    agents_dir = p / "agents"
+    if agents_dir.is_dir():
+        for f in sorted(agents_dir.glob("*.md")):
+            targets.append((f, 60))
+    stations_dir = p / ".edge" / "stations"
+    if stations_dir.is_dir():
+        for f in sorted(stations_dir.glob("*.md")):
+            targets.append((f, 40))
+    return targets
+
+
+def _collect_self_targets(p: Path) -> List[Tuple[Path, int]]:
+    targets: List[Tuple[Path, int]] = []
+    parts = [part.lower() for part in p.parts]
+    limit = 40 if "stations" in parts else (60 if "agents" in parts else None)
+    if limit is not None:
+        for f in sorted(p.glob("*.md")):
+            targets.append((f, limit))
+    return targets
+
+
+def collect_budget_targets(target_path: Path) -> List[Tuple[Path, int]]:
+    """
+    Collects markdown files and their budget ceilings:
+    - agents/*.md <= 60 lines
+    - .edge/stations/*.md <= 40 lines
+    - if directory is named 'agents', its *.md <= 60 lines
+    - if directory is named 'stations', its *.md <= 40 lines
+    """
+    p = target_path.resolve()
+    if p.is_file():
+        parts = [part.lower() for part in p.parts]
+        limit = 40 if "stations" in parts else 60
+        return [(p, limit)]
+
+    targets = _collect_dir_targets(p)
+    if not targets:
+        targets = _collect_self_targets(p)
+    return targets
+
+
+def _check_single_file_budget(p: Path, max_lines: Optional[int]) -> Tuple[bool, int, int]:
+    parts = [part.lower() for part in p.parts]
+    limit = max_lines if max_lines is not None else (40 if "stations" in parts else 60)
+    lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+    count = len(lines)
+    return count <= limit, count, limit
+
+
+def _evaluate_target_budgets(targets: List[Tuple[Path, int]], max_lines: Optional[int]) -> Tuple[bool, int, int]:
+    all_ok = True
+    max_count = 0
+    effective_limit = max_lines or 60
+    for f, def_limit in targets:
+        lim = max_lines or def_limit
+        cnt = len(f.read_text(encoding="utf-8", errors="replace").splitlines())
+        if cnt > max_count:
+            max_count = cnt
+        if cnt > lim:
+            all_ok = False
+            effective_limit = lim
+    return all_ok, max_count, effective_limit
+
+
+def check_line_budget(file_or_dir_path: Path, max_lines: Optional[int] = None) -> Tuple[bool, int, int]:
     """
     Checks line count against strict station and agent budgets:
     - agents/*.md max 60 lines
     - .edge/stations/*.md max 40 lines
+    Supports single file or directory traversal.
     """
-    p = Path(file_path).resolve()
+    p = Path(file_or_dir_path).resolve()
     if not p.exists():
         return False, 0, max_lines or 60
 
-    if max_lines is None:
-        parts = [part.lower() for part in p.parts]
-        if "stations" in parts:
-            max_lines = 40
-        elif "agents" in parts:
-            max_lines = 60
-        else:
-            max_lines = 60
+    if p.is_file():
+        return _check_single_file_budget(p, max_lines)
 
-    try:
-        lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
-        count = len(lines)
-        return count <= max_lines, count, max_lines
-    except Exception:
-        return False, 0, max_lines
+    targets = collect_budget_targets(p)
+    if not targets:
+        limit = max_lines or 60
+        targets = [(f, limit) for f in sorted(p.glob("*.md"))]
+
+    if not targets:
+        return True, 0, max_lines or 60
+
+    return _evaluate_target_budgets(targets, max_lines)
