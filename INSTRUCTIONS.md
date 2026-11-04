@@ -136,8 +136,11 @@ wsl python3 tools/audit/cli.py <repo_path>
 # 3. Teknik Borç & Değişim Frekansı Radarı (Radar)
 wsl python3 tools/radar/cli.py <repo_path>
 
-# 4. Kriz Kaydedici & Operasyonel Playbook Çıkarımı (Distill)
-wsl python3 tools/distill/cli.py <repo_path>
+# 4. Öz-İyileştirme & Telemetri Hasadı (Self-Improving Distill v2)
+wsl python3 tools/distill/cli.py harvest --project <repo_path> --format toon
+wsl python3 tools/distill/cli.py candidates list
+wsl python3 tools/distill/cli.py check-budget <repo_path>
+# Tam damıtma döngüsü: /edge-distill [--deep] [--all-projects]
 
 # 5. Şartname Danışman Denetimi (Cross-Provider Spec Critic)
 wsl python3 tools/brigade/cli.py critique-spec <repo_path> --spec <spec_path>

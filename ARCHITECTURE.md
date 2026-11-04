@@ -240,8 +240,9 @@ flowchart TD
     end
 
     Kitchen <-->|Hermetic Worktrees & Git| Repo[("WSL2 Repository")]
-    Kitchen -->|Flight Logs & Incident Data| Distill["Edge Distill Engine"]
-    Distill --> Playbooks["Domain Playbooks & Coding Standards"]
+    Kitchen -->|Transcripts & FlightRecorder| Distill["Self-Improving Factory (distill v2)"]
+    Distill -->|Harvest & Synthesize| Rubrics["agents/*.md & .edge/stations/"]
+    Distill -->|Mechanical Checks| Tasks["tasks-axi Tickets"]
 ```
 
 ---
@@ -270,7 +271,7 @@ flowchart TD
 │   └── ...
 └── tools/              # Deterministic Python CLI engines & guards
     ├── brigade/        # orchestrator_guard.py, fsm.py, stations.py
-    ├── distill/        # Flight recorder & playbook miner
+    ├── distill/        # Self-improving factory: zero-token harvester, candidate pool & state
     ├── audit/          # AST complexity & module depth analyzer
     └── radar/          # Churn scanner & debt ledger
 ```

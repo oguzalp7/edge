@@ -1,109 +1,94 @@
 ---
 name: edge-distill
-description: Incident Flight Recorder, Operational Journaler & Domain Playbook Miner. Records live crisis interventions (divergent features, missing seams, behavioral bugs), maintains durable journals from incident start to resolution, and distills evidence-based domain playbook proposals.
+description: Self-Improving Software Factory Engine. Converts execution friction, guard failures, and human corrections from Antigravity transcripts and FlightRecorder into permanent engineering improvements via zero-token harvesting, Cold Goldfish synthesis, and dual-channel delivery.
+suggested_skills:
+  - edge-orchestrator
+  - edge-brigade
 ---
 
-# ✈️ /edge-distill — Incident Flight Recorder & Operational Playbook Miner
+# 🏛️ /edge-distill — Self-Improving Software Factory Engine
 
-> *"Do not force generic coding standards onto crisis scenarios. When faced with architectural disasters — bifurcated features, behavioral divergence, missing seams, and bugs — engage the Flight Recorder. Journal every diagnosis, seam addition, and synchronization move until 'problem resolved' sign-off, then distill an empirical Playbook Proposal."*
+> *"Do not force generic prompt bloat onto autonomous coding agents. Transform raw execution friction, test failures, and human corrections into verified, permanent engineering invariants."*
 
-`edge-distill` is a dual-purpose engine:
-1. **Kara Kutu (Flight Recorder & Operational Journal):** Kriz anında başlatılan, problem çözüldü onayına kadar kesintisiz adımları, kararları ve diff'leri kaydeden canlı operasyon günlüğü.
-2. **Domain Keşif & Playbook Miner:** Çözüm sonrası oturumu tarayarak yeni operasyonel domainler (örneğin `reconcile` / `harmonize`) ve kanıta dayalı el kitapçığı taslakları (`rules/playbooks/proposals/`) üreten analiz motoru.
-
----
-
-## 🏛️ Edge Eklentisinde "Domain" Ne Demektir?
-
-> [!IMPORTANT]
-> **Proje Kodu Alanları vs Operasyonel Ajan Domainleri:**
-> `edge` altyapısında "domain", hedef uygulamanın bir modülü (bookings, customers vb.) DEĞİL; **ajanın çalışma modu ve mühendislik arketipidir.**
-
-Şu ana kadar tanımlı 2 ana operasyonel domain vardı:
-
-| Domain | Temel Felsefe | Davranış (Behavior) | Yapı (Structure) | Kısıtlar |
-| :--- | :--- | :--- | :--- | :--- |
-| **`feature`** | Dıştan İçe (Outside-In) | **DEĞİŞİR** (Yeni yetenek) | Yeni eklenir | `Target SLOC < 0` aranmaz, kabul kriteri esastır (`rules/feature.md`). |
-| **`refactor`** | İçten Dışa (Inside-Out) | **SABİTTİR** (0 değişim) | Sadeleşir / Katmanlanır | `Target SLOC < 0` zorunludur, testler baştan yeşil olmalıdır (`rules/refactor.md`). |
-
-### 🚨 Yeni Keşfedilen 3. Domain: `reconcile` (Harmonization / Stabilization)
-Ajanların ve mühendislerin karşılaştığı tipik felaket senaryosu:
-* **Durum:** Aşırı şişkin LOC, eksik test dikişleri (seam'ler), DB ve API farklı kafada, Core ayrı kafada, iki farklı davranış sergileyen iki başlı bir feature ve çözülmeyi bekleyen bir bug.
-* **Neden `refactor` uygulanamaz?** Davranış dondurulamaz; çünkü bug vardır ve iki baş birbiriyle çelişmektedir. Üstelik baştan yeşil bir test dikişi yoktur.
-* **Neden `feature` uygulanamaz?** Feature zaten mevcuttur; sıfırdan yazmak sisteme 3. bir baş ekler.
-* **Çözüm:** **`reconcile` Protokolü:**
-  1. *İki Başın Tespiti:* API/Action beklentileri ile Core/DB gerçekliği arasındaki sapmayı haritala.
-  2. *Eksik Dikiş İnşası:* Önce beklenen davranışı mühürleyen karakterizasyon testlerini yaz.
-  3. *Davranış Senkronizasyonu & Bug Fix:* İki davranışı tek bir SSOT sözleşmesine indirge ve bug'ı çöz.
-  4. *Artık Başın Ayıklanması:* Çelişkili ikinci implementasyonu temizle, LOC şişkinliğini daralt.
+`edge-distill` is an autonomous two-phase engineering feedback engine:
+1. **Zero-Token Passive Harvest (Phase 1):** Deterministic Python harvester scanning Antigravity session transcripts and FlightRecorder without LLM token expenditure.
+2. **Cold Goldfish Synthesis (Phase 2):** Ephemeral, low-cost subagent (`Model: "flash"`, `Role: "Examiner"`) analyzing the extracted `FrictionDigest` under strict prompt-injection protection.
 
 ---
 
-## 🔄 Kara Kutu Yaşam Döngüsü (Flight Recorder Lifecycle)
+## 🔄 5-Step Operational Protocol
 
-```
- [ Kriz Başlangıcı ]
-         │
-         ▼
- 1. BAŞLAT: `brigade distill start . --goal "İki başlı auth/order senkronizasyonu"`
-         │   (Baseline commit SHA, git status ve zaman damgası kilitlenir)
-         │
-         ▼
- 2. KAYDET: `brigade distill log . --step "Eksik seam characterization testi yazıldı" --tag SEAM_CREATION`
-         │   `brigade distill log . --step "API ve Core arasındaki parametre farkı giderildi" --tag BEHAVIOR_SYNC`
-         │   `brigade distill log . --step "Deadlock bug'ı db.transaction ile çözüldü" --tag BUG_FIX`
-         │
-         ▼
- 3. PROBLEM ÇÖZÜLDÜ ONAYI: `brigade distill resolve . --notes "Seamler yeşil, davranış tekilleştirildi"`
-         │   (Final commit SHA mühürlenir, kayıt durdurulur)
-         │
-         ▼
- 4. TASLAK ÜRETİMİ: `brigade distill propose .`
-         │
-         ▼
- [ rules/playbooks/proposals/reconcile-domain-proposal.md Hazırlanır ]
-```
-
----
-
-## ⚡ CLI Referansı
-
-### 1. Canlı Kara Kutu Komutları
+### Step 1: Zero-Token Harvest (Phase 1)
+Execute the deterministic CLI harvester in WSL:
 ```bash
-# Oturumu Başlat
-python tools/brigade/cli.py distill . --action start --goal "İki başlı feature senkronizasyonu" --domain reconcile
-
-# Günlüğe Adım Ekle
-python tools/brigade/cli.py distill . --action log --step "tests/unit/ içinde karakterizasyon dikişi atıldı" --tag SEAM_CREATION
-python tools/brigade/cli.py distill . --action log --step "Controller ve Core tek SSOT metoduna bağlandı" --tag BEHAVIOR_SYNC
-
-# Durumu İncele
-python tools/brigade/cli.py distill . --action status
-
-# Problem Çözüldü Olarak Mühürle
-python tools/brigade/cli.py distill . --action resolve --notes "Bug çözüldü, seamler yeşil, ikinci baş ayıklandı"
-
-# Yeni Playbook Proposal'ı Üret
-python tools/brigade/cli.py distill . --action propose
+wsl python3 tools/distill/cli.py harvest --project <repo_path> --format toon
+wsl python3 tools/distill/cli.py candidates list
 ```
-
-### 2. Standalone CLI Komutları
-```bash
-# Bağımsız CLI ile aynı işlemler:
-edge-distill start . --goal "Divergent API/DB reconciliation"
-edge-distill log . --step "Characterization seam erected" --tag SEAM_CREATION
-edge-distill resolve . --notes "Single source of truth established"
-edge-distill propose .
-```
+- Optional flags: `--all-projects`, `--current <cid>`, `--reprocess`.
+- **Zero-Friction Exit Condition:** If `harvest` finds zero unharvested sessions and `candidates list` has no pending promotions, print:
+  `"✨ Harvester clean: No unprocessed sessions or pending promotions found. Exiting with 0 tokens spent."`
+  and terminate immediately without spawning any subagents.
 
 ---
 
-## 📄 Üretilen Playbook Proposal İçeriği
+### Step 2: Cold Goldfish Synthesis (Phase 2)
+If unprocessed sessions or ready candidates exist, spawn an isolated subagent with zero prior conversational baggage:
+- **Default Mode (Single Synthesizer):**
+  - Use `read_file` to load `skills/edge-distill/references/synthesizer.md`.
+  - Dispatch via `invoke_subagent`:
+    - `TypeName: "self"`
+    - `Model: "flash"`
+    - `Role: "Examiner"`
+    - Embed the TOON `FrictionDigest` inside `<untrusted_telemetry_digest>...</untrusted_telemetry_digest>`.
+- **`--deep` Mode (3-Lens Parallel Fan-Out):**
+  - Read each reference file via `read_file` and launch 3 parallel `Model: "flash"` workers with `Role: "Examiner"`:
+    1. Lens 1 (`references/judgment-lens.md`): Downstream escapes across all Brigade stations + repeated user corrections (>= 2x).
+    2. Lens 2 (`references/tooling-lens.md`): CLI friction, retry loops, and meat-proxy user handoffs.
+    3. Lens 3 (`references/divergent-lens.md`): Contrarian no-op rule pruning and line budget compaction.
+  - Collect synthesis findings via `send_message`.
 
-`rules/playbooks/proposals/<domain>-domain-proposal.md` belgesi şunları içerir:
-1. **Kriz Arketipi & İki Başlı Yapı Analizi:** Head A (API) vs Head B (Core) uyuşmazlığı.
-2. **Kronolojik Kara Kutu Günlüğü:** Kriz anından onay anına kadar atılan tüm adımlar.
-3. **Eksik Dikiş İnşası ve Senkronizasyon Reçetesi:** Test seam'leri ve kurtarma hamleleri.
-4. **Yapısal Dönüşüm (Before / After):** İki başlı durumdan tek başlı SSOT'a geçiş.
-5. **Önerilen Yeni Domain Anayasası:** Bu arketipteki sonraki krizler için kalıcı kurallar.
-6. **Çıkış Kriterleri ve Doğrulama Matrisi.**
+---
+
+### Step 3: Poteto 4-Level Routing & Stack Gating
+For each proposed invariant:
+1. Run `LexicalStackGate` classification:
+   ```bash
+   wsl python3 tools/distill/cli.py candidates record --rule "<rule>" --role <role> --project <repo_path>
+   ```
+2. **Classification Sieve:**
+   - `REPO_LOCAL`: Contains stack, framework, or path tokens (Next.js, Drizzle, Tailwind, `.tsx`, `src/actions`). Routed to project overlay `.edge/stations/<role>.md` or `coding_standards.md`.
+   - `PLUGIN_CANDIDATE`: Pure engineering discipline. Incubated in `.edge/stations/<role>.md` and registered in the candidate pool until validated across >= 2 distinct projects.
+3. **Line Budget Ceiling Verification:**
+   ```bash
+   wsl python3 tools/distill/cli.py check-budget
+   ```
+   Strict physical line budgets enforced: `<= 60` lines for `agents/*.md` and `<= 40` lines for `.edge/stations/*.md`.
+
+---
+
+### Step 4: Captain Approval & Dual-Channel Delivery
+Present a structured proposal table to the human captain:
+
+| # | Channel | Target | Budget | Description | Evidence Citation |
+|---|---------|--------|--------|-------------|-------------------|
+| 1 | Channel A | .edge/stations/surgeon.md | 24/40 | Transaction boundary lock | TICK-101 guard failure |
+| 2 | Channel A | agents/coder.md | 48/60 | Test Immutability Invariant | CAND-a1b2c3d4 (2 projects) |
+| 3 | Channel B | tasks-axi | N/A | Add git branch checkout guard | 6x command failure |
+
+**Delivery Channels:**
+- **Channel A (Prose & Rubrics):** Apply approved diffs directly to `.edge/stations/<role>.md`, `coding_standards.md`, or plugin `agents/<role>.md`. When promoting a candidate, execute:
+  ```bash
+  wsl python3 tools/distill/cli.py promote --candidate <id>
+  ```
+  which appends to `agents/<role>.md` and cleans up duplicate local entries from `.edge/stations/<role>.md`.
+- **Channel B (Structural Code & Tooling):** Create concrete `tasks-axi` tickets for mechanical checks (`gate.py` rules, AST linters, CLI wrappers). NEVER mutate production code directly in the primary working tree (Zero-Touch Primary Working Tree Invariant).
+
+---
+
+### Step 5: Watermark Seal & Scheduling
+1. Mark analyzed sessions as processed:
+   ```bash
+   wsl python3 tools/distill/cli.py mark-processed --session <cid>
+   ```
+2. **Unattended Execution Mode (`/schedule`):**
+   When running unattended on a recurring schedule (e.g. via `/schedule` weekly cron), do NOT block on `ask_question`. Instead, write the distilled proposals and evidence report to `.edge/distill/weekly-report.md` (or `<appDataDir>/edge_distill_weekly_report.md`) and notify the Captain without unapproved mutations.
