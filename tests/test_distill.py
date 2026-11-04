@@ -545,6 +545,257 @@ class TestTranscriptGraphHarvester(unittest.TestCase):
         self.assertTrue(len(digest.critique_findings) > 0)
 
 
+    def test_real_antigravity_generic_tool_result_matching(self):
+        """
+        Spec Section 3.1, 3.2 & Section 8.3:
+        Real Antigravity transcripts output tool execution results as:
+        {"source": "MODEL", "type": "GENERIC", "content": "..."}
+        Harvester must extract non-zero exit codes and 'Encountered error in tool execution'.
+        """
+        from tools.distill.harvester import TranscriptGraphHarvester
+
+        steps = [
+            {
+                "step_index": 1,
+                "source": "MODEL",
+                "type": "PLANNER_RESPONSE",
+                "tool_calls": [
+                    {
+                        "name": "run_command",
+                        "args": {"CommandLine": "npm test", "toolSummary": "Run test suite"},
+                    }
+                ],
+            },
+            {
+                "step_index": 2,
+                "source": "MODEL",
+                "type": "GENERIC",
+                "content": "Created At: 2026-11-04T00:00:00Z\nCommand exited with code 1.\nerror TS2322: Type 'string' is not assignable to type 'number'.",
+            },
+            {
+                "step_index": 3,
+                "source": "MODEL",
+                "type": "PLANNER_RESPONSE",
+                "tool_calls": [
+                    {
+                        "name": "edit_file",
+                        "args": {"Path": "/home/oguz/app/src/index.ts", "Target": "foo", "Replacement": "bar"},
+                    }
+                ],
+            },
+            {
+                "step_index": 4,
+                "source": "MODEL",
+                "type": "GENERIC",
+                "content": "Encountered error in tool execution: target content not found in file",
+            },
+        ]
+
+        harvester = TranscriptGraphHarvester(brain_roots=[self.brain_root], repo_path=self.repo_dir)
+        sessions_steps = {"cid-generic-result": steps}
+        frictions, escapes, escalations = harvester._collect_signals(["cid-generic-result"], sessions_steps)
+
+        self.assertGreaterEqual(len(frictions), 2, "Expected at least 2 tool frictions extracted from GENERIC type steps")
+        exit_codes = [f.exit_code for f in frictions if f.tool_name == "run_command"]
+        self.assertIn(1, exit_codes, "Exit code 1 was not extracted from 'Command exited with code 1.'")
+        tool_errs = [f for f in frictions if "target content not found" in f.error_output]
+        self.assertGreaterEqual(len(tool_errs), 1, "Encountered error in tool execution was not captured")
+
+    def test_zero_exit_code_never_flagged_and_turn_window_isolation(self):
+        """
+        Spec Section 3.2 & Section 8.3:
+        1. 'Command exited with code 0' is NEVER flagged as friction, even if output contains 'error' in logs.
+        2. Turn-window isolation: A successful tool call at step N must break immediately on next PLANNER_RESPONSE
+           and never inherit error text from step N+3.
+        """
+        from tools.distill.harvester import TranscriptGraphHarvester
+
+        steps = [
+            {
+                "step_index": 1,
+                "source": "MODEL",
+                "type": "PLANNER_RESPONSE",
+                "tool_calls": [{"name": "run_command", "args": {"CommandLine": "npm test"}}],
+            },
+            {
+                "step_index": 2,
+                "source": "MODEL",
+                "type": "GENERIC",
+                "content": "Command exited with code 0.\nTests passed. 0 errors, 0 warnings.",
+            },
+            {
+                "step_index": 3,
+                "source": "MODEL",
+                "type": "PLANNER_RESPONSE",
+                "tool_calls": [{"name": "run_command", "args": {"CommandLine": "git push"}}],
+            },
+            {
+                "step_index": 4,
+                "source": "MODEL",
+                "type": "GENERIC",
+                "content": "Command exited with code 128.\nfatal: remote rejected",
+            },
+        ]
+
+        harvester = TranscriptGraphHarvester(brain_roots=[self.brain_root], repo_path=self.repo_dir)
+        sessions_steps = {"cid-turn-window": steps}
+        frictions, escapes, escalations = harvester._collect_signals(["cid-turn-window"], sessions_steps)
+
+        self.assertEqual(len(frictions), 1, f"Expected exactly 1 friction, found {len(frictions)}: {[f.command for f in frictions]}")
+        self.assertEqual(frictions[0].exit_code, 128)
+        self.assertIn("git push", frictions[0].command)
+
+    def test_multilingual_turkish_and_english_repeated_escalations(self):
+        """
+        Spec Section 3.3 & Section 8.5:
+        Multi-lingual user corrective messages (Turkish & English) must be extracted into RepeatedEscalation
+        when >= 2 occurrences exist. Defaults target_role="coder" unless station keywords present.
+        """
+        from tools.distill.harvester import TranscriptGraphHarvester
+
+        steps_coder = [
+            {
+                "step_index": 1,
+                "source": "USER_EXPLICIT",
+                "type": "USER_INPUT",
+                "content": "Hayır, yanlış yaklaştın, o dosyayı silme",
+            },
+            {
+                "step_index": 5,
+                "source": "USER_EXPLICIT",
+                "type": "USER_INPUT",
+                "content": "Bozma testleri, hayır yanlış yapıyorsun",
+            },
+        ]
+
+        harvester = TranscriptGraphHarvester(brain_roots=[self.brain_root], repo_path=self.repo_dir)
+        sessions_steps = {"cid-escalate-coder": steps_coder}
+        frictions, escapes, escalations = harvester._collect_signals(["cid-escalate-coder"], sessions_steps)
+
+        self.assertGreaterEqual(len(escalations), 1, "Failed to extract multi-lingual repeated escalation")
+        esc = escalations[0]
+        self.assertGreaterEqual(esc.occurrence_count, 2)
+        self.assertEqual(esc.target_role, "coder", "Default target_role must be 'coder'")
+
+        steps_surgeon = [
+            {
+                "step_index": 1,
+                "source": "USER_EXPLICIT",
+                "type": "USER_INPUT",
+                "content": "Hayır, yanlış! Surgeon ameliyatı eksik yaptı, worktree temiz değil",
+            },
+            {
+                "step_index": 4,
+                "source": "USER_EXPLICIT",
+                "type": "USER_INPUT",
+                "content": "Hatalı yöntem, surgeon station kurallarına uy",
+            },
+        ]
+        _, _, escalations_s = harvester._collect_signals(["cid-escalate-surgeon"], {"cid-escalate-surgeon": steps_surgeon})
+        self.assertGreaterEqual(len(escalations_s), 1)
+        self.assertEqual(escalations_s[0].target_role, "surgeon", "Target role must be mapped to 'surgeon' when keyword present")
+
+    def test_project_mode_signal_split_and_silent_factory_inbox_queue(self):
+        """
+        Spec Section 3.4, 5.2 (Scenario 3) & Section 8.1:
+        In PROJECT_MODE (mode="project"):
+        - FrictionDigest contains strictly PROJECT_SIGNALS (tsc/repo compile errors).
+        - HARNESS_SIGNALS (brigade/treehouse errors, station escapes, WSL relay) are excluded from digest.
+        - HARNESS_SIGNALS are silently queued into edge_factory_inbox.json.
+        - digest.harness_signals_queued is set to count of queued harness signals.
+        """
+        from tools.distill.harvester import TranscriptGraphHarvester
+
+        inbox_file = Path(self.temp_dir) / "test_factory_inbox.json"
+        with patch.dict(os.environ, {"EDGE_DISTILL_FACTORY_INBOX_FILE": str(inbox_file)}):
+            harvester = TranscriptGraphHarvester(brain_roots=[self.brain_root], repo_path=self.repo_dir)
+
+            steps = [
+                {
+                    "step_index": 1,
+                    "source": "MODEL",
+                    "type": "PLANNER_RESPONSE",
+                    "tool_calls": [{"name": "run_command", "args": {"CommandLine": "npx tsc --noEmit"}}],
+                },
+                {
+                    "step_index": 2,
+                    "source": "MODEL",
+                    "type": "GENERIC",
+                    "content": "Command exited with code 1.\nsrc/app.ts(10,5): error TS2304: Cannot find name 'foo'.",
+                },
+                {
+                    "step_index": 3,
+                    "source": "MODEL",
+                    "type": "PLANNER_RESPONSE",
+                    "tool_calls": [{"name": "run_command", "args": {"CommandLine": "treehouse get --lease -b feat/test"}}],
+                },
+                {
+                    "step_index": 4,
+                    "source": "MODEL",
+                    "type": "GENERIC",
+                    "content": "Command exited with code 1.\ntreehouse: error: pool locked by another process",
+                },
+            ]
+
+            with patch.object(harvester, "_discover_transcripts", return_value={"cid-proj-mode": Path("/mock/t.jsonl")}):
+                with patch.object(harvester, "_load_transcripts", return_value=({"cid-proj-mode": steps}, {}, {})):
+                    with patch.object(harvester, "_find_matched_sessions", return_value=["cid-proj-mode"]):
+                        digest = harvester.harvest(project_path=self.repo_dir, mode="project", reprocess=True)
+
+            self.assertTrue(hasattr(digest, "harness_signals_queued"), "FrictionDigest missing harness_signals_queued field")
+            self.assertEqual(digest.harness_signals_queued, 1)
+            self.assertEqual(len(digest.tool_frictions), 1)
+            self.assertIn("error TS2304", digest.tool_frictions[0].error_output)
+
+            self.assertTrue(inbox_file.is_file(), "Harness signals were not written to factory inbox file")
+            inbox_data = json.loads(inbox_file.read_text(encoding="utf-8"))
+            self.assertGreaterEqual(len(inbox_data.get("signals", [])), 1)
+            self.assertIn("treehouse", inbox_data["signals"][0]["summary"].lower())
+
+    def test_factory_mode_drains_inbox_and_renders_toon(self):
+        """
+        Spec Section 2.3, 5.2 (Scenario 4) & Section 8.1:
+        In FACTORY_MODE (mode="factory"):
+        - Pending signals from edge_factory_inbox.json are included in digest.factory_inbox_signals.
+        - FrictionDigest.to_toon() includes '## Factory Inbox Signals'.
+        """
+        from tools.distill.harvester import TranscriptGraphHarvester
+
+        inbox_file = Path(self.temp_dir) / "test_factory_inbox.json"
+        inbox_file.write_text(
+            json.dumps({
+                "signals": [
+                    {
+                        "signal_id": "SIG-INBOX-001",
+                        "fingerprint": "abc12345def67890",
+                        "kind": "HARNESS_FRICTION",
+                        "source_project": "/home/oguz/app",
+                        "role_or_tool": "brigade",
+                        "summary": "Brigade FSM abort in SURGERY",
+                        "created_at": "2026-11-04T00:00:00Z",
+                        "resolved": False,
+                    }
+                ]
+            }),
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"EDGE_DISTILL_FACTORY_INBOX_FILE": str(inbox_file)}):
+            harvester = TranscriptGraphHarvester(brain_roots=[self.brain_root], repo_path=self.repo_dir)
+            with patch.object(harvester, "_discover_transcripts", return_value={}):
+                with patch.object(harvester, "_load_transcripts", return_value=({}, {}, {})):
+                    with patch.object(harvester, "_find_matched_sessions", return_value=[]):
+                        digest = harvester.harvest(project_path=self.repo_dir, mode="factory")
+
+            self.assertTrue(hasattr(digest, "factory_inbox_signals"), "FrictionDigest missing factory_inbox_signals field")
+            self.assertEqual(len(digest.factory_inbox_signals), 1)
+            self.assertIn("Brigade FSM abort", digest.factory_inbox_signals[0]["summary"])
+
+            toon_output = digest.to_toon()
+            self.assertIn("## Factory Inbox Signals", toon_output)
+            self.assertIn("SIG-INBOX-001", toon_output)
+
+
 class TestDistillStateAndCandidatePool(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp(prefix="test_state_")
@@ -707,113 +958,164 @@ class TestDistillStateAndCandidatePool(unittest.TestCase):
         self.assertEqual(limit_st, 40)
 
 
+    def test_factory_inbox_atomic_persistence_and_sha256_dedup(self):
+        """
+        Spec Section 2.3, 5.2 (Scenario 4) & Section 8.2:
+        FactoryInbox manages atomic persistence to edge_factory_inbox.json,
+        supports EDGE_DISTILL_FACTORY_INBOX_FILE override, and enforces
+        SHA-256 fingerprint deduplication:
+        fingerprint = sha256(f"{kind}:{role_or_tool}:{summary}".lower().encode("utf-8")).hexdigest()[:16]
+        """
+        from tools.distill.state import FactoryInbox
+
+        inbox_file = Path(self.temp_dir) / "test_factory_inbox.json"
+        inbox = FactoryInbox(inbox_file_override=inbox_file)
+
+        signal1 = {
+            "kind": "HARNESS_FRICTION",
+            "source_project": "/home/oguz/app",
+            "role_or_tool": "treehouse",
+            "summary": "Treehouse lease failed: slot busy",
+        }
+        signal2 = {
+            "kind": "HARNESS_FRICTION",
+            "source_project": "/home/oguz/app",
+            "role_or_tool": "treehouse",
+            "summary": "Treehouse lease failed: slot busy",
+        }
+        signal3 = {
+            "kind": "STATION_ESCAPE",
+            "source_project": "/home/oguz/app",
+            "role_or_tool": "surgeon",
+            "summary": "Surgeon escaped to triage",
+        }
+
+        inbox.append_signals([signal1, signal2, signal3])
+        self.assertTrue(inbox_file.is_file(), "Factory inbox file was not created")
+
+        data = json.loads(inbox_file.read_text(encoding="utf-8"))
+        self.assertIn("signals", data)
+        self.assertEqual(len(data["signals"]), 2, f"Expected 2 deduplicated signals, found {len(data['signals'])}")
+
+        sig = data["signals"][0]
+        self.assertIn("signal_id", sig)
+        self.assertIn("fingerprint", sig)
+        self.assertIn("kind", sig)
+        self.assertIn("source_project", sig)
+        self.assertIn("role_or_tool", sig)
+        self.assertIn("summary", sig)
+        self.assertIn("created_at", sig)
+        self.assertIn("resolved", sig)
+        self.assertFalse(sig["resolved"])
+
+        pending = inbox.load_pending()
+        self.assertEqual(len(pending), 2)
+        inbox.clear()
+        self.assertEqual(len(inbox.load_pending()), 0)
+
+    def test_watermark_state_dual_mode_segregation(self):
+        """
+        Spec Section 2.2, Section 8.4 & 8.5:
+        DistillWatermarkState supports factory_processed_sessions.
+        Deserialization provides safe default for factory_processed_sessions=[].
+        """
+        from tools.distill.models import DistillWatermarkState
+
+        legacy_data = {
+            "version": "2.0",
+            "last_harvested_at": "2026-11-04T00:00:00Z",
+            "processed_sessions": ["cid-1"],
+            "project_sessions": {"/home/oguz/app": ["cid-1"]},
+        }
+        state = DistillWatermarkState.from_dict(legacy_data)
+        self.assertTrue(hasattr(state, "factory_processed_sessions"), "DistillWatermarkState missing factory_processed_sessions field")
+        self.assertEqual(state.factory_processed_sessions, [])
+
+        state.factory_processed_sessions.append("cid-factory-1")
+        d = state.to_dict()
+        self.assertIn("factory_processed_sessions", d)
+        self.assertIn("cid-factory-1", d["factory_processed_sessions"])
+
+
 class TestDistillCLICommands(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp(prefix="test_cli_")
         self.repo_dir = Path(self.temp_dir) / "mock_project"
         self.repo_dir.mkdir(parents=True, exist_ok=True)
         self.cli_path = Path(__file__).resolve().parents[1] / "tools" / "distill" / "cli.py"
+        self.state_file = Path(self.temp_dir) / "distill_state.json"
+        self.candidates_file = Path(self.temp_dir) / "distill_candidates.json"
+        self.factory_inbox_file = Path(self.temp_dir) / "edge_factory_inbox.json"
+        self.env = {
+            **os.environ,
+            "EDGE_DISTILL_STATE_FILE": str(self.state_file),
+            "EDGE_DISTILL_CANDIDATES_FILE": str(self.candidates_file),
+            "EDGE_DISTILL_FACTORY_INBOX_FILE": str(self.factory_inbox_file),
+        }
 
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
+    def _run_cli(self, args, **kwargs):
+        import subprocess
+        env = kwargs.pop("env", self.env)
+        return subprocess.run(
+            [sys.executable, str(self.cli_path)] + args,
+            capture_output=True,
+            text=True,
+            env=env,
+            **kwargs,
+        )
+
     def test_cli_harvest_positional_and_project_flag(self):
         """Spec Refinement 5: Both 'harvest <repo>' and 'harvest --project <repo>' succeed."""
-        import subprocess
-
-        # Positional repo
-        proc1 = subprocess.run(
-            [sys.executable, str(self.cli_path), "harvest", str(self.repo_dir), "--format", "json"],
-            capture_output=True,
-            text=True,
-        )
+        proc1 = self._run_cli(["harvest", str(self.repo_dir), "--format", "json"])
         self.assertEqual(proc1.returncode, 0, f"harvest <repo> failed: {proc1.stderr}")
 
-        # --project flag
-        proc2 = subprocess.run(
-            [sys.executable, str(self.cli_path), "harvest", "--project", str(self.repo_dir), "--format", "toon"],
-            capture_output=True,
-            text=True,
-        )
+        proc2 = self._run_cli(["harvest", "--project", str(self.repo_dir), "--format", "toon"])
         self.assertEqual(proc2.returncode, 0, f"harvest --project failed: {proc2.stderr}")
 
     def test_cli_candidates_list_and_record(self):
-        import subprocess
-
-        proc_rec = subprocess.run(
-            [
-                sys.executable,
-                str(self.cli_path),
-                "candidates",
-                "record",
-                "--rule",
-                "Always run unit tests before refactoring",
-                "--role",
-                "surgeon",
-                "--project",
-                str(self.repo_dir),
-            ],
-            capture_output=True,
-            text=True,
-        )
+        proc_rec = self._run_cli([
+            "candidates",
+            "record",
+            "--rule",
+            "Always run unit tests before refactoring",
+            "--role",
+            "surgeon",
+            "--project",
+            str(self.repo_dir),
+        ])
         self.assertEqual(proc_rec.returncode, 0, f"candidates record failed: {proc_rec.stderr}")
 
-        proc_list = subprocess.run(
-            [sys.executable, str(self.cli_path), "candidates", "list", "--format", "toon"],
-            capture_output=True,
-            text=True,
-        )
+        proc_list = self._run_cli(["candidates", "list", "--format", "toon"])
         self.assertEqual(proc_list.returncode, 0, f"candidates list failed: {proc_list.stderr}")
 
     def test_cli_promote_candidate(self):
-        import subprocess
-
-        proc = subprocess.run(
-            [sys.executable, str(self.cli_path), "promote", "--candidate", "CAND-test1234", "--force"],
-            capture_output=True,
-            text=True,
-        )
+        proc = self._run_cli(["promote", "--candidate", "CAND-test1234", "--force"])
         self.assertEqual(proc.returncode, 0, f"promote candidate failed: {proc.stderr}")
 
     def test_cli_mark_processed(self):
         """Spec Refinement 5: mark-processed accepts --session <cid> and optional --project <repo>."""
-        import subprocess
-
-        proc = subprocess.run(
-            [
-                sys.executable,
-                str(self.cli_path),
-                "mark-processed",
-                "--session",
-                "cid-session-123",
-                "--project",
-                str(self.repo_dir),
-            ],
-            capture_output=True,
-            text=True,
-        )
+        proc = self._run_cli([
+            "mark-processed",
+            "--session",
+            "cid-session-123",
+            "--project",
+            str(self.repo_dir),
+        ])
         self.assertEqual(proc.returncode, 0, f"mark-processed failed: {proc.stderr}")
 
     def test_cli_check_budget(self):
         """check-budget exits 0 on compliant budget and 1 on violation."""
-        import subprocess
-
         good_file = self.repo_dir / "good.md"
-        good_file.write_text("\n".join(["line" for _ in range(30)]), encoding="utf-8")
-        proc_good = subprocess.run(
-            [sys.executable, str(self.cli_path), "check-budget", str(good_file)],
-            capture_output=True,
-            text=True,
-        )
+        good_file.write_text(chr(10).join(["line" for _ in range(30)]), encoding="utf-8")
+        proc_good = self._run_cli(["check-budget", str(good_file)])
         self.assertEqual(proc_good.returncode, 0)
 
         bad_file = self.repo_dir / "bad.md"
-        bad_file.write_text("\n".join(["line" for _ in range(80)]), encoding="utf-8")
-        proc_bad = subprocess.run(
-            [sys.executable, str(self.cli_path), "check-budget", str(bad_file)],
-            capture_output=True,
-            text=True,
-        )
+        bad_file.write_text(chr(10).join(["line" for _ in range(80)]), encoding="utf-8")
+        proc_bad = self._run_cli(["check-budget", str(bad_file)])
         self.assertEqual(proc_bad.returncode, 1)
 
     def test_brigade_cli_distill_bridge(self):
@@ -824,8 +1126,92 @@ class TestDistillCLICommands(unittest.TestCase):
             [sys.executable, str(brigade_cli_path), "distill", "harvest", str(self.repo_dir)],
             capture_output=True,
             text=True,
+            env=self.env,
         )
         self.assertEqual(proc.returncode, 0, f"brigade distill harvest bridge failed: {proc.stderr}")
+
+    def test_cli_hermetic_isolation_does_not_touch_home_antigravity(self):
+        """
+        Slice 4 Hermetic Isolation:
+        CLI operations run with temporary env overrides must NOT write or touch
+        files in Path.home() / '.gemini' / 'antigravity'.
+        """
+        home_antigravity = Path.home() / ".gemini" / "antigravity"
+        home_antigravity.mkdir(parents=True, exist_ok=True)
+        files_before = {p: p.stat().st_mtime_ns for p in home_antigravity.iterdir() if p.is_file()}
+
+        proc_cand = self._run_cli([
+            "candidates",
+            "record",
+            "--rule",
+            "Always write hermetic unit tests",
+            "--role",
+            "seam_architect",
+            "--project",
+            str(self.repo_dir),
+        ])
+        self.assertEqual(proc_cand.returncode, 0, f"candidates record failed: {proc_cand.stderr}")
+
+        proc_mark = self._run_cli([
+            "mark-processed",
+            "--session",
+            "cid-hermetic-123",
+            "--project",
+            str(self.repo_dir),
+        ])
+        self.assertEqual(proc_mark.returncode, 0, f"mark-processed failed: {proc_mark.stderr}")
+
+        self.assertTrue(self.candidates_file.exists(), "Hermetic candidates file was not created in temp_dir")
+        self.assertTrue(self.state_file.exists(), "Hermetic state file was not created in temp_dir")
+
+        files_after = {p: p.stat().st_mtime_ns for p in home_antigravity.iterdir() if p.is_file()}
+        new_files = set(files_after.keys()) - set(files_before.keys())
+        self.assertEqual(new_files, set(), f"Hermetic violation: new files created in home directory: {new_files}")
+        for p, mtime_before in files_before.items():
+            self.assertEqual(files_after[p], mtime_before, f"Hermetic violation: file modified in home: {p}")
+
+    def test_cli_harvest_mode_auto_and_json_stdout_purity(self):
+        """
+        Spec Section 2.1 & Section 8.1:
+        cli.py harvest supports --mode {auto,project,factory}.
+        When run on application repo with --format json, stdout is pure valid JSON.
+        """
+        proc = self._run_cli([
+            "harvest",
+            str(self.repo_dir),
+            "--mode",
+            "auto",
+            "--format",
+            "json",
+        ])
+        self.assertEqual(proc.returncode, 0, f"harvest --mode auto failed: {proc.stderr}")
+        try:
+            data = json.loads(proc.stdout)
+            self.assertIsInstance(data, dict)
+            self.assertIn("digest_id", data)
+        except json.JSONDecodeError as e:
+            self.fail(f"stdout is not valid JSON (polluted by logs): {e}\nstdout: {proc.stdout}")
+
+    def test_cli_mark_processed_clear_factory_inbox_standalone(self):
+        """
+        Spec Section 8.4:
+        mark-processed accepts --mode {project,factory} and --clear-factory-inbox.
+        --clear-factory-inbox can be executed standalone without --session.
+        """
+        proc_clear = self._run_cli([
+            "mark-processed",
+            "--clear-factory-inbox",
+        ])
+        self.assertEqual(proc_clear.returncode, 0, f"mark-processed --clear-factory-inbox failed: {proc_clear.stderr}")
+
+        proc_factory_mode = self._run_cli([
+            "mark-processed",
+            "--session",
+            "cid-factory-mode-test",
+            "--mode",
+            "factory",
+        ])
+        self.assertEqual(proc_factory_mode.returncode, 0, f"mark-processed --mode factory failed: {proc_factory_mode.stderr}")
 
 
 class TestSessionMiner(unittest.TestCase):

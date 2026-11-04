@@ -119,6 +119,39 @@ class TestEdgeDistillSkillV2(unittest.TestCase):
         self.assertIn("unattended", text.lower())
 
 
+    def test_project_mode_vs_factory_mode_boundaries(self):
+        """
+        Spec Section 4.1 & Section 8.1:
+        SKILL.md must document PROJECT_MODE vs FACTORY_MODE:
+        - In PROJECT_MODE: writes restricted to .edge/stations/ or coding_standards.md;
+          strictly forbids writing to edge plugin directory (agents/*.md, skills/**).
+          Harness signals queued to edge_factory_inbox.json.
+        - In FACTORY_MODE: modifies agents/*.md and skills/**, verified by check-budget,
+          pytest, and sealed in atomic git commit.
+        - Documents --mode auto|project|factory and --clear-factory-inbox.
+        """
+        text = self.skill_path.read_text(encoding="utf-8")
+        self.assertIn("PROJECT_MODE", text)
+        self.assertIn("FACTORY_MODE", text)
+        self.assertIn("edge_factory_inbox.json", text)
+        self.assertIn("--clear-factory-inbox", text)
+        self.assertIn("--mode", text)
+        text_lower = text.lower()
+        self.assertIn("coding_standards.md", text)
+        self.assertIn("atomic git commit", text_lower)
+
+    def test_frontier_first_channel_b_default_gate(self):
+        """
+        Spec Section 4.2 & AXI Rule 1.A:
+        Channel B structural/tooling proposals must default to frontier-axi parking lot.
+        Direct tasks-axi creation occurs ONLY upon explicit Captain selection/escalation.
+        """
+        text = self.skill_path.read_text(encoding="utf-8")
+        self.assertIn("frontier-axi", text)
+        self.assertIn("frontier-axi add", text)
+        self.assertIn("parking lot", text.lower())
+
+
 class TestDistillReferenceRubrics(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
