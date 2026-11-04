@@ -136,10 +136,12 @@ wsl python3 tools/audit/cli.py <repo_path>
 # 3. Teknik Borç & Değişim Frekansı Radarı (Radar)
 wsl python3 tools/radar/cli.py <repo_path>
 
-# 4. Öz-İyileştirme & Telemetri Hasadı (Self-Improving Distill v2)
-wsl python3 tools/distill/cli.py harvest --project <repo_path> --format toon
+# 4. Öz-İyileştirme & Telemetri Hasadı (Self-Improving Distill v2.1)
+wsl python3 tools/distill/cli.py harvest --project <repo_path> --format toon --mode auto
 wsl python3 tools/distill/cli.py candidates list
 wsl python3 tools/distill/cli.py check-budget <repo_path>
+wsl python3 tools/distill/cli.py mark-processed --session <cid> --mode project
+# Fabrika modu inbox temizliği: wsl python3 tools/distill/cli.py mark-processed --clear-factory-inbox
 # Tam damıtma döngüsü: /edge-distill [--deep] [--all-projects]
 
 # 5. Şartname Danışman Denetimi (Cross-Provider Spec Critic)

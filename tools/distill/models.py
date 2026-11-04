@@ -284,6 +284,10 @@ class ToolFrictionSignal:
     def from_dict(cls, data: Dict[str, Any]) -> "ToolFrictionSignal":
         return cls(**data)
 
+    @property
+    def command(self) -> str:
+        return self.command_or_args
+
     def to_toon(self) -> str:
         cmd_short = self.command_or_args.strip().replace("\n", " ")[:60]
         err_short = self.error_output.strip().replace("\n", " ")[:80]
@@ -342,18 +346,35 @@ class CandidateRule:
 
 @dataclass
 class DistillWatermarkState:
-    version: str = "2.0"
+    version: str = "2.1"
     last_harvested_at: str = ""
     processed_sessions: List[str] = field(default_factory=list)
     project_sessions: Dict[str, List[str]] = field(default_factory=dict)
+    factory_processed_sessions: List[str] = field(default_factory=list)
     metrics: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        return {
+            "version": self.version,
+            "last_harvested_at": self.last_harvested_at,
+            "processed_sessions": list(self.processed_sessions),
+            "project_sessions": {k: list(v) for k, v in self.project_sessions.items()},
+            "factory_processed_sessions": list(self.factory_processed_sessions),
+            "metrics": dict(self.metrics),
+        }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "DistillWatermarkState":
-        return cls(**data)
+        raw = dict(data)
+        if "factory_processed_sessions" not in raw:
+            raw["factory_processed_sessions"] = []
+        if "project_sessions" not in raw:
+            raw["project_sessions"] = {}
+        if "processed_sessions" not in raw:
+            raw["processed_sessions"] = []
+        if "metrics" not in raw:
+            raw["metrics"] = {}
+        return cls(**raw)
 
 
 def _render_escalations_toon(escalations: List[RepeatedEscalation]) -> Optional[str]:
@@ -411,6 +432,18 @@ def _render_insights_toon(flight_recorder_insights: List[Dict[str, Any]]) -> Opt
     return "\n".join(lines)
 
 
+def _render_factory_inbox_toon(factory_inbox_signals: List[Dict[str, Any]]) -> Optional[str]:
+    if not factory_inbox_signals:
+        return None
+    lines = ["\n## Factory Inbox Signals"]
+    for sig in factory_inbox_signals:
+        sig_id = sig.get("signal_id", "")
+        role = sig.get("role_or_tool", "")
+        summary = sig.get("summary", "")
+        lines.append(f"- [{sig_id}] ({role}) {summary}")
+    return "\n".join(lines)
+
+
 def _render_churn_and_critiques_toon(git_churn: List[Dict[str, Any]], critique_findings: List[Dict[str, Any]]) -> List[str]:
     result = []
     if git_churn:
@@ -459,6 +492,8 @@ class FrictionDigest:
     git_churn: List[Dict[str, Any]] = field(default_factory=list)
     critique_findings: List[Dict[str, Any]] = field(default_factory=list)
     total_tokens_estimate: int = 0
+    harness_signals_queued: int = 0
+    factory_inbox_signals: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -474,6 +509,8 @@ class FrictionDigest:
             "git_churn": list(self.git_churn),
             "critique_findings": list(self.critique_findings),
             "total_tokens_estimate": self.total_tokens_estimate,
+            "harness_signals_queued": self.harness_signals_queued,
+            "factory_inbox_signals": list(self.factory_inbox_signals),
         }
 
     @classmethod
@@ -485,6 +522,10 @@ class FrictionDigest:
             raw["tool_frictions"] = [ToolFrictionSignal.from_dict(f) for f in raw["tool_frictions"]]
         if "repeated_escalations" in raw:
             raw["repeated_escalations"] = [RepeatedEscalation.from_dict(r) for r in raw["repeated_escalations"]]
+        if "harness_signals_queued" not in raw:
+            raw["harness_signals_queued"] = 0
+        if "factory_inbox_signals" not in raw:
+            raw["factory_inbox_signals"] = []
         return cls(**raw)
 
     def to_toon(self, max_tokens: int = 2000) -> str:
@@ -495,6 +536,10 @@ class FrictionDigest:
         base = f"{header}\n{sec_escalations}" if sec_escalations else header
 
         other_sections: List[str] = []
+        sec_inbox = _render_factory_inbox_toon(self.factory_inbox_signals)
+        if sec_inbox:
+            other_sections.append(sec_inbox)
+
         sec_tf = _render_tool_frictions_toon(self.tool_frictions)
         if sec_tf:
             other_sections.append(sec_tf)

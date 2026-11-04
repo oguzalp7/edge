@@ -240,9 +240,10 @@ flowchart TD
     end
 
     Kitchen <-->|Hermetic Worktrees & Git| Repo[("WSL2 Repository")]
-    Kitchen -->|Transcripts & FlightRecorder| Distill["Self-Improving Factory (distill v2)"]
-    Distill -->|Harvest & Synthesize| Rubrics["agents/*.md & .edge/stations/"]
-    Distill -->|Mechanical Checks| Tasks["tasks-axi Tickets"]
+    Kitchen -->|Transcripts & FlightRecorder| Distill["Self-Improving Factory (distill v2.1 Dual-Mode)"]
+    Distill -->|PROJECT_MODE| LocalRubrics[".edge/stations/ & edge_factory_inbox.json"]
+    Distill -->|FACTORY_MODE| PluginRubrics["agents/*.md & skills/"]
+    Distill -->|Frontier-First Gate| Tasks["frontier-axi & tasks-axi Tickets"]
 ```
 
 ---

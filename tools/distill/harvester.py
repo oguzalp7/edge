@@ -15,6 +15,7 @@ from typing import List, Dict, Any, Optional, Tuple, Set
 from datetime import datetime, timezone
 import hashlib
 
+from tools.distill.state import FactoryInbox
 from tools.distill.models import (
     FrictionDigest,
     StationEscapeSignal,
@@ -77,23 +78,51 @@ def _matches_project(steps: List[Dict[str, Any]], project_path: Path) -> bool:
 
 def _gather_subsequent_results(steps: List[Dict[str, Any]], start_idx: int) -> str:
     result_text = ""
-    for next_step in steps[start_idx + 1: start_idx + 4]:
-        if next_step.get("type") == "TOOL_RESULT" or next_step.get("source") == "GENERIC":
+    for next_step in steps[start_idx + 1:]:
+        stype = next_step.get("type")
+        source = next_step.get("source")
+        if stype in ("PLANNER_RESPONSE", "USER_INPUT") or source == "USER_EXPLICIT":
+            break
+        if stype in ("TOOL_RESULT", "GENERIC") or source == "GENERIC":
             result_text += " " + str(next_step.get("content", ""))
     return result_text
 
 
+def _has_explicit_runtime_error(text: str) -> bool:
+    markers = [
+        "Encountered error in tool execution",
+        "Traceback (most recent call last)",
+        "AssertionError",
+        "SyntaxError",
+        "ModuleNotFoundError",
+    ]
+    if any(m in text for m in markers):
+        return True
+    if re.search(r"\berror TS\d+\b", text, re.IGNORECASE):
+        return True
+    return "WSL (" in text
+
+
 def _detect_error_and_exit_code(result_text: str) -> Tuple[bool, Optional[int]]:
-    error_markers = ("fatal:", "FAIL", "Traceback", "Error:", "Command failed with exit code")
-    if not any(marker in result_text for marker in error_markers):
+    is_zero_exit = bool(re.search(r"(?:Command exited with code\s+0\b|exit(?: code|=)\s*0\b)", result_text))
+    if is_zero_exit and not _has_explicit_runtime_error(result_text):
         return False, None
 
-    m = re.search(r"exit(?: code|=)\s*(\d+)", result_text)
-    if m:
-        return True, int(m.group(1))
+    m_code = re.search(r"(?:Command exited with code\s+([1-9]\d*)\b|exit(?: code|=)\s*([1-9]\d*)\b)", result_text)
+    if m_code:
+        code_str = m_code.group(1) or m_code.group(2)
+        return True, int(code_str)
+
+    if _has_explicit_runtime_error(result_text):
+        return True, None
+
     if "fatal:" in result_text:
         return True, 128
-    return True, 1
+
+    if any(m in result_text for m in ("FAIL ", "FAILED", "npm ERR!", "Command failed")):
+        return True, 1
+
+    return False, None
 
 
 def _build_tool_friction_signal(
@@ -191,40 +220,63 @@ def _extract_station_escapes_from_steps(cid: str, steps: List[Dict[str, Any]]) -
     return escapes
 
 
+def _detect_escalation_role(text: str) -> str:
+    lowered = text.lower()
+    roles = [
+        ("surgeon", "surgeon"),
+        ("spec_writer", "spec_writer"),
+        ("spec-writer", "spec_writer"),
+        ("spec_critic", "spec_critic"),
+        ("spec-critic", "spec_critic"),
+        ("examiner", "examiner"),
+        ("researcher", "researcher"),
+        ("seam_architect", "seam_architect"),
+        ("seam-architect", "seam_architect"),
+        ("qa_engineer", "qa_engineer"),
+        ("qa-engineer", "qa_engineer"),
+        ("orchestrator", "orchestrator"),
+    ]
+    for token, role in roles:
+        if token in lowered:
+            return role
+    return "coder"
+
+
 def _extract_repeated_escalations(all_steps: List[Dict[str, Any]]) -> List[RepeatedEscalation]:
     escalations: List[RepeatedEscalation] = []
-    test_immutability_occurrences: List[Dict[str, Any]] = []
-
-    pattern_test = re.compile(
-        r"(testi\s+bozma|kırmızı\s+test|don'?t\s+touch\s+tests|never\s+modify\s+tests|assertionları\s+silme|never\s+loosen\s+tests)",
+    pattern_corrective = re.compile(
+        r"(hayır|yanlış|öyle\s+değil|dokunma|bozma|yapma|tekrar|hatalı|don'?t|wrong|stop|revert|broken|testi\s+bozma|kırmızı\s+test|assertionları\s+silme|never\s+modify\s+tests|never\s+loosen\s+tests)",
         re.IGNORECASE,
     )
+    occurrences_by_role: Dict[str, List[Dict[str, Any]]] = {}
 
     for item in all_steps:
         cid = item.get("cid", "")
         step = item.get("step", {})
         if step.get("source") == "USER_EXPLICIT" or step.get("type") == "USER_INPUT":
             text = str(step.get("content", ""))
-            if pattern_test.search(text):
-                test_immutability_occurrences.append({
+            if pattern_corrective.search(text):
+                role = _detect_escalation_role(text)
+                occurrences_by_role.setdefault(role, []).append({
                     "cid": cid,
                     "step_index": step.get("step_index", 0),
                     "text": text,
                     "timestamp": step.get("created_at", ""),
                 })
 
-    if len(test_immutability_occurrences) >= 2:
-        escalations.append(
-            RepeatedEscalation(
-                escalation_id="ESC-TEST-IMMUTABLE-001",
-                category="USER_INSTRUCTION_REPETITION",
-                pattern_key="do not touch tests",
-                occurrence_count=len(test_immutability_occurrences),
-                occurrences=test_immutability_occurrences,
-                rule_recommendation="Test Immutability Invariant: NEVER modify existing tests created by Seam Architect",
-                target_role="coder",
+    for role, occurrences in occurrences_by_role.items():
+        if len(occurrences) >= 2:
+            escalations.append(
+                RepeatedEscalation(
+                    escalation_id=f"ESC-{role.upper()}-001",
+                    category="USER_INSTRUCTION_REPETITION",
+                    pattern_key=f"user corrective directive for {role}",
+                    occurrence_count=len(occurrences),
+                    occurrences=occurrences,
+                    rule_recommendation=f"{role.capitalize()} Invariant: Adhere to station rules and user corrective directives",
+                    target_role=role,
+                )
             )
-        )
 
     return escalations
 
@@ -336,12 +388,37 @@ class TranscriptGraphHarvester:
                     matched.add(child_to_parent[cid])
         return matched
 
-    def _filter_sessions(self, matched: Set[str], current_session_id: Optional[str], reprocess: bool, max_sessions: int, available: Set[str]) -> List[str]:
+    def _is_session_skipped(
+        self,
+        cid: str,
+        current_session_id: Optional[str],
+        reprocess: bool,
+        mode: str,
+        target_path: Optional[Path],
+    ) -> bool:
+        if reprocess or current_session_id == cid:
+            return False
+        if mode == "factory":
+            return cid in self.watermark_state.factory_processed_sessions
+        if mode == "project":
+            p_sessions = self.watermark_state.project_sessions.get(str(target_path), []) if target_path else []
+            return cid in p_sessions or cid in self.watermark_state.processed_sessions
+        return cid in self.watermark_state.processed_sessions
+
+    def _filter_sessions(
+        self,
+        matched: Set[str],
+        current_session_id: Optional[str],
+        reprocess: bool,
+        max_sessions: int,
+        available: Set[str],
+        mode: str = "all",
+        target_path: Optional[Path] = None,
+    ) -> List[str]:
         analyzed: List[str] = []
         for cid in sorted(matched):
-            if not reprocess and current_session_id != cid:
-                if cid in self.watermark_state.processed_sessions:
-                    continue
+            if self._is_session_skipped(cid, current_session_id, reprocess, mode, target_path):
+                continue
             analyzed.append(cid)
             if len(analyzed) >= max_sessions:
                 break
@@ -365,19 +442,80 @@ class TranscriptGraphHarvester:
         escalations = _extract_repeated_escalations(flattened_steps)
         return tool_frictions, station_escapes, escalations
 
+    def _split_project_signals(
+        self,
+        frictions: List[ToolFrictionSignal],
+        escapes: List[StationEscapeSignal],
+        target_path: Path,
+    ) -> Tuple[List[ToolFrictionSignal], List[StationEscapeSignal], int]:
+        harness_keywords = (
+            "brigade",
+            "treehouse",
+            "orchestrator_guard",
+            "wsl (",
+            "tools/distill",
+            "tasks-axi",
+            "frontier-axi",
+            "aborted in state",
+            "examiner review: pass",
+        )
+        proj_frictions: List[ToolFrictionSignal] = []
+        proj_escapes: List[StationEscapeSignal] = []
+        harness_queue: List[Dict[str, Any]] = []
+
+        for f in frictions:
+            comb = (f.command_or_args + " " + f.error_output + " " + f.tool_name).lower()
+            if any(kw in comb for kw in harness_keywords):
+                harness_queue.append({
+                    "kind": "HARNESS_FRICTION",
+                    "source_project": str(target_path),
+                    "role_or_tool": f.tool_name or "run_command",
+                    "summary": f.error_output.strip() or f.command_or_args,
+                })
+            else:
+                proj_frictions.append(f)
+
+        for esc in escapes:
+            comb = (esc.description + " " + esc.evidence + " " + esc.station_role).lower()
+            if any(kw in comb for kw in harness_keywords):
+                harness_queue.append({
+                    "kind": "STATION_ESCAPE",
+                    "source_project": str(target_path),
+                    "role_or_tool": esc.station_role.lower(),
+                    "summary": esc.description or esc.evidence,
+                })
+            else:
+                proj_escapes.append(esc)
+
+        if harness_queue:
+            inbox = FactoryInbox()
+            inbox.append_signals(harness_queue)
+
+        return proj_frictions, proj_escapes, len(harness_queue)
+
     def harvest(
         self,
         project_path: Optional[Path] = None,
         reprocess: bool = False,
         current_session_id: Optional[str] = None,
         max_sessions: int = 50,
+        mode: str = "all",
     ) -> FrictionDigest:
         target_path = (project_path or self.repo_path or Path.cwd()).resolve()
         transcripts = self._discover_transcripts()
         sessions_steps, c2p, p2c = self._load_transcripts(transcripts)
         matched = self._find_matched_sessions(sessions_steps, target_path, p2c, c2p)
-        analyzed = self._filter_sessions(matched, current_session_id, reprocess, max_sessions, set(transcripts.keys()))
+        analyzed = self._filter_sessions(matched, current_session_id, reprocess, max_sessions, set(transcripts.keys()), mode=mode, target_path=target_path)
         frictions, escapes, escalations = self._collect_signals(analyzed, sessions_steps)
+
+        harness_queued = 0
+        inbox_signals: List[Dict[str, Any]] = []
+
+        if mode == "project":
+            frictions, escapes, harness_queued = self._split_project_signals(frictions, escapes, target_path)
+        elif mode == "factory":
+            inbox = FactoryInbox()
+            inbox_signals = inbox.load_pending()
 
         return FrictionDigest(
             digest_id=f"DIGEST-{target_path.name}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
@@ -391,6 +529,8 @@ class TranscriptGraphHarvester:
             flight_recorder_insights=self._extract_flight_recorder(target_path),
             git_churn=self._extract_git_churn(target_path),
             critique_findings=self._extract_critiques(target_path),
+            harness_signals_queued=harness_queued,
+            factory_inbox_signals=inbox_signals,
         )
 
     def _extract_flight_recorder(self, project_path: Path) -> List[Dict[str, Any]]:

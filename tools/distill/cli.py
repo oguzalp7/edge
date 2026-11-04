@@ -27,6 +27,7 @@ from tools.distill.models import (
 from tools.distill.session_miner import SessionMiner
 from tools.distill.harvester import TranscriptGraphHarvester
 from tools.distill.state import (
+    FactoryInbox,
     DistillStateManager,
     LexicalStackGate,
     CandidatePool,
@@ -53,16 +54,30 @@ def run_distill(
     return 0
 
 
+def _resolve_harvest_mode(mode_arg: str, target_repo: Path) -> str:
+    if mode_arg != "auto":
+        return mode_arg
+    plugin_root = Path(__file__).resolve().parents[2]
+    if target_repo.resolve() == plugin_root.resolve():
+        return "factory"
+    return "project"
+
+
 def cmd_harvest(args: argparse.Namespace) -> int:
     repo_raw = getattr(args, "project", None) or getattr(args, "repo", ".")
     target_repo = normalize_target_path(repo_raw)
+    mode = _resolve_harvest_mode(getattr(args, "mode", "auto"), target_repo)
     harvester = TranscriptGraphHarvester(repo_path=target_repo)
     digest = harvester.harvest(
         project_path=target_repo,
         reprocess=getattr(args, "reprocess", False),
         current_session_id=getattr(args, "current", None),
         max_sessions=getattr(args, "max_sessions", 50),
+        mode=mode,
     )
+    if digest.harness_signals_queued > 0:
+        print(f"[NOTE] Queued {digest.harness_signals_queued} harness signal(s) to edge_factory_inbox.json", file=sys.stderr)
+
     fmt = getattr(args, "format", "toon")
     if fmt == "json":
         output_str = json.dumps(digest.to_dict(), indent=2)
@@ -131,22 +146,33 @@ def cmd_promote(args: argparse.Namespace) -> int:
 
 
 def cmd_mark_processed(args: argparse.Namespace) -> int:
-    raw_sessions = getattr(args, "session", [])
+    clear_inbox = getattr(args, "clear_factory_inbox", False)
+    mode = getattr(args, "mode", "project")
+    raw_sessions = getattr(args, "session", []) or []
     if isinstance(raw_sessions, str):
         raw_sessions = [raw_sessions]
     sessions = [s.strip() for raw in raw_sessions for s in raw.split(",") if s.strip()]
-    if not sessions:
-        print("Error: --session is required", file=sys.stderr)
+
+    if not sessions and not clear_inbox:
+        print("Error: --session or --clear-factory-inbox is required", file=sys.stderr)
         return 1
-    proj = getattr(args, "project", None)
-    proj_str = str(normalize_target_path(proj)) if proj else None
-    manager = DistillStateManager()
-    for sid in sessions:
-        manager.mark_session_processed(
-            session_id=sid,
-            project_path=proj_str,
-        )
-        print(f"Marked session {sid} as processed")
+
+    if clear_inbox or mode == "factory":
+        inbox = FactoryInbox()
+        inbox.clear()
+        print("Cleared factory inbox")
+
+    if sessions:
+        proj = getattr(args, "project", None)
+        proj_str = str(normalize_target_path(proj)) if proj else None
+        manager = DistillStateManager()
+        for sid in sessions:
+            manager.mark_session_processed(
+                session_id=sid,
+                project_path=proj_str,
+                mode=mode,
+            )
+            print(f"Marked session {sid} as processed ({mode} mode)")
     return 0
 
 
@@ -250,6 +276,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_harvest = subparsers.add_parser("harvest", help="Harvest zero-token signals")
     p_harvest.add_argument("repo", nargs="?", default=".", help="Target repository")
     p_harvest.add_argument("--project", help="Target project path")
+    p_harvest.add_argument("--mode", choices=["auto", "project", "factory"], default="auto", help="Operational mode")
     p_harvest.add_argument("--all-projects", action="store_true", help="Harvest all projects")
     p_harvest.add_argument("--current", help="Force harvest current session")
     p_harvest.add_argument("--format", choices=["toon", "json", "human"], default="toon", help="Output format")
@@ -273,8 +300,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     # mark-processed
     p_mark = subparsers.add_parser("mark-processed", help="Mark session as processed")
-    p_mark.add_argument("--session", action="append", required=True, help="Session ID(s)")
+    p_mark.add_argument("--session", action="append", help="Session ID(s)")
     p_mark.add_argument("--project", help="Project path")
+    p_mark.add_argument("--mode", choices=["project", "factory"], default="project", help="Watermark mode")
+    p_mark.add_argument("--clear-factory-inbox", action="store_true", help="Clear factory inbox")
 
     # check-budget
     p_budget = subparsers.add_parser("check-budget", help="Check physical line budget")

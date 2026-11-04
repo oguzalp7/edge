@@ -24,6 +24,29 @@ def _default_state_path() -> Path:
     return (base_dir / "edge_distill_state.json").resolve()
 
 
+def _default_factory_inbox_path() -> Path:
+    env_path = os.environ.get("EDGE_DISTILL_FACTORY_INBOX_FILE")
+    if env_path:
+        return Path(env_path).resolve()
+    base_dir = Path.home() / ".gemini" / "antigravity"
+    return (base_dir / "edge_factory_inbox.json").resolve()
+
+
+def _save_json_atomic(target_path: Path, data: Any) -> None:
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=target_path.parent, prefix="atomic_", suffix=".tmp")
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp_path, target_path)
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+
+
 def _default_candidates_path() -> Path:
     env_path = os.environ.get("EDGE_DISTILL_CANDIDATES_FILE")
     if env_path:
@@ -52,33 +75,113 @@ class DistillStateManager:
             return DistillWatermarkState()
 
     def save_state(self, state: DistillWatermarkState) -> None:
-        self.state_file.parent.mkdir(parents=True, exist_ok=True)
-        data = state.to_dict()
-        tmp_fd, tmp_path = tempfile.mkstemp(dir=self.state_file.parent, prefix="state_", suffix=".tmp")
-        try:
-            with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
-            os.replace(tmp_path, self.state_file)
-        finally:
-            if os.path.exists(tmp_path):
-                try:
-                    os.unlink(tmp_path)
-                except Exception:
-                    pass
+        _save_json_atomic(self.state_file, state.to_dict())
 
-    def mark_session_processed(self, session_id: str, project_path: Optional[str] = None) -> None:
+    def mark_session_processed(
+        self,
+        session_id: str,
+        project_path: Optional[str] = None,
+        mode: str = "project",
+    ) -> None:
         state = self.load_state()
         if session_id not in state.processed_sessions:
             state.processed_sessions.append(session_id)
 
-        if project_path:
-            p_sessions = state.project_sessions.setdefault(str(project_path), [])
-            if session_id not in p_sessions:
-                p_sessions.append(session_id)
+        if mode == "factory":
+            if session_id not in state.factory_processed_sessions:
+                state.factory_processed_sessions.append(session_id)
+        else:
+            if project_path:
+                p_sessions = state.project_sessions.setdefault(str(project_path), [])
+                if session_id not in p_sessions:
+                    p_sessions.append(session_id)
 
         state.last_harvested_at = datetime.now(timezone.utc).isoformat()
         state.metrics["total_harvested"] = len(state.processed_sessions)
         self.save_state(state)
+
+    def is_session_processed(
+        self,
+        session_id: str,
+        project_path: Optional[str] = None,
+        mode: str = "all",
+    ) -> bool:
+        state = self.load_state()
+        if mode == "factory":
+            return session_id in state.factory_processed_sessions
+        if mode == "project":
+            if project_path and str(project_path) in state.project_sessions:
+                return session_id in state.project_sessions[str(project_path)]
+            return session_id in state.processed_sessions
+        return session_id in state.processed_sessions
+
+
+class FactoryInbox:
+    """
+    Silent inbox queueing harness signals during PROJECT_MODE runs,
+    drained during FACTORY_MODE self-improvement cycles.
+    Enforces atomic persistence and SHA-256 fingerprint deduplication.
+    """
+    def __init__(self, inbox_file_override: Optional[Path] = None):
+        if inbox_file_override:
+            self.inbox_file = Path(inbox_file_override).resolve()
+        else:
+            self.inbox_file = _default_factory_inbox_path()
+
+    def load_signals(self) -> List[Dict[str, Any]]:
+        if not self.inbox_file.exists():
+            return []
+        try:
+            data = json.loads(self.inbox_file.read_text(encoding="utf-8"))
+            return data.get("signals", [])
+        except Exception:
+            return []
+
+    def _build_signal_record(self, raw: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
+        kind = str(raw.get("kind", "HARNESS_FRICTION"))
+        role_or_tool = str(raw.get("role_or_tool", ""))
+        summary = str(raw.get("summary", ""))
+        fp = hashlib.sha256(f"{kind}:{role_or_tool}:{summary}".lower().encode("utf-8")).hexdigest()[:16]
+        sig_id = raw.get("signal_id") or f"SIG-INBOX-{fp[:8].upper()}"
+        created_at = raw.get("created_at") or datetime.now(timezone.utc).isoformat()
+        resolved = bool(raw.get("resolved", False))
+        source_project = str(raw.get("source_project", ""))
+        record = {
+            "signal_id": sig_id,
+            "fingerprint": fp,
+            "kind": kind,
+            "source_project": source_project,
+            "role_or_tool": role_or_tool,
+            "summary": summary,
+            "created_at": created_at,
+            "resolved": resolved,
+        }
+        return record, fp
+
+    def append_signals(self, raw_signals: List[Dict[str, Any]]) -> int:
+        existing = self.load_signals()
+        existing_fps = {s.get("fingerprint") for s in existing if s.get("fingerprint")}
+        added = 0
+        for raw in raw_signals:
+            record, fp = self._build_signal_record(raw)
+            if fp not in existing_fps:
+                existing.append(record)
+                existing_fps.add(fp)
+                added += 1
+        _save_json_atomic(self.inbox_file, {"signals": existing})
+        return added
+
+    def load_pending(self) -> List[Dict[str, Any]]:
+        return [s for s in self.load_signals() if not s.get("resolved", False)]
+
+    def clear(self) -> None:
+        _save_json_atomic(self.inbox_file, {"signals": []})
+
+    def resolve_all(self) -> None:
+        signals = self.load_signals()
+        for s in signals:
+            s["resolved"] = True
+        _save_json_atomic(self.inbox_file, {"signals": signals})
 
 
 class LexicalStackGate:

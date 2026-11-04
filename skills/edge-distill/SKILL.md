@@ -16,15 +16,30 @@ suggested_skills:
 
 ---
 
+## 🌐 Operational Modes: PROJECT_MODE vs FACTORY_MODE
+
+- **`PROJECT_MODE` (Application Target):**
+  - Triggered automatically when targeting an application repo (`target_repo != plugin_root`) or explicitly via `--mode project`.
+  - Channel A updates are strictly restricted to application-local files: `.edge/stations/<role>.md` (budget `<= 40` lines) or `coding_standards.md`.
+  - **Strict Mutation Prohibition:** Never write to `edge` plugin files (`agents/*.md`, `skills/**`) or file plugin issues in the application repo.
+  - Harness friction, WSL relay errors, and station escapes are excluded from the application digest and silently queued into `edge_factory_inbox.json`.
+- **`FACTORY_MODE` (Edge Plugin Self-Improvement):**
+  - Triggered when targeting the `edge` plugin itself (`target_repo == plugin_root`) or explicitly via `--mode factory`.
+  - Drains pending harness signals from `edge_factory_inbox.json` alongside multi-project candidate rules.
+  - Channel A modifies plugin agent rubrics `agents/<role>.md` (budget `<= 60` lines) and `skills/**`.
+  - All improvements must pass verification gates (`wsl python3 tools/distill/cli.py check-budget .` and pytest suite) and be sealed in an `atomic git commit`: `chore(distill): apply factory improvements`.
+
+---
+
 ## 🔄 5-Step Operational Protocol
 
 ### Step 1: Zero-Token Harvest (Phase 1)
 Execute the deterministic CLI harvester in WSL:
 ```bash
-wsl python3 tools/distill/cli.py harvest --project <repo_path> --format toon
+wsl python3 tools/distill/cli.py harvest --project <repo_path> --format toon --mode auto
 wsl python3 tools/distill/cli.py candidates list
 ```
-- Optional flags: `--all-projects`, `--current <cid>`, `--reprocess`.
+- Optional flags: `--mode {auto,project,factory}`, `--all-projects`, `--current <cid>`, `--reprocess`.
 - **Zero-Friction Exit Condition:** If `harvest` finds zero unharvested sessions and `candidates list` has no pending promotions, print:
   `"✨ Harvester clean: No unprocessed sessions or pending promotions found. Exiting with 0 tokens spent."`
   and terminate immediately without spawning any subagents.
@@ -73,7 +88,7 @@ Present a structured proposal table to the human captain:
 |---|---------|--------|--------|-------------|-------------------|
 | 1 | Channel A | .edge/stations/surgeon.md | 24/40 | Transaction boundary lock | TICK-101 guard failure |
 | 2 | Channel A | agents/coder.md | 48/60 | Test Immutability Invariant | CAND-a1b2c3d4 (2 projects) |
-| 3 | Channel B | tasks-axi | N/A | Add git branch checkout guard | 6x command failure |
+| 3 | Channel B | frontier-axi | N/A | Add git branch checkout guard | 6x command failure |
 
 **Delivery Channels:**
 - **Channel A (Prose & Rubrics):** Apply approved diffs directly to `.edge/stations/<role>.md`, `coding_standards.md`, or plugin `agents/<role>.md`. When promoting a candidate, execute:
@@ -81,14 +96,24 @@ Present a structured proposal table to the human captain:
   wsl python3 tools/distill/cli.py promote --candidate <id>
   ```
   which appends to `agents/<role>.md` and cleans up duplicate local entries from `.edge/stations/<role>.md`.
-- **Channel B (Structural Code & Tooling):** Create concrete `tasks-axi` tickets for mechanical checks (`gate.py` rules, AST linters, CLI wrappers). NEVER mutate production code directly in the primary working tree (Zero-Touch Primary Working Tree Invariant).
+- **Channel B (Structural Code & Tooling — Frontier-First Parking Gate):**
+  Per AXI Rule 1.A, structural tooling proposals default to the active repo's **`frontier-axi`** parking lot:
+  ```bash
+  frontier-axi add <id> "<title>" --body "<evidence and open questions>"
+  ```
+  Direct `tasks-axi` ticketing occurs **ONLY** upon explicit Captain selection/escalation during review. NEVER mutate production code directly in the primary working tree (Zero-Touch Primary Working Tree Invariant).
 
 ---
 
 ### Step 5: Watermark Seal & Scheduling
 1. Mark analyzed sessions as processed:
-   ```bash
-   wsl python3 tools/distill/cli.py mark-processed --session <cid>
-   ```
+   - In `PROJECT_MODE`:
+     ```bash
+     wsl python3 tools/distill/cli.py mark-processed --session <cid> --mode project
+     ```
+   - In `FACTORY_MODE`:
+     ```bash
+     wsl python3 tools/distill/cli.py mark-processed --session <cid> --mode factory --clear-factory-inbox
+     ```
 2. **Unattended Execution Mode (`/schedule`):**
    When running unattended on a recurring schedule (e.g. via `/schedule` weekly cron), do NOT block on `ask_question`. Instead, write the distilled proposals and evidence report to `.edge/distill/weekly-report.md` (or `<appDataDir>/edge_distill_weekly_report.md`) and notify the Captain without unapproved mutations.
