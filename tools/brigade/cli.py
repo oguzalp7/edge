@@ -736,33 +736,9 @@ def cmd_check_heat(args: argparse.Namespace) -> int:
 
 
 def cmd_distill(args: argparse.Namespace) -> int:
-    repo_path = normalize_target_path(args.repo)
-    action = getattr(args, "action", "run")
-    if action == "start":
-        from tools.distill.cli import cmd_start_session
-        return cmd_start_session(repo_path, getattr(args, "goal", "Crisis intervention"), getattr(args, "domain", "reconcile"))
-    elif action == "log":
-        from tools.distill.cli import cmd_log_step
-        return cmd_log_step(repo_path, getattr(args, "step", ""), getattr(args, "tag", "OBSERVATION"))
-    elif action == "status":
-        from tools.distill.cli import cmd_session_status
-        return cmd_session_status(repo_path)
-    elif action == "resolve":
-        from tools.distill.cli import cmd_resolve_session
-        return cmd_resolve_session(repo_path, getattr(args, "notes", "Problem resolved."))
-    elif action == "propose":
-        from tools.distill.cli import cmd_generate_proposal
-        return cmd_generate_proposal(repo_path, getattr(args, "output", None))
-    else:
-        from tools.distill.cli import run_distill
-        return run_distill(
-            repo_path=repo_path,
-            domain=getattr(args, "domain", None),
-            track=getattr(args, "track", "core"),
-            ticket_id=getattr(args, "ticket", None),
-            output_path=getattr(args, "output", None),
-            max_commits=getattr(args, "max_commits", 15),
-        )
+    from tools.distill.cli import main as distill_main
+    distill_args = getattr(args, "distill_args", [])
+    return distill_main(distill_args)
 
 def cmd_qa_inspect(args: argparse.Namespace) -> int:
     from tools.brigade.qa_fiber import inspect_fiber
@@ -1011,17 +987,8 @@ def main() -> int:
     p_heat.add_argument("--repo", default=".", help="Path to target repository (default: .)")
 
     # distill
-    p_distill = subparsers.add_parser("distill", help="Mine patterns and generate evidence-based operational playbook or flight recorder proposal")
-    p_distill.add_argument("repo", help="Path to target repository")
-    p_distill.add_argument("--action", default="run", choices=["run", "start", "log", "status", "resolve", "propose"], help="Flight recorder action")
-    p_distill.add_argument("--goal", help="Operational session goal (for 'start')")
-    p_distill.add_argument("--step", help="Step or discovery description (for 'log')")
-    p_distill.add_argument("--tag", default="OBSERVATION", choices=["OBSERVATION", "SEAM_CREATION", "BEHAVIOR_SYNC", "BUG_FIX", "RESCUE_MOVE", "GATE_CHECK"], help="Tag category (for 'log')")
-    p_distill.add_argument("--notes", help="Resolution notes (for 'resolve')")
-    p_distill.add_argument("--domain", help="Target domain (e.g. reconcile, bookings, customers)")
-    p_distill.add_argument("--track", default="core", choices=["core", "ui"], help="Debt track")
-    p_distill.add_argument("--ticket", help="Target ticket ID")
-    p_distill.add_argument("--output", help="Custom output path for generated playbook/proposal")
+    p_distill = subparsers.add_parser("distill", help="Zero-token transcript harvester, candidate pool, and pattern miner")
+    p_distill.add_argument("distill_args", nargs="*", help="Arguments forwarded to edge-distill CLI")
     # qa-inspect
     p_qa = subparsers.add_parser("qa-inspect", help="Deterministic React Fiber component locator & frontier staging")
     p_qa.add_argument("query", help="CSS selector (button.confirm), XPath (//button), or text (text:Giriş Yap)")

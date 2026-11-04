@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-tools.distill - Pattern & Playbook Miner & Incident Flight Recorder for Edge Plugin.
+tools.distill - Zero-Token Harvester, State Watermark & Cross-Project Candidate Engine.
 """
 
 from .models import (
@@ -11,12 +11,14 @@ from .models import (
     DistillSession,
     JournalEntry,
     PlaybookProposal,
+    StationEscapeSignal,
+    ToolFrictionSignal,
+    RepeatedEscalation,
+    CandidateRule,
+    DistillWatermarkState,
+    FrictionDigest,
 )
-from .journal import DistillJournal
-from .miner import DistillMiner
-from .generator import PlaybookGenerator
-from .session_miner import SessionMiner, INTENT_DEFINITIONS
-from .cli import run_distill, main
+from .session_miner import SessionMiner, INTENT_DEFINITIONS, extract_project_from_path
 
 __all__ = [
     "RescueLoop",
@@ -26,12 +28,13 @@ __all__ = [
     "DistillSession",
     "JournalEntry",
     "PlaybookProposal",
-    "DistillJournal",
-    "DistillMiner",
-    "PlaybookGenerator",
+    "StationEscapeSignal",
+    "ToolFrictionSignal",
+    "RepeatedEscalation",
+    "CandidateRule",
+    "DistillWatermarkState",
+    "FrictionDigest",
     "SessionMiner",
     "INTENT_DEFINITIONS",
-    "run_distill",
-    "main",
+    "extract_project_from_path",
 ]
-

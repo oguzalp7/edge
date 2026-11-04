@@ -3,9 +3,25 @@
 Bridge for edge-distill within brigade package.
 """
 
-from tools.distill.models import RescueLoop, NegativeConstraint, DiffPattern, DistillReport
-from tools.distill.miner import DistillMiner
-from tools.distill.generator import PlaybookGenerator
+from tools.distill.models import (
+    RescueLoop,
+    NegativeConstraint,
+    DiffPattern,
+    DistillReport,
+    StationEscapeSignal,
+    ToolFrictionSignal,
+    RepeatedEscalation,
+    CandidateRule,
+    DistillWatermarkState,
+    FrictionDigest,
+)
+from tools.distill.harvester import TranscriptGraphHarvester
+from tools.distill.state import (
+    DistillStateManager,
+    LexicalStackGate,
+    CandidatePool,
+    check_line_budget,
+)
 from tools.distill.cli import run_distill, main
 
 __all__ = [
@@ -13,8 +29,17 @@ __all__ = [
     "NegativeConstraint",
     "DiffPattern",
     "DistillReport",
-    "DistillMiner",
-    "PlaybookGenerator",
+    "StationEscapeSignal",
+    "ToolFrictionSignal",
+    "RepeatedEscalation",
+    "CandidateRule",
+    "DistillWatermarkState",
+    "FrictionDigest",
+    "TranscriptGraphHarvester",
+    "DistillStateManager",
+    "LexicalStackGate",
+    "CandidatePool",
+    "check_line_budget",
     "run_distill",
     "main",
 ]
