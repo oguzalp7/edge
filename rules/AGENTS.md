@@ -86,7 +86,7 @@ Ajanlar icra ettikleri görevin niteliğine göre ilgili kılavuzu referans alma
   Yeni bir oturum açıldığında transkript okumadan durumu devralmak için [**`rules/playbooks/session-pickup.md`**](file:///C:/Users/oguz_/.gemini/config/plugins/edge/rules/playbooks/session-pickup.md) kılavuzunu uygula.
 
 * 📖 **Domain Operasyonel El Kitapçıkları (Distilled Playbooks):**  
-  Belirli bir domain üzerinde çalışmaya başlamadan önce varsa `rules/playbooks/generated/<domain>-playbook.md` el kitabını oku. Tamamlanan bilet sonrası `brigade distill <repo>` ile güncel bilgi damıtılır.
+  Belirli bir domain veya proje üzerinde çalışmaya başlamadan önce varsa `.edge/stations/<role>.md` yerel istasyon katmanını oku. Tamamlanan bilet sonrası `/edge-distill` ile güncel bilgi damıtılır.
 
 ---
 

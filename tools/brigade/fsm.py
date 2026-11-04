@@ -9,6 +9,7 @@ import sys
 import json
 import re
 import subprocess
+import shutil
 from pathlib import Path
 from typing import Tuple, Dict, Any, Optional, List
 from datetime import datetime, timezone
@@ -404,21 +405,38 @@ class BrigadeFSM:
         """
         Validates hermetic verification:
         1. Characterization test command exits 0.
-        2. TypeScript compiler tsc --noEmit exits 0.
+        2. TypeScript compiler tsc --noEmit exits 0 (if TypeScript/Node environment).
         """
         ticket = self.state.active_ticket
-        test_cmd = ticket.test_seam_command if ticket and ticket.test_seam_command else "npm run test:unit"
-        
+        work_dir = Path(ticket.worktree_path) if (ticket and ticket.worktree_path) else self.target_repo
+
+        if ticket and ticket.test_seam_command:
+            test_cmd = ticket.test_seam_command
+        elif (work_dir / "package.json").exists():
+            test_cmd = "npm run test:unit"
+        else:
+            uv_bin = shutil.which("uv") or (Path.home() / ".local/bin/uv")
+            if uv_bin and (isinstance(uv_bin, str) or (isinstance(uv_bin, Path) and uv_bin.is_file())):
+                test_cmd = f"{uv_bin} run --with pytest pytest -q"
+            else:
+                test_cmd = f"{sys.executable} -m pytest -q"
+
         # 1. Run scoped test command
         test_parts = test_cmd.split()
         test_code, test_out, test_err = self._run_cmd(test_parts)
         if test_code != 0:
             return False, f"Characterization test failed (exit code {test_code}): {test_cmd}\n{test_err or test_out}", {"output": test_out, "stderr": test_err}
 
-        # 2. Run TypeScript compiler
-        tsc_code, tsc_out, tsc_err = self._run_cmd(["npx", "tsc", "--noEmit"])
-        if tsc_code != 0:
-            return False, f"TypeScript compiler check failed (exit code {tsc_code}):\n{tsc_out or tsc_err}", {"output": tsc_out, "stderr": tsc_err}
+        # 2. Run TypeScript compiler if applicable
+        should_run_tsc = (work_dir / "tsconfig.json").exists() or any(
+            tok in (ticket.test_seam_command if ticket and ticket.test_seam_command else "")
+            for tok in ("vitest", "jest", "tsc", "npm ", "pnpm ", "yarn ")
+        )
+
+        if should_run_tsc:
+            tsc_code, tsc_out, tsc_err = self._run_cmd(["npx", "tsc", "--noEmit"])
+            if tsc_code != 0:
+                return False, f"TypeScript compiler check failed (exit code {tsc_code}):\n{tsc_out or tsc_err}", {"output": tsc_out, "stderr": tsc_err}
 
         return True, "Verification passed: Characterization tests and TypeScript compilation are 100% clean.", {}
 
@@ -428,6 +446,13 @@ class BrigadeFSM:
         - If CRITICAL findings exist -> POLISH
         - If only WARNING/ADVISORY or clean -> GATE
         """
+        if self.state.review_findings and self.state.active_ticket:
+            try:
+                recorder = FlightRecorder(self.target_repo, self.state.active_ticket.ticket_id)
+                recorder.seal_review_findings(self.state.review_findings)
+            except Exception as e:
+                print(f"[WARN] Failed to seal review findings into flight recorder: {e}")
+
         critical_findings = [f for f in self.state.review_findings if f.severity == "CRITICAL"]
         if critical_findings:
             msg = f"Review flagged {len(critical_findings)} critical finding(s). Advancing to POLISH for remediation."
@@ -439,15 +464,32 @@ class BrigadeFSM:
     def guard_polish_to_gate(self) -> Tuple[bool, str, Dict[str, Any]]:
         """Re-verifies compiler and tests after polish remediation."""
         ticket = self.state.active_ticket
-        test_cmd = ticket.test_seam_command if ticket and ticket.test_seam_command else "npm run test:unit"
-        
+        work_dir = Path(ticket.worktree_path) if (ticket and ticket.worktree_path) else self.target_repo
+
+        if ticket and ticket.test_seam_command:
+            test_cmd = ticket.test_seam_command
+        elif (work_dir / "package.json").exists():
+            test_cmd = "npm run test:unit"
+        else:
+            uv_bin = shutil.which("uv") or (Path.home() / ".local/bin/uv")
+            if uv_bin and (isinstance(uv_bin, str) or (isinstance(uv_bin, Path) and uv_bin.is_file())):
+                test_cmd = f"{uv_bin} run --with pytest pytest -q"
+            else:
+                test_cmd = f"{sys.executable} -m pytest -q"
+
         test_code, test_out, test_err = self._run_cmd(test_cmd.split())
         if test_code != 0:
             return False, f"Post-polish test verification failed:\n{test_err or test_out}", {}
 
-        tsc_code, tsc_out, tsc_err = self._run_cmd(["npx", "tsc", "--noEmit"])
-        if tsc_code != 0:
-            return False, f"Post-polish TypeScript verification failed:\n{tsc_out or tsc_err}", {}
+        should_run_tsc = (work_dir / "tsconfig.json").exists() or any(
+            tok in (ticket.test_seam_command if ticket and ticket.test_seam_command else "")
+            for tok in ("vitest", "jest", "tsc", "npm ", "pnpm ", "yarn ")
+        )
+
+        if should_run_tsc:
+            tsc_code, tsc_out, tsc_err = self._run_cmd(["npx", "tsc", "--noEmit"])
+            if tsc_code != 0:
+                return False, f"Post-polish TypeScript verification failed:\n{tsc_out or tsc_err}", {}
 
         return True, "Post-polish verification passed. Advancing to GATE.", {}
 
@@ -620,6 +662,36 @@ class BrigadeFSM:
     # State Machine Transitions
     # =========================================================================
 
+    def _record_guard_failure(
+        self,
+        state: CycleState,
+        message: str,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Records guard failure in transition history and synchronizes to FlightRecorder."""
+        state_str = state.value if isinstance(state, CycleState) else str(state)
+        log = TransitionLog(
+            from_state=state_str,
+            to_state=state_str,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            success=False,
+            message=message,
+            details=details or {},
+        )
+        self.state.history.append(log)
+        self.save()
+
+        if self.state.active_ticket:
+            try:
+                recorder = FlightRecorder(self.target_repo, self.state.active_ticket.ticket_id)
+                recorder.record_guard_failure(
+                    state=state_str,
+                    message=message,
+                    details=details or {},
+                )
+            except Exception as e:
+                print(f"[WARN] Failed to record guard failure in flight recorder: {e}")
+
     def advance(self, force: bool = False) -> Tuple[bool, CycleState, str]:
         """
         Advances the state machine to the next deterministic state.
@@ -637,6 +709,7 @@ class BrigadeFSM:
         elif curr == CycleState.TRIAGE:
             passed, msg, details = self.guard_triage_to_surgery()
             if not passed and not force:
+                self._record_guard_failure(curr, msg, details)
                 return False, curr, f"Triage validation failed: {msg}"
             self._transition(CycleState.SURGERY, msg, details)
             return True, self.state.current_state, msg
@@ -644,6 +717,7 @@ class BrigadeFSM:
         elif curr == CycleState.RED_TEST:
             passed, msg, details = self.guard_red_to_surgery()
             if not passed and not force:
+                self._record_guard_failure(curr, msg, details)
                 return False, curr, f"Red test guard blocked advancement: {msg}"
             self._transition(CycleState.SURGERY, msg, details)
             return True, self.state.current_state, msg
@@ -651,6 +725,7 @@ class BrigadeFSM:
         elif curr == CycleState.SURGERY:
             passed, msg, details = self.guard_surgery_to_verify()
             if not passed and not force:
+                self._record_guard_failure(curr, msg, details)
                 return False, curr, f"Surgery guard blocked advancement: {msg}"
             self._transition(CycleState.VERIFY, msg, details)
             return True, self.state.current_state, msg
@@ -658,6 +733,7 @@ class BrigadeFSM:
         elif curr == CycleState.VERIFY:
             passed, msg, details = self.guard_verify_to_review()
             if not passed and not force:
+                self._record_guard_failure(curr, msg, details)
                 return False, curr, f"Verification guard blocked advancement: {msg}"
             self._transition(CycleState.REVIEW, msg, details)
             return True, self.state.current_state, msg
@@ -670,6 +746,7 @@ class BrigadeFSM:
         elif curr == CycleState.POLISH:
             passed, msg, details = self.guard_polish_to_gate()
             if not passed and not force:
+                self._record_guard_failure(curr, msg, details)
                 return False, curr, f"Polish guard blocked advancement: {msg}"
             self._transition(CycleState.GATE, msg, details)
             return True, self.state.current_state, msg
@@ -677,6 +754,7 @@ class BrigadeFSM:
         elif curr == CycleState.GATE:
             passed, msg, details = self.guard_gate_to_staging()
             if not passed and not force:
+                self._record_guard_failure(curr, msg, details)
                 return False, curr, f"Edge Gate blocked advancement: {msg}"
             self._transition(CycleState.STAGING, msg, details)
             return True, self.state.current_state, msg
@@ -684,11 +762,19 @@ class BrigadeFSM:
         elif curr == CycleState.STAGING:
             passed, msg, details = self.guard_staging_to_completed()
             if not passed and not force:
+                self._record_guard_failure(curr, msg, details)
                 return False, curr, f"Staging guard blocked completion: {msg}"
             self._transition(CycleState.COMPLETED, msg, details)
             return True, self.state.current_state, msg
 
         elif curr == CycleState.COMPLETED:
+            if self.state.review_findings and self.state.active_ticket:
+                try:
+                    recorder = FlightRecorder(self.target_repo, self.state.active_ticket.ticket_id)
+                    recorder.seal_review_findings(self.state.review_findings)
+                except Exception as e:
+                    print(f"[WARN] Failed to seal review findings into flight recorder: {e}")
+
             # Reset for next cycle
             self._transition(CycleState.IDLE, "Cycle completed. Reset to IDLE.")
             self.state.active_ticket = None

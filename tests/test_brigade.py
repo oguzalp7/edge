@@ -118,6 +118,37 @@ class TestBrigadeModels(unittest.TestCase):
         self.assertEqual(restored.name, "Chef Surgeon")
         self.assertEqual(restored.status, "BUSY")
 
+    def test_station_from_dict_missing_name_resilience(self):
+        # Station.from_dict must gracefully auto-populate name when missing
+        data = {
+            "role": "coder",
+            "conversation_id": "conv-no-name-123",
+            "status": "IDLE",
+        }
+        restored = Station.from_dict(data)
+        self.assertEqual(restored.role, "coder")
+        self.assertEqual(restored.conversation_id, "conv-no-name-123")
+        self.assertEqual(restored.name, "Coder Station")
+
+        data_seam = {
+            "role": "seam_architect",
+            "conversation_id": "conv-seam-123",
+        }
+        restored_seam = Station.from_dict(data_seam)
+        self.assertEqual(restored_seam.name, "Seam Architect Station")
+
+        # When role is empty or missing
+        data_empty = {
+            "conversation_id": "conv-empty-role",
+        }
+        restored_empty = Station.from_dict(data_empty)
+        self.assertEqual(restored_empty.name, "Station Worker")
+
+        # Direct instantiation default
+        st_direct = Station(role="surgeon", conversation_id="conv-direct")
+        self.assertEqual(st_direct.name, "")
+
+
     def test_ticket_id_generation_and_serialization(self):
         tid = Ticket.generate_id("core", "customers", "RULE-DB-LEAK", 100)
         self.assertTrue(tid.startswith("TICK-"))
@@ -1215,6 +1246,403 @@ class TestBrigadeWave2FsmAndCli(unittest.TestCase):
         archived_spec = self.repo_path / ".edge" / "archive" / "specs" / "staff-alloc.md"
         self.assertTrue(archived_spec.exists(), "Archived spec must exist in .edge/archive/specs/")
         self.assertIn("Staff Allocation Spec", archived_spec.read_text(encoding="utf-8"))
+
+
+
+
+class TestStationRegistryPromptsAndOverlays(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.temp_repo = Path(self.temp_dir)
+        self.stations_dir = self.temp_repo / ".edge" / "stations"
+        self.stations_dir.mkdir(parents=True, exist_ok=True)
+        self.ticket = Ticket(
+            ticket_id="TICK-SLICE1-001",
+            track="feature",
+            domain="billing",
+            rule_id="RULE-FEATURE-NEW",
+            severity="NORMAL",
+            target_file="src/billing/service.py",
+            line_number=1,
+            fingerprint="fp-slice1",
+            description="Billing service implementation",
+            suggested_fix="Implement billing logic",
+            branch_name="feat/billing-service",
+            test_seam_command="pytest tests/test_billing.py",
+            negative_constraints=["Do not mutate database schema"],
+        )
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_load_station_rubric_canonical_slugs_and_normalization(self):
+        # Must support canonical hyphenated, underscore, uppercase, and enum roles
+        roles_to_test = [
+            ("coder", "coder.md"),
+            ("surgeon", "surgeon.md"),
+            ("seam_architect", "seam-architect.md"),
+            ("seam-architect", "seam-architect.md"),
+            ("researcher", "researcher.md"),
+            ("spec_writer", "spec-writer.md"),
+            ("spec-writer", "spec-writer.md"),
+            ("spec_critic", "spec-critic.md"),
+            ("spec-critic", "spec-critic.md"),
+            ("examiner", "examiner.md"),
+            ("orchestrator", "orchestrator.md"),
+            ("qa_engineer", "qa-engineer.md"),
+            ("qa-engineer", "qa-engineer.md"),
+        ]
+        for role_slug, expected_filename in roles_to_test:
+            rubric = StationRegistry.load_station_rubric(role_slug)
+            self.assertIsInstance(rubric, str)
+            self.assertTrue(len(rubric) > 0)
+            self.assertIn("Persona:", rubric)
+
+        # Enums and uppercase
+        self.assertIn("Persona:", StationRegistry.load_station_rubric(StationRole.CODER))
+        self.assertIn("Persona:", StationRegistry.load_station_rubric("CODER"))
+        self.assertIn("Persona:", StationRegistry.load_station_rubric("SEAM_ARCHITECT"))
+
+        # Unknown fallback
+        fallback = StationRegistry.load_station_rubric("unknown_station")
+        self.assertIn("# Persona: UNKNOWN_STATION", fallback)
+        self.assertIn("coding_standards.md", fallback)
+
+    def test_load_station_rubric_with_repo_overlay(self):
+        # 1. Overlay present with content
+        overlay_file = self.stations_dir / "coder.md"
+        overlay_file.write_text("### Local Coder Overlay: Always run ruff format\n", encoding="utf-8")
+
+        rubric = StationRegistry.load_station_rubric("coder", repo_path=self.temp_repo)
+        self.assertIn("Persona:", rubric)
+        self.assertIn("## REPOSITORY-LOCAL STATION OVERLAY", rubric)
+        self.assertIn("### Local Coder Overlay: Always run ruff format", rubric)
+
+        # 2. Overlay absent
+        clean_rubric = StationRegistry.load_station_rubric("surgeon", repo_path=self.temp_repo)
+        self.assertNotIn("## REPOSITORY-LOCAL STATION OVERLAY", clean_rubric)
+
+        # 3. Overlay empty/whitespace only
+        empty_overlay = self.stations_dir / "surgeon.md"
+        empty_overlay.write_text("   \n\n  ", encoding="utf-8")
+        clean_rubric_empty = StationRegistry.load_station_rubric("surgeon", repo_path=self.temp_repo)
+        self.assertNotIn("## REPOSITORY-LOCAL STATION OVERLAY", clean_rubric_empty)
+
+        # 4. Underscore overlay fallback lookup: .edge/stations/seam_architect.md
+        underscore_overlay = self.stations_dir / "seam_architect.md"
+        underscore_overlay.write_text("### Seam Underscore Overlay Rule", encoding="utf-8")
+        seam_rubric = StationRegistry.load_station_rubric("seam_architect", repo_path=self.temp_repo)
+        self.assertIn("## REPOSITORY-LOCAL STATION OVERLAY", seam_rubric)
+        self.assertIn("### Seam Underscore Overlay Rule", seam_rubric)
+
+    def test_prompt_builders_accept_repo_path_and_include_overlay(self):
+        # Create overlays for multiple roles
+        (self.stations_dir / "coder.md").write_text("### Local Coder Overlay Rule", encoding="utf-8")
+        (self.stations_dir / "surgeon.md").write_text("### Local Surgeon Overlay Rule", encoding="utf-8")
+        (self.stations_dir / "examiner.md").write_text("### Local Examiner Overlay Rule", encoding="utf-8")
+        (self.stations_dir / "seam-architect.md").write_text("### Local Seam Overlay Rule", encoding="utf-8")
+        (self.stations_dir / "researcher.md").write_text("### Local Researcher Overlay Rule", encoding="utf-8")
+        (self.stations_dir / "spec-writer.md").write_text("### Local Spec Writer Overlay Rule", encoding="utf-8")
+        (self.stations_dir / "qa-engineer.md").write_text("### Local QA Overlay Rule", encoding="utf-8")
+
+        # Coder
+        p_coder = StationRegistry.build_coder_prompt(self.ticket, "pytest", repo_path=self.temp_repo)
+        self.assertIn("## REPOSITORY-LOCAL STATION OVERLAY", p_coder)
+        self.assertIn("### Local Coder Overlay Rule", p_coder)
+
+        # Surgeon
+        p_surgeon = StationRegistry.build_surgeon_prompt(self.ticket, "development", repo_path=self.temp_repo)
+        self.assertIn("## REPOSITORY-LOCAL STATION OVERLAY", p_surgeon)
+        self.assertIn("### Local Surgeon Overlay Rule", p_surgeon)
+
+        # Examiner
+        p_examiner = StationRegistry.build_examiner_prompt(self.ticket, "development", repo_path=self.temp_repo)
+        self.assertIn("## REPOSITORY-LOCAL STATION OVERLAY", p_examiner)
+        self.assertIn("### Local Examiner Overlay Rule", p_examiner)
+
+        # Seam Architect (testing canonical method and optional alias)
+        p_seam = StationRegistry.build_seam_architect_prompt(self.ticket, "seam spec", repo_path=self.temp_repo)
+        self.assertIn("## REPOSITORY-LOCAL STATION OVERLAY", p_seam)
+        self.assertIn("### Local Seam Overlay Rule", p_seam)
+
+        if hasattr(StationRegistry, "build_seam_prompt"):
+            p_seam_alias = StationRegistry.build_seam_prompt(self.ticket, "seam spec", repo_path=self.temp_repo)
+            self.assertIn("## REPOSITORY-LOCAL STATION OVERLAY", p_seam_alias)
+            self.assertIn("### Local Seam Overlay Rule", p_seam_alias)
+
+        # Researcher
+        p_researcher = StationRegistry.build_researcher_prompt(self.ticket, "topic", repo_path=self.temp_repo)
+        self.assertIn("## REPOSITORY-LOCAL STATION OVERLAY", p_researcher)
+        self.assertIn("### Local Researcher Overlay Rule", p_researcher)
+
+        # Spec Writer
+        p_spec = StationRegistry.build_spec_writer_prompt(self.ticket, "story", repo_path=self.temp_repo)
+        self.assertIn("## REPOSITORY-LOCAL STATION OVERLAY", p_spec)
+        self.assertIn("### Local Spec Writer Overlay Rule", p_spec)
+
+        # QA Prompt
+        p_qa = StationRegistry.build_qa_prompt("checkout scenario", repo_path=self.temp_repo)
+        self.assertIn("## REPOSITORY-LOCAL STATION OVERLAY", p_qa)
+        self.assertIn("### Local QA Overlay Rule", p_qa)
+
+        # Backward compatibility without repo_path
+        p_coder_no_repo = StationRegistry.build_coder_prompt(self.ticket, "pytest")
+        self.assertNotIn("## REPOSITORY-LOCAL STATION OVERLAY", p_coder_no_repo)
+        p_surgeon_no_repo = StationRegistry.build_surgeon_prompt(self.ticket, "development")
+        self.assertNotIn("## REPOSITORY-LOCAL STATION OVERLAY", p_surgeon_no_repo)
+
+    def test_spec_critic_supports_repo_overlay(self):
+        from tools.brigade.spec_critic import run_spec_critique
+
+        (self.stations_dir / "spec-critic.md").write_text("### Local Spec Critic Overlay Rule", encoding="utf-8")
+        specs_dir = self.temp_repo / ".edge" / "specs"
+        specs_dir.mkdir(parents=True, exist_ok=True)
+        spec_file = specs_dir / "billing-slice.md"
+        spec_file.write_text("# Billing Spec\nINVEST slice content", encoding="utf-8")
+
+        with patch("tools.brigade.spec_critic.run_command") as mock_run:
+            mock_run.return_value = (0, "Advisory Critique Output", "")
+            res = run_spec_critique(repo_path=self.temp_repo, spec_path=spec_file)
+            self.assertTrue(res.success)
+            mock_run.assert_called_once()
+            cmd_args = mock_run.call_args[0][0]
+            # Prompt is the last argument of agy command
+            sent_prompt = cmd_args[-1]
+            self.assertIn("## REPOSITORY-LOCAL STATION OVERLAY", sent_prompt)
+            self.assertIn("### Local Spec Critic Overlay Rule", sent_prompt)
+
+
+class TestPersonaCompletenessAndLineBudget(unittest.TestCase):
+    def setUp(self):
+        self.repo_root = Path(__file__).resolve().parents[1]
+
+    def test_all_canonical_personas_exist_and_line_budget(self):
+        expected_personas = [
+            "coder.md",
+            "surgeon.md",
+            "seam-architect.md",
+            "researcher.md",
+            "spec-writer.md",
+            "spec-critic.md",
+            "examiner.md",
+            "orchestrator.md",
+            "qa-engineer.md",
+        ]
+        agents_dir = self.repo_root / "agents"
+        for persona_file in expected_personas:
+            p_path = agents_dir / persona_file
+            self.assertTrue(p_path.is_file(), f"Missing required canonical persona file: {p_path}")
+
+        # Check line budget: every markdown in agents/*.md <= 60 lines
+        for p_path in agents_dir.glob("*.md"):
+            lines = p_path.read_text(encoding="utf-8").splitlines()
+            self.assertLessEqual(
+                len(lines),
+                60,
+                f"Persona {p_path.name} exceeds 60-line budget: {len(lines)} lines",
+            )
+
+    def test_zero_legacy_tech_stack_leaks(self):
+        # Purged: modaldialog, radix, shadcn, daisyui across agents/*.md and tools/brigade/stations.py
+        target_files = list((self.repo_root / "agents").glob("*.md"))
+        target_files.append(self.repo_root / "tools" / "brigade" / "stations.py")
+
+        forbidden_patterns = ["modaldialog", "radix", "shadcn", "daisyui"]
+        leaks_found = []
+
+        for f in target_files:
+            if not f.is_file():
+                continue
+            text = f.read_text(encoding="utf-8").lower()
+            for pattern in forbidden_patterns:
+                if pattern in text:
+                    leaks_found.append(f"{f.name} contains forbidden pattern '{pattern}'")
+
+        self.assertEqual(leaks_found, [], f"Found forbidden legacy stack leaks: {leaks_found}")
+
+    def test_purged_playbooks_and_modernized_agents_rules(self):
+        # bookings-playbook.md and customers-playbook.md must be deleted
+        bookings_pb = self.repo_root / "rules" / "playbooks" / "generated" / "bookings-playbook.md"
+        customers_pb = self.repo_root / "rules" / "playbooks" / "generated" / "customers-playbook.md"
+        self.assertFalse(bookings_pb.exists(), f"Stale domain playbook must be deleted: {bookings_pb}")
+        self.assertFalse(customers_pb.exists(), f"Stale domain playbook must be deleted: {customers_pb}")
+
+        # rules/AGENTS.md must reference .edge/stations/ instead of <domain>-playbook.md
+        agents_rules = self.repo_root / "rules" / "AGENTS.md"
+        self.assertTrue(agents_rules.is_file())
+        rules_text = agents_rules.read_text(encoding="utf-8")
+        self.assertIn(".edge/stations/", rules_text)
+        self.assertNotIn("<domain>-playbook.md", rules_text)
+
+
+class TestBrigadePromptCLI(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.repo_path = Path(self.temp_dir)
+        self.cli_path = Path(__file__).resolve().parents[1] / "tools" / "brigade" / "cli.py"
+
+        # Initialize brigade state in temp repo
+        from tools.brigade.fsm import BrigadeFSM
+        self.fsm = BrigadeFSM(self.repo_path)
+        self.fsm.save()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_cli_prompt_standalone_all_roles(self):
+        import subprocess
+        roles = [
+            "coder",
+            "surgeon",
+            "examiner",
+            "researcher",
+            "spec_writer",
+            "spec-writer",
+            "spec_critic",
+            "spec-critic",
+            "seam_architect",
+            "seam-architect",
+            "qa_engineer",
+            "qa-engineer",
+            "orchestrator",
+        ]
+        for role in roles:
+            proc = subprocess.run(
+                [sys.executable, str(self.cli_path), "prompt", str(self.repo_path), "--role", role],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"CLI prompt failed for role '{role}': stdout={proc.stdout}, stderr={proc.stderr}",
+            )
+            self.assertIn("Persona:", proc.stdout)
+
+    def test_cli_prompt_with_active_ticket_includes_flight_recorder_alerts(self):
+        import subprocess
+        from tools.brigade.flight_recorder import FlightRecorder
+
+        ticket = Ticket(
+            ticket_id="TICK-PROMPT-01",
+            track="feature",
+            domain="checkout",
+            rule_id="RULE-PROMPT",
+            severity="NORMAL",
+            target_file="src/checkout.py",
+            line_number=1,
+            fingerprint="fp-prompt",
+            description="Checkout implementation",
+            suggested_fix="Fix",
+            branch_name="feat/prompt-test",
+            test_seam_command="pytest",
+        )
+        self.fsm.state.active_ticket = ticket
+        self.fsm.save()
+
+        # Add dead-end negative constraint
+        recorder = FlightRecorder(self.repo_path, "TICK-PROMPT-01")
+        recorder.record_dead_end(
+            station="coder",
+            approach="Async generator stream",
+            failure_reason="Lockup during socket close",
+            negative_constraint="DO NOT use async generator stream for checkout socket.",
+        )
+
+        proc = subprocess.run(
+            [sys.executable, str(self.cli_path), "prompt", str(self.repo_path), "--role", "coder"],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(proc.returncode, 0, f"CLI prompt failed: {proc.stderr}")
+        self.assertIn("ZERO-AMNESIA FLIGHT RECORDER", proc.stdout)
+        self.assertIn("DO NOT use async generator stream", proc.stdout)
+        self.assertIn("CODER", proc.stdout)
+
+
+class TestStackAwareVerification(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.repo_path = Path(self.temp_dir)
+        self.fsm = BrigadeFSM(self.repo_path)
+        self.ticket = Ticket(
+            ticket_id="TICK-PYTHON-STACK",
+            track="feature",
+            domain="analytics",
+            rule_id="RULE-PYTHON",
+            severity="NORMAL",
+            target_file="src/analytics.py",
+            line_number=1,
+            fingerprint="fp-py",
+            description="Analytics engine",
+            suggested_fix="Implement",
+            branch_name="feat/py-analytics",
+            test_seam_command="uv run --with pytest pytest -q",
+        )
+        self.fsm.state.active_ticket = self.ticket
+        self.fsm.state.current_state = CycleState.VERIFY
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_guard_verify_in_python_repo_skips_tsc_and_runs_pytest(self):
+        # Neither package.json nor tsconfig.json exist in self.repo_path
+        self.assertFalse((self.repo_path / "tsconfig.json").exists())
+        self.assertFalse((self.repo_path / "package.json").exists())
+
+        executed_cmds = []
+
+        def mock_run_cmd(cmd, cwd=None):
+            executed_cmds.append(cmd)
+            return (0, "1 passed in 0.04s", "")
+
+        with patch.object(self.fsm, "_run_cmd", side_effect=mock_run_cmd):
+            passed, msg, details = self.fsm.guard_verify_to_review()
+            self.assertTrue(passed, f"guard_verify_to_review should pass: {msg}")
+
+            # Verify pytest command was executed
+            self.assertTrue(any("pytest" in str(c) for c in executed_cmds), f"Executed commands: {executed_cmds}")
+
+            # Verify npx tsc --noEmit was cleanly SKIPPED
+            for c in executed_cmds:
+                c_str = " ".join(c) if isinstance(c, list) else str(c)
+                self.assertNotIn("tsc", c_str, "TypeScript compiler must NOT be invoked in a Python-only repo")
+
+    def test_guard_polish_in_python_repo_skips_tsc(self):
+        self.fsm.state.current_state = CycleState.POLISH
+        executed_cmds = []
+
+        def mock_run_cmd(cmd, cwd=None):
+            executed_cmds.append(cmd)
+            return (0, "1 passed in 0.04s", "")
+
+        with patch.object(self.fsm, "_run_cmd", side_effect=mock_run_cmd):
+            passed, msg, details = self.fsm.guard_polish_to_gate()
+            self.assertTrue(passed, f"guard_polish_to_gate should pass: {msg}")
+
+            # Verify tsc was skipped
+            for c in executed_cmds:
+                c_str = " ".join(c) if isinstance(c, list) else str(c)
+                self.assertNotIn("tsc", c_str, "TypeScript compiler must NOT be invoked in a Python-only repo")
+
+    def test_guard_verify_with_tsconfig_executes_tsc(self):
+        # When tsconfig.json exists, tsc must be executed
+        (self.repo_path / "tsconfig.json").write_text("{}", encoding="utf-8")
+
+        executed_cmds = []
+
+        def mock_run_cmd(cmd, cwd=None):
+            executed_cmds.append(cmd)
+            cmd_str = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+            if "tsc" in cmd_str:
+                return (1, "", "TS2322: Type error in index.ts")
+            return (0, "tests passed", "")
+
+        with patch.object(self.fsm, "_run_cmd", side_effect=mock_run_cmd):
+            passed, msg, details = self.fsm.guard_verify_to_review()
+            self.assertFalse(passed, "Guard should fail when tsc fails")
+            self.assertIn("TypeScript compiler check failed", msg)
+            self.assertTrue(any("tsc" in str(c) for c in executed_cmds))
 
 
 if __name__ == "__main__":

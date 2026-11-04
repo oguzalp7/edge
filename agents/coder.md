@@ -7,7 +7,7 @@
 ---
 
 ## 🎯 Primary Purpose
-The Coder implements production code in `src/` to turn the Seam Architect's RED tests completely GREEN, with zero test tampering and clean type compilation.
+The Coder implements production code to turn the Seam Architect's RED tests completely GREEN, with zero test tampering and clean compilation.
 
 ---
 
@@ -18,5 +18,6 @@ The Coder implements production code in `src/` to turn the Seam Architect's RED 
 2. **Contract Fidelity:** Implement strictly according to declared interface contracts and domain repositories.
 3. **Hermetic Verification:**
    - Execute the scoped test command: MUST exit with code 0 (GREEN).
-   - Execute `npx tsc --noEmit`: MUST exit with code 0 (Zero type errors).
+   - Execute project compiler / typechecker: MUST exit with code 0.
 4. **Code Quality:** Adhere to `coding_standards.md` (no raw leaks, explicit error handling, transaction safety).
+5. **Zero-Touch Working Tree:** If an isolated worktree is assigned, operate strictly within that worktree directory.

@@ -22,6 +22,7 @@ from tools.brigade.models import (
     CycleState,
     BrigadeState,
     Checkpoint,
+    ReviewFinding,
 )
 from tools.brigade.fsm import BrigadeFSM
 from tools.brigade.worktree import (
@@ -144,6 +145,81 @@ class TestFlightRecorder(unittest.TestCase):
         report = self.recorder.load()
         self.assertEqual(report["captain_decision"]["decision"], "Allow refunds under $50 without manager approval.")
         self.assertEqual(report["status"], "DECIDED")
+
+    def test_record_guard_failure(self):
+        self.recorder.set_metadata(
+            track="core",
+            domain="billing",
+            target_file="src/actions/checkout.ts",
+        )
+        entry = self.recorder.record_guard_failure(
+            state="VERIFY",
+            message="Verification guard blocked advancement: Characterization test failed: pytest -q",
+            details={"exit_code": 1, "test_cmd": "pytest -q"},
+        )
+        self.assertEqual(entry["state"], "VERIFY")
+        self.assertIn("Characterization test failed", entry["message"])
+        self.assertEqual(entry["details"]["exit_code"], 1)
+        self.assertIn("timestamp", entry)
+
+        # Verify persisted to JSON
+        report = self.recorder.load()
+        self.assertIn("guard_failures", report)
+        self.assertEqual(len(report["guard_failures"]), 1)
+        self.assertEqual(report["guard_failures"][0]["state"], "VERIFY")
+        self.assertEqual(report["guard_failures"][0]["message"], entry["message"])
+
+        # Verify learnings markdown is updated
+        learnings_file = self.repo_path / ".edge" / "flight-recorder" / "TICK-TEST-001-learnings.md"
+        self.assertTrue(learnings_file.exists())
+        content = learnings_file.read_text(encoding="utf-8")
+        self.assertIn("Guard Failures", content)
+        self.assertIn("VERIFY", content)
+        self.assertIn("Characterization test failed", content)
+
+    def test_seal_review_findings(self):
+        self.recorder.set_metadata(
+            track="core",
+            domain="billing",
+            target_file="src/actions/checkout.ts",
+        )
+        finding1 = ReviewFinding(
+            axis="standards",
+            severity="WARNING",
+            file_path="src/lib/billing/repo.ts",
+            rule="coding_standards.md §4.3",
+            description="Missing transaction wrapper on multi-row insert",
+            suggested_fix="Wrap in db.transaction",
+            line_number=42,
+        )
+        finding2 = {
+            "axis": "spec",
+            "severity": "CRITICAL",
+            "file_path": "src/actions/checkout.ts",
+            "rule": "SPEC-EDGE-DISTILL-V2",
+            "description": "Missing coupon expiration validation",
+            "suggested_fix": "Validate coupon.expires_at",
+            "line_number": 88,
+        }
+        self.recorder.seal_review_findings([finding1, finding2])
+
+        report = self.recorder.load()
+        self.assertIn("review_findings", report)
+        self.assertEqual(len(report["review_findings"]), 2)
+
+        # Idempotent deduplication: sealing again must not duplicate findings
+        self.recorder.seal_review_findings([finding1, finding2])
+        report_dedup = self.recorder.load()
+        self.assertEqual(len(report_dedup["review_findings"]), 2, "Duplicate review findings must be deduplicated")
+
+        # Verify learnings markdown is updated
+        learnings_file = self.repo_path / ".edge" / "flight-recorder" / "TICK-TEST-001-learnings.md"
+        self.assertTrue(learnings_file.exists())
+        content = learnings_file.read_text(encoding="utf-8")
+        self.assertIn("Examiner Review Findings Ledger", content)
+        self.assertIn("Missing transaction wrapper", content)
+        self.assertIn("Missing coupon expiration validation", content)
+
 
 
 class TestFsmEscalationAndAbort(unittest.TestCase):
@@ -276,6 +352,80 @@ class TestFsmEscalationAndAbort(unittest.TestCase):
         )
         self.assertTrue(ok_core)
         self.assertEqual(fsm.state.current_state, CycleState.SURGERY)
+
+    def test_fsm_guard_failure_records_to_history_and_flight_recorder(self):
+        self.fsm.state.current_state = CycleState.VERIFY
+        self.fsm.save()
+
+        with patch.object(self.fsm, "guard_verify_to_review", return_value=(False, "Verification test failed: exit 1", {"exit_code": 1})):
+            passed, state, msg = self.fsm.advance()
+            self.assertFalse(passed)
+            self.assertEqual(state, CycleState.VERIFY)
+
+            # Check history has failure record
+            self.assertTrue(len(self.fsm.state.history) > 0)
+            last_history = self.fsm.state.history[-1]
+            self.assertFalse(last_history.success)
+            self.assertEqual(last_history.from_state, "VERIFY")
+            self.assertIn("Verification test failed", last_history.message)
+
+            # Check FlightRecorder JSON has guard_failures entry
+            recorder = FlightRecorder(self.repo_path, self.ticket.ticket_id)
+            report = recorder.load()
+            self.assertIn("guard_failures", report)
+            self.assertTrue(any(f["state"] == "VERIFY" for f in report["guard_failures"]))
+
+    def test_fsm_completed_to_idle_seals_review_findings_before_reset(self):
+        self.fsm.state.current_state = CycleState.COMPLETED
+        finding = ReviewFinding(
+            axis="standards",
+            severity="ADVISORY",
+            file_path="src/actions/users.ts",
+            rule="coding_standards.md §2.1",
+            description="Consider adding typing for return value",
+            suggested_fix="Add UserResponse return type",
+            line_number=10,
+        )
+        self.fsm.state.review_findings = [finding]
+        self.fsm.save()
+
+        # Advance should reset to IDLE and wipe state.review_findings, but seal them in FlightRecorder
+        passed, state, msg = self.fsm.advance()
+        self.assertTrue(passed)
+        self.assertEqual(state, CycleState.IDLE)
+        self.assertEqual(self.fsm.state.review_findings, [])
+        self.assertIsNone(self.fsm.state.active_ticket)
+
+        # Check FlightRecorder retained the sealed review findings
+        recorder = FlightRecorder(self.repo_path, self.ticket.ticket_id)
+        report = recorder.load()
+        self.assertIn("review_findings", report)
+        self.assertEqual(len(report["review_findings"]), 1)
+        self.assertEqual(report["review_findings"][0]["description"], "Consider adding typing for return value")
+
+    def test_fsm_guard_review_to_next_seals_review_findings(self):
+        self.fsm.state.current_state = CycleState.REVIEW
+        finding = ReviewFinding(
+            axis="standards",
+            severity="CRITICAL",
+            file_path="src/actions/users.ts",
+            rule="coding_standards.md §4.3",
+            description="Uncontained SQL injection risk",
+            suggested_fix="Use parameterized query",
+            line_number=55,
+        )
+        self.fsm.state.review_findings = [finding]
+        self.fsm.save()
+
+        next_state, msg, details = self.fsm.guard_review_to_next()
+        self.assertEqual(next_state, CycleState.POLISH)
+
+        # Check FlightRecorder retained the sealed review findings
+        recorder = FlightRecorder(self.repo_path, self.ticket.ticket_id)
+        report = recorder.load()
+        self.assertIn("review_findings", report)
+        self.assertTrue(any(f["description"] == "Uncontained SQL injection risk" for f in report["review_findings"]))
+
 
 
 if __name__ == "__main__":

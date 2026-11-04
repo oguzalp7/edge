@@ -40,9 +40,9 @@ class ContextHeatZone(str, Enum):
 
 @dataclass
 class Station:
-    role: str
-    conversation_id: str
-    name: str
+    role: str = ""
+    conversation_id: str = ""
+    name: str = ""
     status: str = "IDLE"                      # IDLE, BUSY, ERROR
     registered_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     last_active_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -55,6 +55,9 @@ class Station:
         raw = dict(data)
         if "conversation_id" not in raw and "conversationId" in raw:
             raw["conversation_id"] = raw["conversationId"]
+        role_val = raw.get("role", "")
+        if not raw.get("name"):
+            raw["name"] = f"{role_val.replace('_', ' ').title()} Station" if role_val else "Station Worker"
         valid_fields = {f.name for f in fields(cls)}
         filtered = {k: v for k, v in raw.items() if k in valid_fields}
         return cls(**filtered)

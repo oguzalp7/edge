@@ -165,15 +165,12 @@ def run_spec_critique(
             error=f"Failed to read spec file {resolved_spec}: {str(e)}",
         )
 
-    # Load persona rubric from agents/spec-critic.md if available
-    plugin_root = Path(__file__).resolve().parent.parent.parent
-    persona_path = plugin_root / "agents" / "spec-critic.md"
-    persona_content = DEFAULT_PERSONA_RUBRIC
-    if persona_path.is_file():
-        try:
-            persona_content = persona_path.read_text(encoding="utf-8")
-        except Exception:
-            persona_content = DEFAULT_PERSONA_RUBRIC
+    # Load 2-layer persona rubric using StationRegistry
+    try:
+        from tools.brigade.stations import StationRegistry
+        persona_content = StationRegistry.load_station_rubric("spec-critic", repo_path=norm_repo)
+    except Exception:
+        persona_content = DEFAULT_PERSONA_RUBRIC
 
     try:
         rel_spec_path = resolved_spec.relative_to(norm_repo)

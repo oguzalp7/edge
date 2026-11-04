@@ -6,7 +6,7 @@ and prepares hermetic, deterministic prompt payloads for each station.
 
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Union
 from datetime import datetime, timezone
 
 root_dir = Path(__file__).resolve().parent.parent.parent
@@ -66,27 +66,70 @@ class StationRegistry:
             self.state.updated_at = datetime.now(timezone.utc).isoformat()
 
     # =========================================================================
+    # Station Rubric Loader (2-Layer SSOT)
+    # =========================================================================
+
+    @staticmethod
+    def _read_file_candidates(dir_path: Path, filenames: List[str]) -> Optional[str]:
+        for fn in filenames:
+            p = dir_path / fn
+            if p.is_file():
+                text = p.read_text(encoding="utf-8").strip()
+                if text:
+                    return text
+        return None
+
+    @staticmethod
+    def load_station_rubric(role_slug: Any, repo_path: Optional[Path] = None) -> str:
+        """
+        Loads Layer 1 rubric from agents/<role-slug>.md.
+        If repo_path provided and <repo_path>/.edge/stations/<role-slug>.md exists,
+        appends it under '## REPOSITORY-LOCAL STATION OVERLAY'.
+        """
+        raw_slug = str(role_slug.value if hasattr(role_slug, "value") else role_slug).lower().strip()
+        slug = raw_slug.removeprefix("stationrole.")
+        files = [slug.replace("_", "-") + ".md", slug.replace("-", "_") + ".md"]
+
+        plugin_agents = Path(__file__).resolve().parents[2] / "agents"
+        content = StationRegistry._read_file_candidates(plugin_agents, files)
+        if not content:
+            role_upper = slug.upper()
+            content = (
+                f"# Persona: {role_upper}\n\n"
+                f"You are the {role_upper} station worker in Edge Brigade.\n"
+                f"Adhere to coding_standards.md and your designated operational boundaries."
+            )
+
+        if repo_path:
+            overlay = StationRegistry._read_file_candidates(Path(repo_path) / ".edge" / "stations", files)
+            if overlay:
+                content = f"{content}\n\n## REPOSITORY-LOCAL STATION OVERLAY\n{overlay}"
+
+        return content
+
+    # =========================================================================
     # Station Prompt Generators
     # =========================================================================
 
     @staticmethod
-    def build_surgeon_prompt(ticket: Ticket, base_branch: str) -> str:
+    def build_surgeon_prompt(ticket: Ticket, base_branch: str, repo_path: Optional[Path] = None) -> str:
         """Constructs a hermetic surgery ticket for the SURGEON station."""
         is_ui = getattr(ticket, "track", "core") == "ui"
-        
+        rubric = StationRegistry.load_station_rubric("surgeon", repo_path=repo_path)
+
         if is_ui:
             neg_constraints = "\n".join([f"- {c}" for c in ticket.negative_constraints]) or (
-                "- MigrationGate Invariant: NEVER touch `src/db/schema/*` or `drizzle/` migrations.\n"
+                "- MigrationGate Invariant: NEVER touch database schema or migration files.\n"
                 "- Max CC Non-Regression: Modified/extracted functions must not regress max cyclomatic complexity (healthy ceiling CC <= 10 for clean/new files).\n"
-                "- Pure Tailwind Standard: Do NOT introduce external UI component libraries (no Radix, no shadcn).\n"
-                "- Zero-Wrapper Left Behind: Delete legacy shallow wrappers (e.g. `ModalDialog.tsx`) and migrate callers directly.\n"
+                "- Project Design System Standard: Use centralized UI primitives or vanilla classes per `coding_standards.md`.\n"
+                "- Zero-Wrapper Left Behind: Delete legacy shallow wrappers and migrate callers directly.\n"
                 "- Domain Purity: No hardcoded canonical arrays or raw <th> headers in UI components."
             )
             protocol = f"""1. Git Isolation: Check out isolated branch `{ticket.branch_name}`.
-2. Baseline Verification: Run `{ticket.test_seam_command}` and `npx tsc --noEmit` before changes.
-3. Surgery: Follow `skills/edge-ui-refactor/SKILL.md`. Consolidate repeated raw JSX in `{ticket.target_file}` into centralized primitive in `src/components/ui/`. If an unused legacy wrapper exists (e.g. `src/components/primitives/ModalDialog.tsx`), delete it (`git rm`).
-4. Hermetic Verification: Run `npx tsc --noEmit` and `npm run test:unit`. Both must pass with exit code 0.
-5. Deterministic Visual Parity: If dev server running, compare screenshots via `uv run --with pillow python -m tools.ui_audit.diff_image`.
+2. Baseline Verification: Run `{ticket.test_seam_command}` before changes.
+3. Surgery: Follow `skills/edge-ui-refactor/SKILL.md`. Consolidate repeated raw JSX in `{ticket.target_file}` into centralized primitives per `coding_standards.md`. If an unused legacy shallow wrapper exists, delete it (`git rm`).
+4. Hermetic Verification: Run project tests and compiler. Both must pass with exit code 0.
+5. Deterministic Visual Parity: If dev server running, compare screenshots via visual audit tools.
 6. Gate Verification: Run `python tools/gate.py . --track ui --base {base_branch}`.
 7. Commit: Stage modified files and commit with message:
    `refactor(ui): {ticket.description.lower()} ({ticket.ticket_id})`
@@ -102,7 +145,7 @@ class StationRegistry:
             protocol = f"""1. Git Isolation: Check out isolated branch `{ticket.branch_name}`.
 2. Characterization Test: Run `{ticket.test_seam_command}` to verify test baseline before changes.
 3. Surgery: Extract queries/mutations to domain repository (`src/lib/{ticket.domain}/repository.ts`). Thin `{ticket.target_file}`.
-4. Hermetic Verification: Run `{ticket.test_seam_command}` and `npx tsc --noEmit`. Both must pass with exit code 0.
+4. Hermetic Verification: Run `{ticket.test_seam_command}`. Passes with exit code 0.
 5. Gate Verification: Run `python tools/gate.py . --track core --base {base_branch}`.
 6. Commit: Stage modified files (`git add {ticket.target_file} src/lib/{ticket.domain}/repository.ts`) and commit with message:
    `refactor({ticket.domain}): {ticket.description.lower()} ({ticket.ticket_id})`
@@ -145,20 +188,26 @@ NEGATIVE CONSTRAINTS (STRICT):
 
 EXECUTION PROTOCOL:
 {protocol}
+
+---
+
+{rubric}
 """
 
     @staticmethod
-    def build_spec_writer_prompt(ticket: Ticket, user_story: str) -> str:
+    def build_spec_writer_prompt(ticket: Ticket, user_story: str, repo_path: Optional[Path] = None) -> str:
         """Constructs a prompt for the SPEC_WRITER station."""
+        rubric = StationRegistry.load_station_rubric("spec-writer", repo_path=repo_path)
+        q3 = chr(34) * 3
         return f"""You are the SPEC_WRITER station worker in Edge Brigade.
 
 MISSION:
 Take the raw user story / requirements and author an INVEST-compliant vertical slice specification.
 
 INPUT USER STORY:
-\"\"\"
+{q3}
 {user_story}
-\"\"\"
+{q3}
 
 STATION DIRECTIVES:
 1. Ubiquitous Language: Identify core domain vocabulary and clarify any ambiguous terms.
@@ -169,19 +218,23 @@ STATION DIRECTIVES:
    - If UI was not mentioned by the human, DO NOT guess: flag the gap for user interview (/grill-me).
 5. Visual Approval Gate (lavish-axi Direct Ownership Loop):
    - If UI is touched or visual components are introduced:
-     a. Author an interactive prototype at `.lavish/<feature>.html` using the project's design system or Tailwind/DaisyUI. If the human asks for design alternatives, author multiple variants (e.g. `variant-a.html`, `variant-b.html` or tabbed switcher).
-     b. Run `lavish-axi .lavish/<feature>.html` via WSL bash to spin up the local Express server and generate the active session URL.
+     a. Author an interactive prototype at `.lavish/<feature>.html` using the project design system per `coding_standards.md`. If the human asks for design alternatives, author multiple variants (e.g. `variant-a.html`, `variant-b.html` or tabbed switcher).
+     b. Run `lavish-axi .lavish/<feature>.html` via WSL bash to spin up the local preview server and generate the active session URL.
      c. Extract the session URL from stdout (e.g. `http://127.0.0.1:4387/session/<id>`) and announce it: `🎨 Lavish Oturumu Başlatıldı: <url>`.
      d. Immediately enter the listening loop by running `lavish-axi poll .lavish/<feature>.html`.
      e. Iterative Review Loop: When the poll returns user feedback (`session_ended: false`), update `.lavish/<feature>.html` and/or the spec, call `lavish-axi poll .lavish/<feature>.html --agent-reply "Değişiklikler uygulandı, sayfayı yenileyebilirsiniz."` and continue polling.
      f. Sealing (Send & End): When the user clicks "Send & End" in the browser, the poll returns `session_ended: true`. Incorporate the final approved design into the spec and deliver the approved package to Orchestrator via `send_message`.
      g. Invariant: Never complete station execution or sign off on a spec until `session_ended: true` is confirmed by the human.
 
+---
+
+{rubric}
 """
 
     @staticmethod
-    def build_researcher_prompt(ticket: Ticket, research_topic: str) -> str:
+    def build_researcher_prompt(ticket: Ticket, research_topic: str, repo_path: Optional[Path] = None) -> str:
         """Constructs a prompt for the RESEARCHER station."""
+        rubric = StationRegistry.load_station_rubric("researcher", repo_path=repo_path)
         return f"""You are the RESEARCHER station worker in Edge Brigade.
 
 MISSION:
@@ -195,11 +248,16 @@ DIRECTIVES:
 2. Root Cause Analysis (RCA): Pinpoint exact file locations, function symbols, and edge-case triggers.
 3. External Grounding: If 3rd-party APIs or libraries are involved, verify against authoritative documentation.
 4. Output: Provide an evidence-backed summary with exact file paths, line numbers, and proposed seams. Do NOT mutate production code.
+
+---
+
+{rubric}
 """
 
     @staticmethod
-    def build_seam_architect_prompt(ticket: Ticket, spec_summary: str) -> str:
+    def build_seam_architect_prompt(ticket: Ticket, spec_summary: str, repo_path: Optional[Path] = None) -> str:
         """Constructs a prompt for the SEAM_ARCHITECT station."""
+        rubric = StationRegistry.load_station_rubric("seam-architect", repo_path=repo_path)
         return f"""You are the SEAM_ARCHITECT station worker in Edge Brigade.
 
 MISSION:
@@ -210,17 +268,27 @@ SPECIFICATION:
 
 DIRECTIVES:
 1. Identify Seams: Determine clean sensing/enabling seams (interfaces, repository abstractions, DTO contracts) in `{ticket.target_file}`.
-2. Declare Contracts: Define explicit TypeScript interfaces and type signatures.
+2. Declare Contracts: Define explicit interfaces and type signatures.
 3. Write RED Unit/Contract Tests (TDD Anchor):
    - Author hermetic tests in `tests/` covering the acceptance criteria.
    - Run the test suite: verify that the newly written tests FAIL cleanly (RED baseline).
    - If the tests pass before any implementation code is written, the test is invalid!
 4. Hand-off: Commit the red tests and interface declarations. The Coder worker will implement the code to turn them green.
+
+---
+
+{rubric}
 """
 
     @staticmethod
-    def build_coder_prompt(ticket: Ticket, red_test_cmd: str) -> str:
-        """Constructs a prompt for the CODER station."""
+    def build_seam_prompt(ticket: Ticket, spec_summary: str, repo_path: Optional[Path] = None) -> str:
+        """Alias for build_seam_architect_prompt."""
+        return StationRegistry.build_seam_architect_prompt(ticket, spec_summary, repo_path=repo_path)
+
+    @staticmethod
+    def build_coder_prompt(ticket: Ticket, red_test_cmd: str, repo_path: Optional[Path] = None) -> str:
+        """Constructs a prompt for the CODER station to make the red test green."""
+        rubric = StationRegistry.load_station_rubric("coder", repo_path=repo_path)
         wt_block = ""
         if ticket.worktree_path:
             wt_block = f"""
@@ -244,14 +312,19 @@ CONSTRAINTS (STRICT):
 1. Zero-Touch Primary Invariant: If a worktree is assigned, edit files strictly inside `{ticket.worktree_path}`.
 2. Test Immutability: You MUST NEVER modify, weaken, or delete the test files written by the Seam Architect.
 3. Clean Implementation: Write production code in `src/` conforming strictly to the declared seam interfaces.
-4. Hermetic Verification: Run `{red_test_cmd}` and `npx tsc --noEmit`. Both must pass with EXIT CODE 0.
+4. Hermetic Verification: Run `{red_test_cmd}`. Passes with EXIT CODE 0.
 5. Zero Leakage: Follow `coding_standards.md` (no raw leaks, explicit error handling, transaction safety).
 6. Output: Report the test passing output and git diff summary.
+
+---
+
+{rubric}
 """
 
     @staticmethod
-    def build_examiner_prompt(ticket: Ticket, base_branch: str) -> str:
+    def build_examiner_prompt(ticket: Ticket, base_branch: str, repo_path: Optional[Path] = None) -> str:
         """Constructs a unified dual-axis review ticket for the EXAMINER station."""
+        rubric = StationRegistry.load_station_rubric("examiner", repo_path=repo_path)
         return f"""You are the EXAMINER station worker in Edge Brigade.
 
 DIFF INSPECTION:
@@ -275,7 +348,7 @@ Axis 1 (Standards & Fowler Smells):
 
 Axis 2 (Architectural & Spec Boundaries):
 1. MigrationGate Invariant: Did the diff touch any file in `src/db/schema/*` or `drizzle/*`? (Immediate failure).
-2. Layer Leakage Gate: Did any direct `db.select`, `db.insert`, `db.update`, `db.delete`, `db.transaction`, or `db.query` increase in action controllers (`after_leaks <= before_leaks`, 0 in new actions)?
+2. Layer Leakage Gate: Did any direct queries increase in action controllers (`after_leaks <= before_leaks`, 0 in new actions)?
 3. Max CC Non-Regression: Did modified/new files stay within cyclomatic complexity bounds (no regression above baseline hotspot CC; CC <= 10 ceiling for clean/new files)?
 4. Zero-Wrapper: Are there useless pass-through services?
 5. Scope Creep: Did the diff touch anything outside the ticket domain?
@@ -283,11 +356,16 @@ Axis 2 (Architectural & Spec Boundaries):
 REPORT DISCIPLINE:
 Keep findings concise (under 350 words). Categorize findings by severity (CRITICAL, WARNING, ADVISORY).
 If clean, state: 'EXAMINER REVIEW: PASS'.
+
+---
+
+{rubric}
 """
 
     @staticmethod
-    def build_polish_prompt(ticket: Ticket, findings: List[ReviewFinding]) -> str:
+    def build_polish_prompt(ticket: Ticket, findings: List[ReviewFinding], repo_path: Optional[Path] = None) -> str:
         """Constructs remediation instructions for the SURGEON station."""
+        rubric = StationRegistry.load_station_rubric("surgeon", repo_path=repo_path)
         findings_text = "\n".join([
             f"- [{f.axis.upper()}] ({f.severity}) {f.file_path}:{f.line_number or 'N/A'}: {f.description}\n  Suggested Fix: {f.suggested_fix}"
             for f in findings
@@ -304,15 +382,20 @@ FINDINGS TO FIX:
 
 INSTRUCTIONS:
 1. Address each finding strictly without violating MigrationGate, Max CC Non-Regression, or Layer Leakage Gate.
-2. Run `{ticket.test_seam_command}` and `npx tsc --noEmit` to verify hermetic cleanliness.
+2. Run `{ticket.test_seam_command}` to verify hermetic cleanliness.
 3. Commit the changes:
    `git commit -am "refactor({ticket.domain}): polish review findings ({ticket.ticket_id})"`
 4. Report the resulting git diff and test verification output.
+
+---
+
+{rubric}
 """
 
     @staticmethod
-    def build_coder_polish_prompt(ticket: Ticket, findings: List[ReviewFinding]) -> str:
+    def build_coder_polish_prompt(ticket: Ticket, findings: List[ReviewFinding], repo_path: Optional[Path] = None) -> str:
         """Constructs polish remediation instructions for the CODER station on feature tracks."""
+        rubric = StationRegistry.load_station_rubric("coder", repo_path=repo_path)
         findings_text = "\n".join([
             f"- [{f.axis.upper()}] ({f.severity}) {f.file_path}:{f.line_number or 'N/A'}: {f.description}\n  Suggested Fix: {f.suggested_fix}"
             for f in findings
@@ -345,15 +428,27 @@ CONSTRAINTS & INSTRUCTIONS (STRICT):
 1. Zero-Touch Primary Invariant: If a worktree is assigned, edit files strictly inside `{ticket.worktree_path}`.
 2. Test Immutability: You MUST NEVER modify, weaken, or delete tests authored by the Seam Architect (`tests/**` or `*.test.*`). Address review findings strictly in production code!
 3. Clean Remediation: Implement each fix without regressing existing functionality or introducing code smells.
-4. Hermetic Verification: Run `{ticket.test_seam_command}` and `npx tsc --noEmit`. Both must pass with EXIT CODE 0.
+4. Hermetic Verification: Run `{ticket.test_seam_command}`. Passes with EXIT CODE 0.
 5. Commit: Stage modified production files and commit:
    `git commit -am "fix({ticket.domain}): polish review findings ({ticket.ticket_id})"`
 6. Output: Report the test passing output and git diff summary.
+
+---
+
+{rubric}
 """
 
     @staticmethod
-    def build_qa_prompt(user_scenario_en: str, target_route: str = "http://localhost:3000", assertions: List[str] = None, scenario_slug: str = "qa_scenario") -> str:
+    def build_qa_prompt(
+        user_scenario_en: str,
+        target_route: str = "http://localhost:3000",
+        assertions: Optional[List[str]] = None,
+        scenario_slug: str = "qa_scenario",
+        repo_path: Optional[Path] = None,
+    ) -> str:
         """Constructs an E2E Browser & Visual QA ticket for the QA_ENGINEER (Sommelier) station."""
+        rubric = StationRegistry.load_station_rubric("qa-engineer", repo_path=repo_path)
+        q3 = chr(34) * 3
         assertions_str = "\n".join([f"- {a}" for a in (assertions or [])]) or (
             "- Target flow completes with expected UI transitions.\n"
             "- Zero unhandled exceptions or console errors in devtools.\n"
@@ -372,9 +467,9 @@ SCENARIO SLUG:
 {scenario_slug}
 
 TRANSLATED USER SCENARIO (UBIQUITOUS DOMAIN SPEC):
-\"\"\"
+{q3}
 {user_scenario_en}
-\"\"\"
+{q3}
 
 VERIFICATION ASSERTIONS (CRITERIA):
 {assertions_str}
@@ -402,6 +497,8 @@ EXECUTION PROTOCOL & TOOL HIERARCHY:
    - If a blocking business logic bug is detected: DO NOT patch it. Document exact reproduction steps, network payload, and console log.
 5. Reporting:
    - Deliver a crisp QA report: Status (PASS / FAIL / DEFECT_DETECTED), execution steps, replay script location, parked UX items, and screenshots.
+
+---
+
+{rubric}
 """
-
-

@@ -155,20 +155,20 @@ def cmd_ticket(args: argparse.Namespace) -> int:
         if alert_block:
             print(alert_block)
         if curr == CycleState.RED_TEST:
-            print(StationRegistry.build_seam_architect_prompt(ticket, ticket.description or ticket.suggested_fix))
+            print(StationRegistry.build_seam_architect_prompt(ticket, ticket.description or ticket.suggested_fix, repo_path=repo_path))
         elif curr == CycleState.SURGERY or curr == CycleState.TRIAGE:
             if getattr(ticket, "track", "core") == "feature":
-                print(StationRegistry.build_coder_prompt(ticket, ticket.test_seam_command))
+                print(StationRegistry.build_coder_prompt(ticket, ticket.test_seam_command, repo_path=repo_path))
             else:
-                print(StationRegistry.build_surgeon_prompt(ticket, fsm.state.base_branch))
+                print(StationRegistry.build_surgeon_prompt(ticket, fsm.state.base_branch, repo_path=repo_path))
         elif curr == CycleState.REVIEW:
             print("=== EXAMINER REVIEW PROMPT ===")
-            print(StationRegistry.build_examiner_prompt(ticket, fsm.state.base_branch))
+            print(StationRegistry.build_examiner_prompt(ticket, fsm.state.base_branch, repo_path=repo_path))
         elif curr == CycleState.POLISH:
             if getattr(ticket, "track", "core") == "feature":
-                print(StationRegistry.build_coder_polish_prompt(ticket, fsm.state.review_findings))
+                print(StationRegistry.build_coder_polish_prompt(ticket, fsm.state.review_findings, repo_path=repo_path))
             else:
-                print(StationRegistry.build_polish_prompt(ticket, fsm.state.review_findings))
+                print(StationRegistry.build_polish_prompt(ticket, fsm.state.review_findings, repo_path=repo_path))
         elif curr == CycleState.STAGING:
             print(f"STAGING STATE: Run deterministic CLI delivery command:\nbrigade finish-slice {repo_path}")
         else:
@@ -183,6 +183,46 @@ def cmd_ticket(args: argparse.Namespace) -> int:
 
     return 0
 
+
+
+def _dispatch_prompt(slug: str, ticket: Ticket, repo_path: Path, base_branch: str) -> str:
+    dispatch = {
+        "coder": lambda: StationRegistry.build_coder_prompt(ticket, ticket.test_seam_command or "pytest", repo_path=repo_path),
+        "surgeon": lambda: StationRegistry.build_surgeon_prompt(ticket, base_branch, repo_path=repo_path),
+        "examiner": lambda: StationRegistry.build_examiner_prompt(ticket, base_branch, repo_path=repo_path),
+        "seam_architect": lambda: StationRegistry.build_seam_architect_prompt(ticket, ticket.description or ticket.suggested_fix, repo_path=repo_path),
+        "seam": lambda: StationRegistry.build_seam_architect_prompt(ticket, ticket.description or ticket.suggested_fix, repo_path=repo_path),
+        "researcher": lambda: StationRegistry.build_researcher_prompt(ticket, ticket.description or "Research topic", repo_path=repo_path),
+        "spec_writer": lambda: StationRegistry.build_spec_writer_prompt(ticket, ticket.description or "User story", repo_path=repo_path),
+        "qa_engineer": lambda: StationRegistry.build_qa_prompt(user_scenario_en=ticket.description or ticket.ticket_id, target_route="http://localhost:3000", repo_path=repo_path),
+        "spec_critic": lambda: StationRegistry.load_station_rubric("spec-critic", repo_path=repo_path),
+        "orchestrator": lambda: StationRegistry.load_station_rubric("orchestrator", repo_path=repo_path),
+    }
+    handler = dispatch.get(slug)
+    if handler:
+        return handler()
+    return StationRegistry.load_station_rubric(slug, repo_path=repo_path)
+
+
+def cmd_prompt(args: argparse.Namespace) -> int:
+    repo_path = normalize_target_path(args.repo)
+    fsm = BrigadeFSM(repo_path)
+    slug = args.role.lower().strip().replace("-", "_")
+
+    ticket = fsm.state.active_ticket
+    if getattr(args, "ticket", None) and ticket and ticket.ticket_id != args.ticket:
+        ticket = None
+
+    if not ticket:
+        print(StationRegistry.load_station_rubric(slug, repo_path=repo_path))
+        return 0
+
+    alert_block = FlightRecorder(repo_path, ticket.ticket_id).get_prompt_alert_block()
+    if alert_block:
+        print(alert_block)
+
+    print(_dispatch_prompt(slug, ticket, repo_path, fsm.state.base_branch))
+    return 0
 
 
 def cmd_add_finding(args: argparse.Namespace) -> int:
@@ -938,6 +978,12 @@ def main() -> int:
     p_start.add_argument("--expected-files", help="Comma-separated expected files to create or modify")
     p_start.add_argument("--spec", help="Path to specification document")
 
+    # prompt
+    p_prompt = subparsers.add_parser("prompt", help="Compose and print 2-layer prompt for a station")
+    p_prompt.add_argument("repo", help="Path to target repository")
+    p_prompt.add_argument("--role", required=True, help="Station role slug (e.g. coder, surgeon, examiner, qa_engineer, orchestrator)")
+    p_prompt.add_argument("--ticket", help="Optional ticket ID to bind")
+
     # critique-spec
     p_crit = subparsers.add_parser("critique-spec", help="Run advisory cross-provider Goldfish Spec Critic (Opus 5.5 -> Flash 3.8 fallback)")
     p_crit.add_argument("repo", help="Path to target repository")
@@ -1019,6 +1065,7 @@ def main() -> int:
         "qa-inspect": cmd_qa_inspect,
         "prototype": cmd_prototype,
         "critique-spec": cmd_critique_spec,
+        "prompt": cmd_prompt,
     }
 
     func = commands.get(args.command)

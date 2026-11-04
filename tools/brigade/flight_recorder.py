@@ -26,7 +26,12 @@ class FlightRecorder:
         if self.json_file.exists():
             try:
                 with open(self.json_file, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    data = json.load(f)
+                    if "guard_failures" not in data:
+                        data["guard_failures"] = []
+                    if "review_findings" not in data:
+                        data["review_findings"] = []
+                    return data
             except Exception:
                 pass
 
@@ -42,6 +47,8 @@ class FlightRecorder:
             "dead_ends": [],      # List of {id, title, reason, prohibited_rule, failure_output}
             "escalations": [],    # List of {timestamp, reason, decision, resolved_at}
             "attempts": [],       # List of {attempt_num, timestamp, exit_code, summary, diff_stat}
+            "guard_failures": [], # List of {state, timestamp, message, details}
+            "review_findings": [],# List of serialized ReviewFinding dicts
         }
 
     def save(self) -> None:
@@ -166,6 +173,59 @@ class FlightRecorder:
         self.data["attempts"].append(entry)
         self.save()
 
+    def record_guard_failure(
+        self,
+        state: str,
+        message: str,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Atomically appends a failed guard execution record."""
+        entry = {
+            "state": state,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "message": message,
+            "details": details or {},
+        }
+        self.data.setdefault("guard_failures", []).append(entry)
+        self.save()
+        return entry
+
+    def seal_review_findings(
+        self,
+        findings: List[Any],
+    ) -> None:
+        """Atomically seals and preserves examiner review findings, deduplicating records."""
+        existing = self.data.setdefault("review_findings", [])
+        seen_keys = {
+            (
+                f.get("axis"),
+                f.get("file_path"),
+                f.get("line_number"),
+                f.get("description"),
+            )
+            for f in existing
+        }
+
+        for finding in findings:
+            if hasattr(finding, "to_dict"):
+                f_dict = finding.to_dict()
+            elif isinstance(finding, dict):
+                f_dict = dict(finding)
+            else:
+                f_dict = {"description": str(finding)}
+
+            key = (
+                f_dict.get("axis"),
+                f_dict.get("file_path"),
+                f_dict.get("line_number"),
+                f_dict.get("description"),
+            )
+            if key not in seen_keys:
+                seen_keys.add(key)
+                existing.append(f_dict)
+
+        self.save()
+
     def mark_status(self, status: str) -> None:
         """Sets overall ticket lifecycle status (ACTIVE, RESOLVED, TERMINATED, STAGNATED)."""
         self.data["status"] = status
@@ -203,6 +263,34 @@ class FlightRecorder:
 
         lines.append("")
         return "\n".join(lines)
+
+    def _render_guard_failures(self, md: List[str]) -> None:
+        guard_failures = self.data.get("guard_failures", [])
+        if not guard_failures:
+            return
+        md.extend(["---", "", "## 🛡️ Guard Failures & Verification Blocks"])
+        for gf in guard_failures:
+            md.append(f"* **[{gf.get('state')}]** (`{gf.get('timestamp')}`): {gf.get('message')}")
+            if gf.get("details"):
+                md.append(f"  * Details: `{gf.get('details')}`")
+        md.append("")
+
+    def _render_review_findings(self, md: List[str]) -> None:
+        review_findings = self.data.get("review_findings", [])
+        if not review_findings:
+            return
+        md.extend(["---", "", "## 🧐 Examiner Review Findings Ledger"])
+        for rf in review_findings:
+            sev = rf.get("severity", "INFO")
+            axis = rf.get("axis", "standards")
+            fpath = rf.get("file_path", "")
+            line = f":{rf.get('line_number')}" if rf.get("line_number") is not None else ""
+            md.append(f"* **[{sev}] [{axis.upper()}]** `{fpath}{line}`: {rf.get('description')}")
+            if rf.get("rule"):
+                md.append(f"  * Rule: `{rf.get('rule')}`")
+            if rf.get("suggested_fix"):
+                md.append(f"  * Suggested Fix: {rf.get('suggested_fix')}")
+        md.append("")
 
     def _render_markdown(self) -> None:
         """Generates human-readable Markdown post-mortem/living report."""
@@ -265,6 +353,9 @@ class FlightRecorder:
                 md.append(f"  * {att['summary']}")
                 if att.get("diff_stat"):
                     md.append(f"  * Diff: `{att['diff_stat']}`")
+
+        self._render_guard_failures(md)
+        self._render_review_findings(md)
 
         tmp_md = self.md_file.with_suffix(".tmp")
         with open(tmp_md, "w", encoding="utf-8") as f:
