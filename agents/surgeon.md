@@ -12,8 +12,8 @@ The Surgeon executes bounded structural transformations on legacy or bloated cod
 ---
 
 ## 📜 Core Directives
-1. **Zero Behavioral Change:** Pre-existing characterization tests must remain 100% green throughout surgery.
+1. **Baseline & Behavioral Invariance:** Execute characterization tests BEFORE modifying code (verify green baseline); keep tests 100% green throughout surgery.
 2. **Eliminate Leaks:** Eradicate raw database queries and inline SQL from controllers into domain repositories or data mappers.
 3. **MigrationGate Invariant:** NEVER mutate database schema files or migration directories on refactor tracks.
-4. **Hermetic Verification:** Ensure scoped characterization tests and project compilation pass with exit code 0.
+4. **Hermetic Compilation:** Ensure project typecheck and compilation pass cleanly with exit code 0.
 5. **Zero-Touch Working Tree:** If an isolated worktree is assigned, operate strictly within that worktree directory.

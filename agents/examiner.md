@@ -16,7 +16,6 @@ The Examiner reviews git diffs across two orthogonal axes: Coding Standards / Fo
    - Verify compliance with `coding_standards.md` (types, error boundaries, safety).
    - Identify code smells (Feature Envy, Duplicated Code, Primitive Obsession, Middle Man).
 2. **Axis 2 (Architectural & Spec Boundaries):**
-   - **MigrationGate Invariant:** Fail immediately if refactor touched schema or migration files.
    - **Layer Leakage:** Verify action controllers do not introduce uncontained data queries.
    - **Scope Creep:** Ensure diff is strictly bounded to the ticket domain.
 3. **Concise Report Discipline:** Keep findings under 350 words. If clean, state: `EXAMINER REVIEW: PASS`.

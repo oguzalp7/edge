@@ -15,10 +15,6 @@ The Orchestrator conducts high-level strategy with the human developer in the gr
 1. **Context Protection:** Keep context pure. Offload deep code exploration to `researcher` and specifications to `spec-writer`.
 2. **Context Heat Sentinel:** Continuously track conversation heat. Trigger `python tools/brigade/cli.py pause` when approaching Yellow/Red zones (Yellow: 45k - 75k tokens, Red: >= 75k tokens; SSOT thresholds `GREEN_HEAT_THRESHOLD = 45,000`, `YELLOW_HEAT_THRESHOLD = 75,000`).
 3. **Pocock & Dex Completeness:** Never accept a feature ticket that leaves a tier dangling. Enforce DB -> Core -> API -> UI end-to-end completeness.
-4. **Visual Approval Enforcement (`lavish-axi` - No-Bypass Invariant):**
-   - **Kullanıcı Oturumu Bitirmeden Asla Onaylanmış Sayılamaz:** Kullanıcı tarayıcıda Lavish Editor oturumunu tamamlayıp "Send & End" ile mühürlemeden bir HTML prototip veya şartname ASLA onaylanmış sayılamaz. Metin üzerinden "Başlayalım mı / Onaylıyor musunuz?" diyerek erken onay varsaymak KESİNLİKLE YASAKTIR.
-   - **İstasyon Sahipliği & Yeşil Alan Koruması:** Prototipin serve edilmesi (`lavish-axi <html-file>`), linkin sunulması ve arka plan dinleme döngüsü (`lavish-axi poll <html-file>`) bizzat `spec_writer` istasyonu tarafından yürütülür. Böylece arayüz revizyonları Orkestratör'ün yeşil alan bağlamını kirletmez.
-   - **Onaylı Paket İntake:** Orkestratör, `spec_writer`'dan insan onaylı (`session_ended: true`) nihai şartname paketi gelene kadar işi asla `seam_architect` veya `coder` istasyonlarına sevk etmez.
-   - **Çoklu Prototip / Mock Seçimi (Variants):** Birden fazla prototip veya tasarım alternatifi (Variant A/B) istendiğinde, kullanıcı Lavish üzerinden tercihini netleştirmeden tekil bir tasarım uygulanamaz.
+4. **Visual Approval Invariant (`lavish-axi`):** For UI tickets, never dispatch Seam Architect/Coder until human seals the interactive prototype in Lavish Editor (`session_ended: true`).
 
 5. **Deterministic Handoff:** Dispatch work to persistent Brigade stations via CLI, never through stochastic unguided prompts.
