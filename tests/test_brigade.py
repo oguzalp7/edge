@@ -2274,6 +2274,579 @@ class TestBrigadeSlice3AutonomousKitchenRelay(unittest.TestCase):
         self.assertIn("[READY_FOR_STAGING]", qa_text)
 
 
+
+
+class TestDynamicSliceTargetGuardAndPorcelainParser(unittest.TestCase):
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.repo_path = Path(self.test_dir)
+        (self.repo_path / ".git").mkdir(parents=True, exist_ok=True)
+        self.fsm = BrigadeFSM(self.repo_path)
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def test_porcelain_path_parser_preserves_leading_status_space(self):
+        """Validates that unstaged files with leading space (' M file') preserve the first path character."""
+        from tools.brigade import fsm as fsm_mod
+
+        parse_fn = getattr(fsm_mod, "_parse_porcelain_paths", None)
+        self.assertIsNotNone(parse_fn, "_parse_porcelain_paths helper must be defined")
+
+        porcelain_out = " M src/components/button.tsx\n"
+        paths = parse_fn(porcelain_out)
+        self.assertEqual(paths, ["src/components/button.tsx"])
+        self.assertNotIn("rc/components/button.tsx", paths)
+
+    def test_porcelain_path_parser_handles_renames_and_quotes(self):
+        """Validates parsing of untracked, added, renamed, and quoted files from porcelain output."""
+        from tools.brigade import fsm as fsm_mod
+
+        parse_fn = getattr(fsm_mod, "_parse_porcelain_paths", None)
+        self.assertIsNotNone(parse_fn, "_parse_porcelain_paths helper must be defined")
+
+        porcelain_out = (
+            "?? new_file.py\n"
+            "A  src/index.ts\n"
+            "R  old_file.ts -> new_file.ts\n"
+            'RM "old path/with spaces.ts" -> "new path/with spaces.ts"\n'
+            " D deleted.py\n"
+        )
+        paths = parse_fn(porcelain_out)
+        self.assertIn("new_file.py", paths)
+        self.assertIn("src/index.ts", paths)
+        self.assertIn("new_file.ts", paths)
+        self.assertIn("new path/with spaces.ts", paths)
+        self.assertIn("deleted.py", paths)
+        self.assertNotIn("old_file.ts", paths)
+        self.assertNotIn("old path/with spaces.ts", paths)
+
+    def test_porcelain_leading_space_integration_in_guard_surgery_to_verify(self):
+        """Validates that unstaged modification with leading space (' M src/foo.ts') passes surgery guard."""
+        ticket = Ticket(
+            ticket_id="TICK-PORC-1",
+            track="ui",
+            domain="ui",
+            rule_id="RULE-RAW-JSX",
+            severity="NORMAL",
+            target_file="src/components/button.tsx",
+            line_number=1,
+            fingerprint="fp-porc-1",
+            description="Porcelain leading space check",
+            suggested_fix="Fix",
+            branch_name="refactor/ui-btn",
+            test_seam_command="vitest",
+        )
+        self.fsm.state.active_ticket = ticket
+        self.fsm.state.current_state = CycleState.SURGERY
+
+        with patch.object(self.fsm, "_run_cmd") as mock_cmd:
+            def side_effect(cmd, cwd=None):
+                if "status" in cmd:
+                    return (0, " M src/components/button.tsx\n", "")
+                if "--numstat" in cmd:
+                    return (0, "5\t2\tsrc/components/button.tsx\n", "")
+                return (0, "", "")
+
+            mock_cmd.side_effect = side_effect
+            passed, msg, details = self.fsm.guard_surgery_to_verify()
+            self.assertTrue(passed, f"Unstaged file with leading space must pass surgery guard: {msg}")
+
+    def test_is_non_prod_file_helper(self):
+        """Validates non-production exclusion filter for tests, ledgers, docs, and metadata."""
+        from tools.brigade import fsm as fsm_mod
+
+        is_non_prod = getattr(fsm_mod, "_is_non_prod_file", None)
+        self.assertIsNotNone(is_non_prod, "_is_non_prod_file helper must be defined")
+
+        # Non-prod paths
+        self.assertTrue(is_non_prod("tests/test_fsm.py"))
+        self.assertTrue(is_non_prod("src/components/button.test.tsx"))
+        self.assertTrue(is_non_prod("src/components/button.spec.tsx"))
+        self.assertTrue(is_non_prod("__tests__/auth.ts"))
+        self.assertTrue(is_non_prod("test_helper.py"))
+        self.assertTrue(is_non_prod("helper_test.py"))
+        self.assertTrue(is_non_prod(".edge/specs/feature.md"))
+        self.assertTrue(is_non_prod("docs/architecture.md"))
+        self.assertTrue(is_non_prod("frontier.md"))
+        self.assertTrue(is_non_prod(".frontier.toml"))
+        self.assertTrue(is_non_prod("backlog.md"))
+        self.assertTrue(is_non_prod("done-archive.md"))
+        self.assertTrue(is_non_prod("package.json"))
+        self.assertTrue(is_non_prod("pyproject.toml"))
+
+        # Prod paths
+        self.assertFalse(is_non_prod("src/actions/bookings.ts"))
+        self.assertFalse(is_non_prod("tools/brigade/fsm.py"))
+        self.assertFalse(is_non_prod("lib/auth/session.ts"))
+
+    def test_start_slice_zero_phantom_target_fabrication(self):
+        """Validates that omitting target_file leaves ticket.target_file as '' instead of synthesizing 'src/<name>'."""
+        ok, ticket, msg = self.fsm.start_slice(
+            name="user-auth",
+            track="feature",
+            target_file="",
+            auto_lease_worktree=False,
+        )
+        self.assertTrue(ok)
+        self.assertIsNotNone(ticket)
+        self.assertEqual(ticket.target_file, "")
+        self.assertNotEqual(ticket.target_file, "src/user-auth")
+
+    def test_start_slice_discovers_spec_yaml_frontmatter(self):
+        """Validates auto-discovery of expected_files from .edge/specs/<name>.md YAML frontmatter."""
+        spec_dir = self.repo_path / ".edge" / "specs"
+        spec_dir.mkdir(parents=True, exist_ok=True)
+        spec_file = spec_dir / "user-auth.md"
+        spec_file.write_text(
+            "---\n"
+            "feature: user-auth\n"
+            "expected_files:\n"
+            "  - src/lib/auth/token.ts\n"
+            "  - src/lib/auth/session.ts\n"
+            "---\n"
+            "# Spec Prose\n"
+            "Prose mentions nothing relevant here.\n",
+            encoding="utf-8",
+        )
+
+        ok, ticket, msg = self.fsm.start_slice(
+            name="user-auth",
+            track="feature",
+            target_file="",
+            auto_lease_worktree=False,
+        )
+        self.assertTrue(ok)
+        self.assertEqual(
+            ticket.expected_files,
+            ["src/lib/auth/token.ts", "src/lib/auth/session.ts"],
+        )
+
+    def test_start_slice_negative_invariant_no_prose_mining(self):
+        """Validates strict negative invariant: file paths in spec markdown prose are NEVER mined."""
+        spec_dir = self.repo_path / ".edge" / "specs"
+        spec_dir.mkdir(parents=True, exist_ok=True)
+        spec_file = spec_dir / "payment-flow.md"
+        spec_file.write_text(
+            "---\n"
+            "feature: payment-flow\n"
+            "expected_files:\n"
+            "  - src/actions/checkout.ts\n"
+            "---\n"
+            "# Payment Flow Architecture\n"
+            "Architecture inspects `src/db/schema.ts`, `rules/AGENTS.md`, and `tests/test_checkout.py`.\n"
+            "Never modify `tools/gate.py`.\n",
+            encoding="utf-8",
+        )
+
+        ok, ticket, msg = self.fsm.start_slice(
+            name="payment-flow",
+            track="feature",
+            target_file="",
+            auto_lease_worktree=False,
+        )
+        self.assertTrue(ok)
+        self.assertEqual(ticket.expected_files, ["src/actions/checkout.ts"])
+        self.assertNotIn("src/db/schema.ts", ticket.expected_files)
+        self.assertNotIn("rules/AGENTS.md", ticket.expected_files)
+        self.assertNotIn("tests/test_checkout.py", ticket.expected_files)
+        self.assertNotIn("tools/gate.py", ticket.expected_files)
+
+    def test_extract_spec_expected_files_stdlib_fallback_without_pyyaml(self):
+        """Validates stdlib fallback in _extract_spec_expected_files when PyYAML is not installed."""
+        from tools.brigade import fsm as fsm_mod
+
+        extract_fn = getattr(fsm_mod, "_extract_spec_expected_files", None)
+        self.assertIsNotNone(extract_fn, "_extract_spec_expected_files helper must be defined")
+
+        spec_dir = self.repo_path / ".edge" / "specs"
+        spec_dir.mkdir(parents=True, exist_ok=True)
+        spec_file = spec_dir / "user-auth.md"
+        spec_file.write_text(
+            "---\n"
+            "feature: user-auth\n"
+            "expected_files:\n"
+            "  - src/lib/auth/token.ts\n"
+            "  - src/lib/auth/session.ts\n"
+            "---\n"
+            "# Spec Body\n",
+            encoding="utf-8",
+        )
+
+        with patch.dict("sys.modules", {"yaml": None}):
+            extracted = extract_fn(self.repo_path, clean_name="user-auth")
+            self.assertEqual(extracted, ["src/lib/auth/token.ts", "src/lib/auth/session.ts"])
+
+    def test_surgery_guard_mode_a_100_percent_pass(self):
+        """Validates Mode A passes across core, feature, and ui tracks when 100% of expected_files are modified."""
+        for track in ["feature", "core", "ui"]:
+            with self.subTest(track=track):
+                ticket = Ticket(
+                    ticket_id=f"TICK-MODE-A-{track.upper()}",
+                    track=track,
+                    domain="auth",
+                    rule_id="RULE-AUTH",
+                    severity="NORMAL",
+                    target_file="",
+                    line_number=1,
+                    fingerprint=f"fp-mode-a-{track}",
+                    description="Mode A test",
+                    suggested_fix="Fix",
+                    branch_name=f"feat/auth-{track}",
+                    test_seam_command="vitest",
+                    expected_files=["src/lib/token.ts", "src/lib/session.ts"],
+                )
+                self.fsm.state.active_ticket = ticket
+                self.fsm.state.current_state = CycleState.SURGERY
+
+                with patch.object(self.fsm, "_run_cmd") as mock_cmd:
+                    def side_effect(cmd, cwd=None):
+                        if "--name-only" in cmd:
+                            return (0, "src/lib/token.ts\nsrc/lib/session.ts\n", "")
+                        if "--numstat" in cmd:
+                            return (0, "10\t2\tsrc/lib/token.ts\n15\t5\tsrc/lib/session.ts\n", "")
+                        return (0, "", "")
+
+                    mock_cmd.side_effect = side_effect
+                    passed, msg, details = self.fsm.guard_surgery_to_verify()
+                    self.assertTrue(passed, f"Mode A should pass on {track}: {msg}")
+                    self.assertIn("Surgery invariants passed", msg)
+                    self.assertEqual(details["total_net"], 18)
+
+    def test_surgery_guard_mode_a_missing_file_fail(self):
+        """Validates Mode A failure diagnostic when an expected file is missing."""
+        ticket = Ticket(
+            ticket_id="TICK-MODE-A-FAIL",
+            track="feature",
+            domain="auth",
+            rule_id="RULE-AUTH",
+            severity="NORMAL",
+            target_file="",
+            line_number=1,
+            fingerprint="fp-mode-a-fail",
+            description="Mode A missing file",
+            suggested_fix="Fix",
+            branch_name="feat/auth",
+            test_seam_command="vitest",
+            expected_files=["src/lib/token.ts", "src/lib/session.ts"],
+        )
+        self.fsm.state.active_ticket = ticket
+        self.fsm.state.current_state = CycleState.SURGERY
+
+        with patch.object(self.fsm, "_run_cmd") as mock_cmd:
+            def side_effect(cmd, cwd=None):
+                if "--name-only" in cmd:
+                    return (0, "src/lib/token.ts\n", "")
+                if "--numstat" in cmd:
+                    return (0, "10\t2\tsrc/lib/token.ts\n", "")
+                return (0, "", "")
+
+            mock_cmd.side_effect = side_effect
+            passed, msg, details = self.fsm.guard_surgery_to_verify()
+            self.assertFalse(passed)
+            self.assertIn("Incomplete Feature Implementation", msg)
+            self.assertIn("src/lib/session.ts", details["missing_files"])
+
+    def test_surgery_guard_mode_a_pure_glob_zero_prod_files_fail(self):
+        """Validates Mode A pure glob with 0 modified production files fails cleanly."""
+        ticket = Ticket(
+            ticket_id="TICK-MODE-A-GLOB-ZERO",
+            track="feature",
+            domain="staff",
+            rule_id="RULE-STAFF",
+            severity="NORMAL",
+            target_file="",
+            line_number=1,
+            fingerprint="fp-mode-a-glob-zero",
+            description="Mode A pure glob check",
+            suggested_fix="Fix",
+            branch_name="feat/staff",
+            test_seam_command="vitest",
+            expected_files=["src/staff/**"],
+        )
+        self.fsm.state.active_ticket = ticket
+        self.fsm.state.current_state = CycleState.SURGERY
+
+        with patch.object(self.fsm, "_run_cmd", return_value=(0, "", "")):
+            passed, msg, details = self.fsm.guard_surgery_to_verify()
+            self.assertFalse(passed)
+            self.assertTrue(
+                "Incomplete Feature Implementation" in msg or "No production files" in msg,
+                f"Unexpected failure message: {msg}",
+            )
+
+    def test_surgery_guard_mode_a_scope_drift_fail(self):
+        """Validates Mode A detects and rejects unexpected production file modifications."""
+        ticket = Ticket(
+            ticket_id="TICK-MODE-A-DRIFT",
+            track="feature",
+            domain="auth",
+            rule_id="RULE-AUTH",
+            severity="NORMAL",
+            target_file="",
+            line_number=1,
+            fingerprint="fp-mode-a-drift",
+            description="Mode A scope drift",
+            suggested_fix="Fix",
+            branch_name="feat/auth",
+            test_seam_command="vitest",
+            expected_files=["src/lib/token.ts"],
+        )
+        self.fsm.state.active_ticket = ticket
+        self.fsm.state.current_state = CycleState.SURGERY
+
+        with patch.object(self.fsm, "_run_cmd") as mock_cmd:
+            def side_effect(cmd, cwd=None):
+                if "--name-only" in cmd:
+                    return (0, "src/lib/token.ts\nsrc/lib/untracked_action.ts\n", "")
+                if "--numstat" in cmd:
+                    return (0, "10\t2\tsrc/lib/token.ts\n5\t1\tsrc/lib/untracked_action.ts\n", "")
+                return (0, "", "")
+
+            mock_cmd.side_effect = side_effect
+            passed, msg, details = self.fsm.guard_surgery_to_verify()
+            self.assertFalse(passed)
+            self.assertIn("Deterministic Spec-Code Scope Drift", msg)
+            self.assertIn("src/lib/untracked_action.ts", details["unexpected_files"])
+
+    def test_surgery_guard_mode_b_single_target_pass_and_fail(self):
+        """Validates Mode B: single target_file passes when present and fails with standard diagnostic when absent."""
+        ticket = Ticket(
+            ticket_id="TICK-MODE-B",
+            track="core",
+            domain="bookings",
+            rule_id="RULE-FAT-ACTION",
+            severity="NORMAL",
+            target_file="src/actions/bookings.ts",
+            line_number=1,
+            fingerprint="fp-mode-b",
+            description="Mode B test",
+            suggested_fix="Fix",
+            branch_name="refactor/bookings",
+            test_seam_command="vitest",
+            expected_files=[],
+            scaffolding_allowance=15,
+            enforce_contraction=False,
+        )
+        self.fsm.state.active_ticket = ticket
+        self.fsm.state.current_state = CycleState.SURGERY
+
+        # 1. Target file present in diff -> pass
+        with patch.object(self.fsm, "_run_cmd") as mock_cmd:
+            def side_effect_pass(cmd, cwd=None):
+                if "--name-only" in cmd:
+                    return (0, "src/actions/bookings.ts\n", "")
+                if "--numstat" in cmd:
+                    return (0, "10\t15\tsrc/actions/bookings.ts\n", "")
+                return (0, "", "")
+
+            mock_cmd.side_effect = side_effect_pass
+            passed, msg, details = self.fsm.guard_surgery_to_verify()
+            self.assertTrue(passed, f"Mode B should pass when target modified: {msg}")
+            self.assertEqual(details["target_delta"], -5)
+
+        # 2. Target file missing in diff -> fail
+        with patch.object(self.fsm, "_run_cmd") as mock_cmd:
+            def side_effect_fail(cmd, cwd=None):
+                if "--name-only" in cmd:
+                    return (0, "src/actions/other.ts\n", "")
+                if "--numstat" in cmd:
+                    return (0, "10\t5\tsrc/actions/other.ts\n", "")
+                return (0, "", "")
+
+            mock_cmd.side_effect = side_effect_fail
+            passed, msg, details = self.fsm.guard_surgery_to_verify()
+            self.assertFalse(passed)
+            self.assertIn("Target file 'src/actions/bookings.ts' was not modified", msg)
+
+    def test_surgery_guard_mode_c_dynamic_slice_pass(self):
+        """Validates Mode C passes when target_file='' and expected_files=[] if at least 1 production file is modified."""
+        for track in ["feature", "core", "ui"]:
+            with self.subTest(track=track):
+                ticket = Ticket(
+                    ticket_id=f"TICK-MODE-C-{track.upper()}",
+                    track=track,
+                    domain="calc",
+                    rule_id="RULE-CALC",
+                    severity="NORMAL",
+                    target_file="",
+                    line_number=1,
+                    fingerprint=f"fp-mode-c-{track}",
+                    description="Mode C test",
+                    suggested_fix="Fix",
+                    branch_name=f"feat/calc-{track}",
+                    test_seam_command="vitest",
+                    expected_files=[],
+                    enforce_contraction=False,
+                )
+                self.fsm.state.active_ticket = ticket
+                self.fsm.state.current_state = CycleState.SURGERY
+
+                with patch.object(self.fsm, "_run_cmd") as mock_cmd:
+                    def side_effect(cmd, cwd=None):
+                        if "--name-only" in cmd:
+                            return (0, "src/utils/calculator.ts\n", "")
+                        if "--numstat" in cmd:
+                            return (0, "25\t5\tsrc/utils/calculator.ts\n", "")
+                        return (0, "", "")
+
+                    mock_cmd.side_effect = side_effect
+                    passed, msg, details = self.fsm.guard_surgery_to_verify()
+                    self.assertTrue(passed, f"Mode C should pass for track={track}: {msg}")
+                    self.assertIn("Surgery invariants passed", msg)
+                    self.assertEqual(details["total_net"], 20)
+
+    def test_surgery_guard_mode_c_dynamic_slice_fail_on_tests_or_ledgers_only(self):
+        """Validates Mode C fails when only test, doc, metadata, or task ledger files are modified."""
+        ticket = Ticket(
+            ticket_id="TICK-MODE-C-FAIL",
+            track="feature",
+            domain="calc",
+            rule_id="RULE-CALC",
+            severity="NORMAL",
+            target_file="",
+            line_number=1,
+            fingerprint="fp-mode-c-fail",
+            description="Mode C fail on non-prod",
+            suggested_fix="Fix",
+            branch_name="feat/calc",
+            test_seam_command="vitest",
+            expected_files=[],
+            enforce_contraction=False,
+        )
+        self.fsm.state.active_ticket = ticket
+        self.fsm.state.current_state = CycleState.SURGERY
+
+        with patch.object(self.fsm, "_run_cmd") as mock_cmd:
+            def side_effect(cmd, cwd=None):
+                if "--name-only" in cmd:
+                    return (
+                        0,
+                        "tests/unit/calc.test.ts\n"
+                        ".edge/specs/calc.md\n"
+                        "frontier.md\n"
+                        ".frontier.toml\n"
+                        "backlog.md\n"
+                        "done-archive.md\n"
+                        "data.json\n"
+                        "settings.toml\n",
+                        "",
+                    )
+                if "--numstat" in cmd:
+                    return (
+                        0,
+                        "10\t0\ttests/unit/calc.test.ts\n"
+                        "5\t0\t.edge/specs/calc.md\n"
+                        "2\t0\tfrontier.md\n",
+                        "",
+                    )
+                return (0, "", "")
+
+            mock_cmd.side_effect = side_effect
+            passed, msg, details = self.fsm.guard_surgery_to_verify()
+            self.assertFalse(passed)
+            self.assertIn("No production files were modified or created in dynamic slice", msg)
+
+    def test_downstream_formatting_null_safety(self):
+        """Validates downstream null-safety in StationRegistry, FlightRecorder, and FSM substeps when target_file is empty."""
+        from tools.brigade.flight_recorder import FlightRecorder
+
+        ticket_with_expected = Ticket(
+            ticket_id="TICK-DOWNSTREAM-1",
+            track="core",
+            domain="auth",
+            rule_id="RULE-AUTH",
+            severity="NORMAL",
+            target_file="",
+            line_number=1,
+            fingerprint="fp-down-1",
+            description="Downstream with expected files",
+            suggested_fix="Fix",
+            branch_name="refactor/auth",
+            test_seam_command="vitest",
+            expected_files=["src/lib/a.ts", "src/lib/b.ts"],
+        )
+
+        ticket_dynamic = Ticket(
+            ticket_id="TICK-DOWNSTREAM-2",
+            track="core",
+            domain="auth",
+            rule_id="RULE-AUTH",
+            severity="NORMAL",
+            target_file="",
+            line_number=1,
+            fingerprint="fp-down-2",
+            description="Downstream dynamic slice",
+            suggested_fix="Fix",
+            branch_name="refactor/auth",
+            test_seam_command="vitest",
+            expected_files=[],
+        )
+
+        # 1. StationRegistry.build_surgeon_prompt
+        s_prompt1 = StationRegistry.build_surgeon_prompt(ticket_with_expected, "main")
+        self.assertIn("in 'src/lib/a.ts, src/lib/b.ts'", s_prompt1)
+        self.assertIn("- Target File: src/lib/a.ts, src/lib/b.ts", s_prompt1)
+        self.assertNotIn("in ''", s_prompt1)
+
+        s_prompt2 = StationRegistry.build_surgeon_prompt(ticket_dynamic, "main")
+        self.assertIn("in '(dynamic-slice)'", s_prompt2)
+        self.assertIn("- Target File: (dynamic-slice)", s_prompt2)
+        self.assertNotIn("in ''", s_prompt2)
+
+        # 2. StationRegistry.build_seam_architect_prompt
+        seam_prompt1 = StationRegistry.build_seam_architect_prompt(ticket_with_expected, "Spec summary")
+        self.assertIn("in 'src/lib/a.ts, src/lib/b.ts'", seam_prompt1)
+        self.assertNotIn("in ''", seam_prompt1)
+
+        seam_prompt2 = StationRegistry.build_seam_architect_prompt(ticket_dynamic, "Spec summary")
+        self.assertIn("in '(dynamic-slice)'", seam_prompt2)
+        self.assertNotIn("in ''", seam_prompt2)
+
+        # 3. StationRegistry.build_examiner_prompt
+        exam_prompt1 = StationRegistry.build_examiner_prompt(ticket_with_expected, "main")
+        self.assertIn("- Target File: src/lib/a.ts, src/lib/b.ts", exam_prompt1)
+        self.assertIn("- Expected Files: src/lib/a.ts, src/lib/b.ts", exam_prompt1)
+
+        exam_prompt2 = StationRegistry.build_examiner_prompt(ticket_dynamic, "main")
+        self.assertIn("- Target File: (dynamic-slice)", exam_prompt2)
+
+        # 4. FlightRecorder set_metadata and markdown rendering
+        recorder = FlightRecorder(self.repo_path, "TICK-RECORDER")
+        recorder.set_metadata(
+            track="core",
+            domain="auth",
+            target_file="",
+            worktree_path="/tmp/wt",
+            expected_files=["src/lib/a.ts", "src/lib/b.ts"],
+        )
+        self.assertEqual(recorder.data.get("expected_files"), ["src/lib/a.ts", "src/lib/b.ts"])
+        md1 = recorder._render_markdown()
+        self.assertIn("- **Target File:** `src/lib/a.ts, src/lib/b.ts`", md1)
+        self.assertIn("- **Expected Files:** `src/lib/a.ts, src/lib/b.ts`", md1)
+
+        recorder2 = FlightRecorder(self.repo_path, "TICK-RECORDER-2")
+        recorder2.set_metadata(
+            track="core",
+            domain="auth",
+            target_file="",
+            worktree_path="/tmp/wt",
+            expected_files=[],
+        )
+        md2 = recorder2._render_markdown()
+        self.assertIn("- **Target File:** `(dynamic-slice)`", md2)
+
+        # 5. FSM Substep Hints
+        self.fsm.state.active_ticket = ticket_with_expected
+        hints1 = self.fsm._get_substeps_for_state(CycleState.RED_TEST)
+        self.assertNotIn("tests for  to establish", " ".join(hints1))
+
+        self.fsm.state.active_ticket = ticket_dynamic
+        hints2 = self.fsm._get_substeps_for_state(CycleState.RED_TEST)
+        self.assertNotIn("tests for  to establish", " ".join(hints2))
+        self.assertIn("(dynamic-slice)", " ".join(hints2))
+
+
 if __name__ == "__main__":
     unittest.main()
 
