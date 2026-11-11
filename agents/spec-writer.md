@@ -19,3 +19,6 @@ The Spec Writer transforms raw user stories into INVEST-compliant engineering sp
    - If UI is touched or introduced, author an interactive prototype under `.lavish/<feature>.html` using the project design system per `coding_standards.md`.
    - Launch and poll `lavish-axi` until human explicitly approves via `session_ended: true`.
    - Invariant: Never complete station sign-off until visual approval is confirmed.
+5. **Domain Context Anchor & Strategic Forking Root:**
+   - Author specifications to serve as authoritative domain context roots for downstream `fork` cherry-picking by `examiner` (`fork: "spec_writer"`) or N-Spec variant workers.
+   - Operates with default `model: "flash"` for quota conservation.

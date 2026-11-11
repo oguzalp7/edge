@@ -86,8 +86,14 @@ Instead of spawning disposable generalist agents that try to do everything and e
 * 🐟 **Ephemeral Goldfish Stations (`EPHEMERAL_GOLDFISH_ROLES`):**  
   `EXAMINER` and `SPEC_CRITIC`.  
   Spawned fresh with zero conversational history (`invoke_subagent`) on every review pass to eliminate confirmation bias; `orchestrator_guard.py` permits fresh spawns even in GREEN heat and marks prior instances `ROTATED`.
-* ⚡ **Quota Conservation Default:**  
-  When spawning subagents via `invoke_subagent`, default to `Model: "flash"` unless the human captain explicitly requests another tier.
+* 🧬 **Strategic Domain Context Forking (`fork` Cherry-Picking):**
+  - **`EXAMINER`:** Fork from `spec_writer` (`fork: "spec_writer"`) or `researcher` (`fork: "researcher"`) to inherit domain vocabulary and specification contracts while remaining 100% unbiased toward implementation diffs. NEVER fork from `coder` or `surgeon`.
+  - **`SPEC_WRITER`:** N-Spec / variant cloning.
+  - **`RESEARCHER`:** Multi-hypothesis / warm handoff for deep investigations.
+* ⚡ **Configurable Station Model (`model: str = "flash"` SSOT):**  
+  Stations default to `model: "flash"` across registration, FSM storage (`.edge/brigade.json`), and prompt dispatch. Explicit model pinning is supported via `brigade register --model <model>`.
+* 🐝 **Swarm vs. Brigade Guidance:**  
+  For comparing deterministic Brigade state machines with native horizontal swarms and lightweight guardrails, refer to [**`rules/playbooks/swarm-vs-brigade.md`**](file:///C:/Users/oguz_/.gemini/config/plugins/edge/rules/playbooks/swarm-vs-brigade.md).
 
 ---
 
@@ -166,13 +172,13 @@ Run from target repository or plugin directory:
 # 1. Initialize Brigade state in target repository (Default base branch: development)
 brigade init /path/to/repo --base-branch development
 
-# 2. Register persistent station workers (using their conversation_id)
-brigade register /path/to/repo --role spec_writer --conversation-id <id> --name "Spec Writer"
-brigade register /path/to/repo --role seam_architect --conversation-id <id> --name "Seam Architect"
-brigade register /path/to/repo --role coder --conversation-id <id> --name "Coder"
-brigade register /path/to/repo --role surgeon --conversation-id <id> --name "Refactor Surgeon"
-brigade register /path/to/repo --role examiner --conversation-id <id> --name "Examiner"
-brigade register /path/to/repo --role qa_engineer --conversation-id <id> --name "QA Sommelier"
+# 2. Register persistent station workers (using their conversation_id and optional --model)
+brigade register /path/to/repo --role spec_writer --conversation-id <id> --name "Spec Writer" --model flash
+brigade register /path/to/repo --role seam_architect --conversation-id <id> --name "Seam Architect" --model flash
+brigade register /path/to/repo --role coder --conversation-id <id> --name "Coder" --model flash
+brigade register /path/to/repo --role surgeon --conversation-id <id> --name "Refactor Surgeon" --model flash
+brigade register /path/to/repo --role examiner --conversation-id <id> --name "Examiner" --model flash
+brigade register /path/to/repo --role qa_engineer --conversation-id <id> --name "QA Sommelier" --model flash
 
 # 3. View registered stations
 brigade stations /path/to/repo

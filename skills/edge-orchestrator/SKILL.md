@@ -35,12 +35,16 @@ suggested_skills:
 
 4. **Kadro Yönetimi & İstasyon Yeniden Kullanım Protokolü (Station Dispatcher):**
    > [!IMPORTANT]
-   > İstasyon kuralları ve durum makinesi için doğrudan [**`skills/edge-brigade/SKILL.md`**](file:///C:/Users/oguz_/.gemini/config/plugins/edge/skills/edge-brigade/SKILL.md) el kitabını referans al.
+   > İstasyon kuralları ve durum makinesi için doğrudan [**`skills/edge-brigade/SKILL.md`**](file:///C:/Users/oguz_/.gemini/config/plugins/edge/skills/edge-brigade/SKILL.md) ve yatay swarm kuralları için [**`rules/playbooks/swarm-vs-brigade.md`**](file:///C:/Users/oguz_/.gemini/config/plugins/edge/rules/playbooks/swarm-vs-brigade.md) el kitaplarını referans al.
    
    - **Fil ve Japon Balığı Bellek Modeli (Elephant vs. Goldfish):**
      - 🐘 **Kalıcı Fil İstasyonları (`PERSISTENT_ELEPHANT_ROLES`):** `SPEC_WRITER`, `RESEARCHER`, `SEAM_ARCHITECT`, `CODER`, `SURGEON`, `QA_ENGINEER` — alan bağlamını biriktirir ve YEŞİL bölgede (`< 45k` token) `send_message` ile sürekli yeniden kullanılır.
      - 🐟 **Kısa Ömürlü Japon Balığı İstasyonları (`EPHEMERAL_GOLDFISH_ROLES`):** `EXAMINER` ve `SPEC_CRITIC` — teyit yanlılığını (confirmation bias) yok etmek için her inceleme/eleştiri turunda sıfır konuşma geçmişiyle taze (`invoke_subagent`) türetilir; `orchestrator_guard.py` YEŞİL bölgede dahi taze türetmeye izin verir ve önceki örneği `ROTATED` olarak işaretler.
-     - ⚡ **Kota Koruma Varsayılanı:** Alt-ajan türetirken (`invoke_subagent`), insan kaptan açıkça farklı bir model talep etmedikçe varsayılan olarak `Model: "flash"` kullanılır.
+     - 🧬 **Stratejik Domain Forking (Strategic Context Cherry-Picking):**
+       - **`EXAMINER` İnceleme Ajanı:** Domain sözlüğünü ve sözleşme sınırlarını almak için mutlaka `spec_writer` veya `researcher` üzerinden dallandırılır (`fork: "spec_writer"` veya `fork: "researcher"`). Asla `coder` veya `surgeon` geçmişini devralamaz (Examiner Bias Neutrality Invariant — sıfır teyit yanlılığı).
+       - **`SPEC_WRITER`:** Çoklu şartname varyantları (N-Spec / Variant A/B) için klonlanabilir.
+       - **`RESEARCHER`:** Çoklu hipotez / kök neden araştırmalarında warm handoff ile dallandırılabilir.
+     - ⚡ **Kota Koruma Varsayılanı (`Model: "flash"`):** Alt-ajan türetirken (`invoke_subagent`) veya CLI'da istasyon kaydederken (`brigade register --model flash`), insan kaptan açıkça farklı bir model (`pro`, `claude-opus-5-5-high`) talep etmedikçe varsayılan olarak `Model: "flash"` kullanılır.
    - **Station Zero-Amnesia Protocol (Zorunlu İstasyon Yeniden Kullanımı):**
      1. **Önce Kontrol Et:** Bir istasyona iş sevk etmeden önce `manage_subagents(Action: 'list')` veya `brigade stations <repo>` çalıştır.
      2. **Yeniden Kullan (`send_message`):** Hedef rol fil istasyonuysa ve aktif bir çalışan listeleniyorsa, **asla yeni bir `invoke_subagent` çağırma**; doğrudan o ajanın `conversationId`'sini kullanarak `send_message(Recipient: <id>, Message: ...)` ile görevi ilet.
@@ -74,12 +78,12 @@ suggested_skills:
 # 1. Brigade Durumunu İncele
 brigade status <repo_path>
 
-# 2. Kalıcı İstasyonları Kaydet (conversation_id ile)
-brigade register <repo_path> --role spec_writer --conversation-id <id>
-brigade register <repo_path> --role seam_architect --conversation-id <id>
-brigade register <repo_path> --role coder --conversation-id <id>
-brigade register <repo_path> --role examiner --conversation-id <id>
-brigade register <repo_path> --role qa_engineer --conversation-id <id>
+# 2. Kalıcı İstasyonları Kaydet (conversation_id ve opsiyonel --model ile, varsayılan: flash)
+brigade register <repo_path> --role spec_writer --conversation-id <id> --model flash
+brigade register <repo_path> --role seam_architect --conversation-id <id> --model flash
+brigade register <repo_path> --role coder --conversation-id <id> --model flash
+brigade register <repo_path> --role examiner --conversation-id <id> --model flash
+brigade register <repo_path> --role qa_engineer --conversation-id <id> --model flash
 
 # 3. Şartname Danışman Denetimi (Cross-Provider Spec Critic)
 brigade critique-spec <repo_path> --spec .edge/specs/<slice-adi>.md

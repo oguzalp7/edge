@@ -27,13 +27,20 @@ class StationRegistry:
     def stations(self) -> Dict[str, Station]:
         return self.state.stations
 
-    def register(self, role: StationRole, conversation_id: str, name: Optional[str] = None) -> Station:
+    def register(
+        self,
+        role: StationRole,
+        conversation_id: str,
+        name: Optional[str] = None,
+        model: str = "flash",
+    ) -> Station:
         station_name = name or f"{role.value.replace('_', ' ').title()} Station"
         station = Station(
             role=role.value,
             conversation_id=conversation_id,
             name=station_name,
             status="IDLE",
+            model=model or "flash",
             registered_at=datetime.now(timezone.utc).isoformat(),
             last_active_at=datetime.now(timezone.utc).isoformat(),
         )

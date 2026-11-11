@@ -55,10 +55,12 @@ def cmd_register(args: argparse.Namespace) -> int:
         print(f"❌ Invalid role '{args.role}'. Available roles: {[r.value for r in StationRole]}")
         return 1
 
-    station = fsm.registry.register(role, args.conversation_id, args.name)
+    model = getattr(args, "model", "flash") or "flash"
+    station = fsm.registry.register(role, args.conversation_id, args.name, model=model)
     fsm.save()
-    print(f"✅ Registered station '{station.name}' [{station.role}]")
+    print(f"✅ Registered station '{station.name}' [{station.role}] (model: {station.model})")
     print(f"   Conversation ID: {station.conversation_id}")
+    print(f"   Model:           {station.model}")
     return 0
 
 
@@ -93,9 +95,10 @@ def cmd_stations(args: argparse.Namespace) -> int:
     else:
         for role_key, station in stations.items():
             status_icon = "🟢" if station.status == "IDLE" else "🟡"
-            print(f" {status_icon} [{station.role.upper()}] {station.name}")
+            print(f" {status_icon} [{station.role.upper()}] {station.name} [model: {station.model}]")
             print(f"    Conversation ID: {station.conversation_id}")
             print(f"    Status:          {station.status}")
+            print(f"    Model:           {station.model}")
             print(f"    Last Active:     {station.last_active_at}")
             print("-------------------------------------------------------")
     return 0
@@ -861,6 +864,7 @@ def main() -> int:
     p_reg.add_argument("--role", required=True, choices=[r.value for r in StationRole], help=f"Station role ({', '.join(r.value for r in StationRole)})")
     p_reg.add_argument("--conversation-id", required=True, help="Subagent conversation ID")
     p_reg.add_argument("--name", help="Human-readable station name")
+    p_reg.add_argument("--model", default="flash", help="Model pinned to station (default: flash)")
 
     # unregister
     p_unreg = subparsers.add_parser("unregister", help="Unregister a station")

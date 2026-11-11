@@ -44,6 +44,7 @@ class Station:
     conversation_id: str = ""
     name: str = ""
     status: str = "IDLE"                      # IDLE, BUSY, ERROR
+    model: str = "flash"                      # Model pinned to station (default: flash)
     registered_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     last_active_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -58,6 +59,8 @@ class Station:
         role_val = raw.get("role", "")
         if not raw.get("name"):
             raw["name"] = f"{role_val.replace('_', ' ').title()} Station" if role_val else "Station Worker"
+        if not raw.get("model"):
+            raw["model"] = "flash"
         valid_fields = {f.name for f in fields(cls)}
         filtered = {k: v for k, v in raw.items() if k in valid_fields}
         return cls(**filtered)

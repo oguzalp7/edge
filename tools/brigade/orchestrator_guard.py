@@ -86,6 +86,7 @@ class StationRecord:
     canonical_role: str
     parent_conversation_id: str
     status: str = "IDLE"  # "IDLE" | "BUSY" | "EXHAUSTED" | "ROTATED"
+    model: str = "flash"  # Model pinned to station
     registered_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     last_active_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     token_heat: TokenHeatRecord = field(default_factory=lambda: TokenHeatRecord(tokens=0, heat_zone="GREEN"))
@@ -97,6 +98,7 @@ class StationRecord:
             "canonicalRole": self.canonical_role,
             "parentConversationId": self.parent_conversation_id,
             "status": self.status,
+            "model": self.model,
             "registeredAt": self.registered_at,
             "lastActiveAt": self.last_active_at,
             "tokenHeat": self.token_heat.to_dict(),
@@ -242,7 +244,7 @@ class StationStore:
             json.dump(payload, f, indent=2, ensure_ascii=False)
         temp_file.replace(self.store_path)
 
-    def register(self, conversation_id: str, role: str, parent_cid: str = "") -> StationRecord:
+    def register(self, conversation_id: str, role: str, parent_cid: str = "", model: str = "flash") -> StationRecord:
         """Registers a newly spawned subagent station worker."""
         if not conversation_id:
             raise ValueError("conversation_id is required")
@@ -255,6 +257,7 @@ class StationStore:
             canonical_role=canonical,
             parent_conversation_id=parent_cid,
             status="IDLE",
+            model=model or "flash",
             registered_at=now_iso,
             last_active_at=now_iso,
             token_heat=TokenHeatRecord(tokens=0, heat_zone="GREEN", last_calculated_at=now_iso),
@@ -637,11 +640,11 @@ def save_active_stations(data: Union[StationStoreEnvelope, Dict[str, Any]]) -> N
     store.save(data)
 
 
-def register_station(conversation_id: str, role: str, parent_cid: str = "") -> Optional[StationRecord]:
+def register_station(conversation_id: str, role: str, parent_cid: str = "", model: str = "flash") -> Optional[StationRecord]:
     if not conversation_id:
         return None
     store = StationStore(ACTIVE_STATIONS_FILE)
-    return store.register(conversation_id, role, parent_cid)
+    return store.register(conversation_id, role, parent_cid, model=model)
 
 
 def find_active_station(role: str, parent_cid: str = "") -> Optional[Tuple[str, Dict[str, Any]]]:

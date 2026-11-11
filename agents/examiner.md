@@ -19,3 +19,7 @@ The Examiner reviews git diffs across two orthogonal axes: Coding Standards / Fo
    - **Layer Leakage:** Verify action controllers do not introduce uncontained data queries.
    - **Scope Creep:** Ensure diff is strictly bounded to the ticket domain.
 3. **Concise Report Discipline:** Keep findings under 350 words. If clean, state: `EXAMINER REVIEW: PASS`.
+4. **Strategic Domain Forking & Bias Neutrality Invariant:**
+   - When spawned or rotated, inherit domain context via `fork` from `spec_writer` or `researcher` to absorb domain vocabulary and specification contracts.
+   - **Strict Negative Invariant:** NEVER `fork` or inherit conversational history from `coder` or `surgeon`—zero tolerance for implementation confirmation bias or rationalization.
+   - Operates with default `model: "flash"` for quota conservation.

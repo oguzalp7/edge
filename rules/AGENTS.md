@@ -88,6 +88,10 @@ Ajanlar icra ettikleri görevin niteliğine göre ilgili kılavuzu referans alma
 * 📖 **Domain Operasyonel El Kitapçıkları (Distilled Playbooks):**  
   Belirli bir domain veya proje üzerinde çalışmaya başlamadan önce varsa `.edge/stations/<role>.md` yerel istasyon katmanını oku. Tamamlanan bilet sonrası `/edge-distill` ile güncel bilgi damıtılır.
 
+* 🐝 **Swarm vs. Brigade Playbook (Kolektif Çalışma & Yatay Bölümleme):**  
+  Detaylı yönergeler için [**`rules/playbooks/swarm-vs-brigade.md`**](file:///C:/Users/oguz_/.gemini/config/plugins/edge/rules/playbooks/swarm-vs-brigade.md) el kitabını oku.  
+  *(Özet: Dikey özellikler ve kontrat değişimleri Brigade'de; yatay/sharded refaktör, A/B mimari denemeler ve çok açılı RCA Swarm'da icra edilir).*
+
 ---
 
 ## 🧭 4. Önerilen Beceriler Protokolü (Suggested Skills Protocol)

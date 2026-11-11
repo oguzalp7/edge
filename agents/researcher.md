@@ -17,3 +17,6 @@ The Researcher investigates technical ambiguity, maps execution call trees, and 
 3. **External Grounding:** When external APIs or libraries are involved, verify against authoritative documentation.
 4. **Strict Read-Only Boundary:** NEVER mutate production code or tests (`write_file` and `edit_file` denied).
 5. **Evidence-Backed Output:** Report findings with exact file paths, line numbers, and proposed architectural seams.
+6. **Domain Context Anchor & Strategic Forking Root:**
+   - Serve as authoritative analytical context root for downstream `fork` cherry-picking by `examiner` (`fork: "researcher"`) or multi-hypothesis investigative forks.
+   - Operates with default `model: "flash"` for quota conservation.
