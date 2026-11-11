@@ -561,6 +561,40 @@ class TestStationStorePersistence(unittest.TestCase):
         self.assertIn("legacy-cid-1", migrated_disk.get("stations", {}))
         self.assertNotIn("legacy-cid-1", [k for k in migrated_disk if k not in ("version", "initializedAt", "sessions", "stations")])
 
+    def test_station_record_model_default_and_serialization(self):
+        # 1. StationRecord default model == "flash"
+        record = guard.StationRecord(
+            conversation_id="c1",
+            role="coder",
+            canonical_role="CODER",
+            parent_conversation_id="p1",
+        )
+        self.assertEqual(record.model, "flash")
+        self.assertEqual(record.to_dict().get("model"), "flash")
+
+        # 2. StationRecord custom model
+        record_pro = guard.StationRecord(
+            conversation_id="e1",
+            role="examiner",
+            canonical_role="EXAMINER",
+            parent_conversation_id="p1",
+            model="pro",
+        )
+        self.assertEqual(record_pro.model, "pro")
+        self.assertEqual(record_pro.to_dict().get("model"), "pro")
+
+        # 3. StationStore.register persists "model": "flash"
+        rec_store = self.store.register("c1", "coder", "p1", model="flash")
+        self.assertEqual(rec_store.model, "flash")
+        envelope = self.store.load()
+        self.assertEqual(envelope["stations"]["c1"].get("model"), "flash")
+
+        # 4. StationStore.register with custom model
+        rec_store_pro = self.store.register("e1", "examiner", "p1", model="pro")
+        self.assertEqual(rec_store_pro.model, "pro")
+        envelope_pro = self.store.load()
+        self.assertEqual(envelope_pro["stations"]["e1"].get("model"), "pro")
+
 
 class TestTranscriptStationScanner(unittest.TestCase):
     def setUp(self):

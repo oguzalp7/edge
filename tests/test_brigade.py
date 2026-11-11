@@ -148,6 +148,26 @@ class TestBrigadeModels(unittest.TestCase):
         st_direct = Station(role="surgeon", conversation_id="conv-direct")
         self.assertEqual(st_direct.name, "")
 
+    def test_station_model_default_and_custom_serialization(self):
+        # 1. Station(role="coder", conversation_id="c1") defaults to model == "flash"
+        st = Station(role="coder", conversation_id="c1")
+        self.assertEqual(st.model, "flash")
+
+        # 2. Serializes "model": "flash" in to_dict()
+        st_dict = st.to_dict()
+        self.assertIn("model", st_dict)
+        self.assertEqual(st_dict["model"], "flash")
+
+        # 3. Station.from_dict({"role": "coder", "conversation_id": "c1"}) defaults missing "model" to "flash"
+        from_missing = Station.from_dict({"role": "coder", "conversation_id": "c1"})
+        self.assertEqual(from_missing.model, "flash")
+        self.assertEqual(from_missing.to_dict().get("model"), "flash")
+
+        # 4. Station.from_dict({"role": "examiner", "conversation_id": "e1", "model": "pro"}) preserves "pro"
+        from_custom = Station.from_dict({"role": "examiner", "conversation_id": "e1", "model": "pro"})
+        self.assertEqual(from_custom.model, "pro")
+        self.assertEqual(from_custom.to_dict().get("model"), "pro")
+
 
     def test_ticket_id_generation_and_serialization(self):
         tid = Ticket.generate_id("core", "customers", "RULE-DB-LEAK", 100)
@@ -270,6 +290,15 @@ class TestStationRegistry(unittest.TestCase):
 
         self.registry.mark_idle(StationRole.SURGEON)
         self.assertEqual(self.registry.get_station(StationRole.SURGEON).status, "IDLE")
+
+    def test_station_registry_register_with_model(self):
+        # 1. fsm.registry.register(StationRole.CODER, "c1") sets station.model == "flash"
+        st_default = self.registry.register(StationRole.CODER, "c1")
+        self.assertEqual(st_default.model, "flash")
+
+        # 2. fsm.registry.register(StationRole.EXAMINER, "e1", model="pro") sets station.model == "pro"
+        st_custom = self.registry.register(StationRole.EXAMINER, "e1", model="pro")
+        self.assertEqual(st_custom.model, "pro")
 
     def test_prompt_builders(self):
         ticket = Ticket(
@@ -1247,6 +1276,52 @@ class TestBrigadeWave2FsmAndCli(unittest.TestCase):
         self.assertTrue(archived_spec.exists(), "Archived spec must exist in .edge/archive/specs/")
         self.assertIn("Staff Allocation Spec", archived_spec.read_text(encoding="utf-8"))
 
+    def test_cli_register_and_stations_display_model(self):
+        import io
+        import contextlib
+        import argparse
+        from tools.brigade.cli import cmd_register, cmd_stations
+
+        # Register station with custom model "pro"
+        args_pro = argparse.Namespace(
+            repo=str(self.repo_path),
+            role="examiner",
+            conversation_id="e1",
+            name="Examiner Station",
+            model="pro",
+        )
+        ret_pro = cmd_register(args_pro)
+        self.assertEqual(ret_pro, 0)
+
+        # Register station with default model "flash"
+        args_flash = argparse.Namespace(
+            repo=str(self.repo_path),
+            role="coder",
+            conversation_id="c1",
+            name="Coder Station",
+            model="flash",
+        )
+        ret_flash = cmd_register(args_flash)
+        self.assertEqual(ret_flash, 0)
+
+        # Assert .edge/brigade.json persists model
+        state_file = self.repo_path / ".edge" / "brigade.json"
+        self.assertTrue(state_file.exists(), "brigade.json should be created after registration")
+        with open(state_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        self.assertEqual(data.get("stations", {}).get("examiner", {}).get("model"), "pro")
+        self.assertEqual(data.get("stations", {}).get("coder", {}).get("model"), "flash")
+
+        # Assert cmd_stations displays model
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            ret_stat = cmd_stations(argparse.Namespace(repo=str(self.repo_path)))
+        self.assertEqual(ret_stat, 0)
+        output = buf.getvalue()
+        self.assertIn("pro", output, "cmd_stations output should display model 'pro'")
+        self.assertIn("flash", output, "cmd_stations output should display model 'flash'")
+
 
 
 
@@ -1473,6 +1548,54 @@ class TestPersonaCompletenessAndLineBudget(unittest.TestCase):
         rules_text = agents_rules.read_text(encoding="utf-8")
         self.assertIn(".edge/stations/", rules_text)
         self.assertNotIn("<domain>-playbook.md", rules_text)
+
+    def test_slice1_playbook_and_strategic_fork_directives_exist(self):
+        # 1. rules/playbooks/swarm-vs-brigade.md must exist and contain 'model: "flash"' and 'narrator'
+        pb_path = self.repo_root / "rules" / "playbooks" / "swarm-vs-brigade.md"
+        self.assertTrue(pb_path.is_file(), f"Authoritative playbook missing: {pb_path}")
+        pb_text = pb_path.read_text(encoding="utf-8")
+        self.assertIn('model: "flash"', pb_text)
+        self.assertIn("narrator", pb_text)
+
+        # 2. rules/AGENTS.md must link to swarm-vs-brigade.md
+        agents_rules = self.repo_root / "rules" / "AGENTS.md"
+        self.assertTrue(agents_rules.is_file())
+        agents_text = agents_rules.read_text(encoding="utf-8")
+        self.assertIn("swarm-vs-brigade.md", agents_text, "rules/AGENTS.md must link to swarm-vs-brigade.md")
+
+        # 3. agents/examiner.md, agents/spec-writer.md, agents/researcher.md, skills/edge-orchestrator/SKILL.md
+        # must document Strategic Domain Forking (fork from spec_writer / researcher, never from coder / surgeon)
+        examiner_path = self.repo_root / "agents" / "examiner.md"
+        self.assertTrue(examiner_path.is_file())
+        examiner_text = examiner_path.read_text(encoding="utf-8")
+        self.assertIn("fork", examiner_text.lower(), "agents/examiner.md must document strategic forking")
+        self.assertTrue(
+            "spec_writer" in examiner_text.lower() or "researcher" in examiner_text.lower(),
+            "agents/examiner.md must document forking from spec_writer or researcher",
+        )
+        self.assertTrue(
+            "coder" in examiner_text.lower() or "surgeon" in examiner_text.lower(),
+            "agents/examiner.md must explicitly forbid inheriting from coder or surgeon",
+        )
+
+        spec_writer_path = self.repo_root / "agents" / "spec-writer.md"
+        self.assertTrue(spec_writer_path.is_file())
+        spec_writer_text = spec_writer_path.read_text(encoding="utf-8")
+        self.assertIn("fork", spec_writer_text.lower(), "agents/spec-writer.md must document domain context root for forking")
+
+        researcher_path = self.repo_root / "agents" / "researcher.md"
+        self.assertTrue(researcher_path.is_file())
+        researcher_text = researcher_path.read_text(encoding="utf-8")
+        self.assertIn("fork", researcher_text.lower(), "agents/researcher.md must document domain context root for forking")
+
+        orch_path = self.repo_root / "skills" / "edge-orchestrator" / "SKILL.md"
+        self.assertTrue(orch_path.is_file())
+        orch_text = orch_path.read_text(encoding="utf-8")
+        self.assertIn("fork", orch_text.lower(), "skills/edge-orchestrator/SKILL.md must document strategic forking")
+        self.assertTrue(
+            "spec_writer" in orch_text.lower() or "researcher" in orch_text.lower(),
+            "skills/edge-orchestrator/SKILL.md must mention forking from spec_writer/researcher",
+        )
 
 
 class TestBrigadePromptCLI(unittest.TestCase):
