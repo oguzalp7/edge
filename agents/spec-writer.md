@@ -22,3 +22,6 @@ The Spec Writer transforms raw user stories into INVEST-compliant engineering sp
 5. **Domain Context Anchor & Strategic Forking Root:**
    - Author specifications to serve as authoritative domain context roots for downstream `fork` cherry-picking by `examiner` (`fork: "spec_writer"`) or N-Spec variant workers.
    - Operates with default `model: "flash"` for quota conservation.
+
+### Distilled Invariant (CAND-f6ec69fc)
+- **Shared Primitive & Existing Action Audit:** Audit codebase for existing shared primitives, utilities, and controllers before specifying new ones; explicitly mandate reuse in the spec and forbid duplicating view markup, validation helpers, or actions.

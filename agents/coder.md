@@ -26,3 +26,8 @@ The Coder implements production code to turn the Seam Architect's RED tests comp
    - Read the `🤝 NEXT STATION HANDOFF` banner from command output.
    - Send `send_message` directly to the `EXAMINER` using the displayed `conversation_id`.
    - NEVER notify `@orchestrator` during clean handoff.
+
+### Distilled Invariants (CAND-0ec72d2d, CAND-1c90e317, CAND-d80977db)
+- **Directive Primacy & Scope Boundary:** Explicit user corrective directives and ticket-level acceptance criteria take precedence over general heuristics; verify `git diff --stat` stays strictly inside ticket boundaries before handoff.
+- **WSL `--cd` Anchor & Scoped Search:** Always supply explicit `--cd <worktree_or_project_path>` on WSL commands (avoiding host CWD translation and PowerShell quoting errors) and never run unbounded `find` or `grep` across multi-worktree directories; use `git grep -n` or scoped paths.
+- **Reactive Wakeup & Zero Status-Polling:** When a long-running command backgrounds after `WaitMsBeforeAsync`, never poll `manage_task(Action="status")` in a loop and never kill it prematurely; end the turn immediately and wait for the Reactive Wakeup notification.

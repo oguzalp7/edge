@@ -22,3 +22,7 @@ The Surgeon executes bounded structural transformations on legacy or bloated cod
    - Read the `🤝 NEXT STATION HANDOFF` banner from command output.
    - Send `send_message` directly to the `EXAMINER` using the displayed `conversation_id`.
    - NEVER notify `@orchestrator` during clean handoff.
+
+### Distilled Invariants (CAND-d80977db, CAND-1c90e317)
+- **Reactive Wakeup & Zero Status-Polling:** When a long-running command backgrounds after `WaitMsBeforeAsync`, never poll `manage_task(Action="status")` in a loop and never kill it prematurely; end the turn immediately and wait for the Reactive Wakeup notification.
+- **WSL `--cd` Anchor & Scoped Search:** Always supply explicit `--cd <worktree_or_project_path>` on WSL commands (avoiding host CWD translation and PowerShell quoting errors) and never run unbounded `find` or `grep` across multi-worktree directories; use `git grep -n` or scoped paths.

@@ -30,3 +30,7 @@ The Examiner reviews git diffs across two orthogonal axes: Coding Standards / Fo
    - If findings are clean -> FSM advances to `GATE` and then `QA` or `STAGING`:
      - If target is `QA_ENGINEER`: send `send_message` directly to `QA_ENGINEER`.
      - If target is `STAGING`: message `@orchestrator` with `[READY_FOR_STAGING]`.
+
+### Distilled Invariants (CAND-e9e3f305, CAND-1c90e317, CAND-d80977db)
+- **Zero-Gate-Failure Invariant:** NEVER issue `EXAMINER REVIEW: PASS` without verifying all automated verification gates (tests, typecheck, linter) exit with code `0`; an unverified or timed-out gate (exit `124`) is an automatic `FAIL`.
+- **WSL `--cd` Anchor & Anti-Polling:** Always run WSL commands with explicit `--cd <worktree_or_project_path>`, use `git grep -n` (never unbounded `find`/`grep`), and never busy-poll `manage_task(Action="status")` while a task is `RUNNING`.
