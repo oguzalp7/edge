@@ -2045,6 +2045,235 @@ class TestBrigadeSlice2LavishGatedQAState(unittest.TestCase):
         )
 
 
+class TestBrigadeSlice3AutonomousKitchenRelay(unittest.TestCase):
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.repo_path = Path(self.test_dir)
+        self.repo_root = Path(__file__).resolve().parents[1]
+        self.fsm = BrigadeFSM(self.repo_path)
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def test_format_kitchen_roster_empty_and_populated(self):
+        # 1. Empty stations dict
+        empty_output = StationRegistry.format_kitchen_roster({})
+        self.assertIn("### 📋 ACTIVE KITCHEN ROSTER", empty_output)
+        self.assertIn("No persistent station workers currently registered", empty_output)
+
+        # 2. Populated stations dict
+        stations = {
+            "seam_architect": Station(
+                role="seam_architect",
+                conversation_id="conv-sa-1",
+                name="Seam Architect Station",
+                status="IDLE",
+                model="flash",
+            ),
+            "coder": Station(
+                role="coder",
+                conversation_id="conv-cd-2",
+                name="Coder Station",
+                status="IDLE",
+                model="flash",
+            ),
+            "examiner": Station(
+                role="examiner",
+                conversation_id="conv-ex-3",
+                name="Examiner Station",
+                status="IDLE",
+                model="flash",
+            ),
+        }
+        populated_output = StationRegistry.format_kitchen_roster(stations)
+        self.assertIn("### 📋 ACTIVE KITCHEN ROSTER", populated_output)
+        self.assertIn("| Role | Station Name | Conversation ID | Model | Status |", populated_output)
+        self.assertIn("`seam_architect`", populated_output)
+        self.assertIn("`conv-sa-1`", populated_output)
+        self.assertIn("`coder`", populated_output)
+        self.assertIn("`conv-cd-2`", populated_output)
+        self.assertIn("`examiner`", populated_output)
+        self.assertIn("`conv-ex-3`", populated_output)
+        self.assertIn("`flash`", populated_output)
+        self.assertIn("PEER-TO-PEER HANDOFF RULES", populated_output)
+        self.assertIn("[READY_FOR_STAGING]", populated_output)
+        self.assertIn("[ESCALATION]", populated_output)
+
+    def test_get_next_station_handoff_across_lifecycle(self):
+        # Register stations in fsm
+        self.fsm.registry.register(StationRole.SEAM_ARCHITECT, "conv-sa")
+        self.fsm.registry.register(StationRole.CODER, "conv-cd")
+        self.fsm.registry.register(StationRole.EXAMINER, "conv-ex")
+        self.fsm.registry.register(StationRole.QA_ENGINEER, "conv-qa")
+
+        ticket = Ticket(
+            ticket_id="TICK-FEAT-RELAY",
+            track="feature",
+            domain="relay",
+            rule_id="RULE-RELAY",
+            severity="NORMAL",
+            target_file="src/relay.ts",
+            line_number=1,
+            fingerprint="fp-relay",
+            description="Relay feature",
+            suggested_fix="Fix",
+            branch_name="feat/relay",
+            test_seam_command="npm test",
+        )
+        self.fsm.state.active_ticket = ticket
+
+        # 1. RED_TEST -> seam_architect (conv-sa)
+        h_red = self.fsm.get_next_station_handoff(CycleState.RED_TEST)
+        self.assertEqual(h_red["target_role"], "seam_architect")
+        self.assertEqual(h_red["recipient_cid"], "conv-sa")
+
+        # 2. SURGERY (feature track) -> coder (conv-cd)
+        h_surg = self.fsm.get_next_station_handoff(CycleState.SURGERY)
+        self.assertEqual(h_surg["target_role"], "coder")
+        self.assertEqual(h_surg["recipient_cid"], "conv-cd")
+
+        # 3. REVIEW -> examiner (conv-ex)
+        h_rev = self.fsm.get_next_station_handoff(CycleState.REVIEW)
+        self.assertEqual(h_rev["target_role"], "examiner")
+        self.assertEqual(h_rev["recipient_cid"], "conv-ex")
+
+        # 4. POLISH (feature track) -> coder (conv-cd)
+        h_pol = self.fsm.get_next_station_handoff(CycleState.POLISH)
+        self.assertEqual(h_pol["target_role"], "coder")
+        self.assertEqual(h_pol["recipient_cid"], "conv-cd")
+
+        # 5. QA -> qa_engineer (conv-qa)
+        h_qa = self.fsm.get_next_station_handoff(CycleState.QA)
+        self.assertEqual(h_qa["target_role"], "qa_engineer")
+        self.assertEqual(h_qa["recipient_cid"], "conv-qa")
+
+        # 6. STAGING -> orchestrator ([READY_FOR_STAGING])
+        h_stage = self.fsm.get_next_station_handoff(CycleState.STAGING)
+        self.assertEqual(h_stage["target_role"], "orchestrator")
+        self.assertIn("[READY_FOR_STAGING]", h_stage["instruction"])
+
+    def test_cli_ticket_prompt_and_cmd_prompt_inject_kitchen_roster(self):
+        import io
+        import contextlib
+        import argparse
+        from tools.brigade.cli import cmd_ticket, cmd_prompt
+
+        # Register coder and examiner stations in brigade state
+        self.fsm.registry.register(StationRole.CODER, "conv-coder-99")
+        self.fsm.registry.register(StationRole.EXAMINER, "conv-exam-88")
+
+        ticket = Ticket(
+            ticket_id="TICK-ROSTER-01",
+            track="feature",
+            domain="checkout",
+            rule_id="RULE-FEAT",
+            severity="NORMAL",
+            target_file="src/checkout.ts",
+            line_number=1,
+            fingerprint="fp-roster",
+            description="Checkout slice",
+            suggested_fix="Implement",
+            branch_name="feat/checkout",
+            test_seam_command="npm test",
+        )
+        self.fsm.state.active_ticket = ticket
+        self.fsm.state.current_state = CycleState.SURGERY
+        self.fsm.save()
+
+        # 1. Test cmd_ticket --prompt
+        buf_ticket = io.StringIO()
+        with contextlib.redirect_stdout(buf_ticket):
+            ret_ticket = cmd_ticket(argparse.Namespace(repo=str(self.repo_path), prompt=True, format="toon"))
+        self.assertEqual(ret_ticket, 0)
+        out_ticket = buf_ticket.getvalue()
+        self.assertIn("ACTIVE KITCHEN ROSTER", out_ticket)
+        self.assertIn("conv-coder-99", out_ticket)
+        self.assertIn("conv-exam-88", out_ticket)
+
+        # 2. Test cmd_prompt --role coder
+        buf_prompt = io.StringIO()
+        with contextlib.redirect_stdout(buf_prompt):
+            ret_prompt = cmd_prompt(argparse.Namespace(repo=str(self.repo_path), role="coder", ticket=None))
+        self.assertEqual(ret_prompt, 0)
+        out_prompt = buf_prompt.getvalue()
+        self.assertIn("ACTIVE KITCHEN ROSTER", out_prompt)
+        self.assertIn("conv-coder-99", out_prompt)
+        self.assertIn("conv-exam-88", out_prompt)
+
+    def test_cli_advance_prints_next_station_handoff_banner(self):
+        import io
+        import contextlib
+        import argparse
+        from tools.brigade.cli import cmd_advance
+
+        # Register coder station
+        self.fsm.registry.register(StationRole.CODER, "conv-coder-relay")
+
+        ticket = Ticket(
+            ticket_id="TICK-ADV-RELAY",
+            track="feature",
+            domain="orders",
+            rule_id="RULE-ADV",
+            severity="NORMAL",
+            target_file="src/orders.ts",
+            line_number=1,
+            fingerprint="fp-adv",
+            description="Orders slice",
+            suggested_fix="Fix",
+            branch_name="feat/orders",
+            test_seam_command="npm test",
+        )
+        self.fsm.state.active_ticket = ticket
+        self.fsm.state.current_state = CycleState.RED_TEST
+        self.fsm.save()
+
+        with patch.object(BrigadeFSM, "guard_red_to_surgery", return_value=(True, "Red test verified", {})):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                ret = cmd_advance(argparse.Namespace(repo=str(self.repo_path), force=False))
+            self.assertEqual(ret, 0)
+            output = buf.getvalue()
+            self.assertIn("NEXT STATION HANDOFF", output)
+            self.assertIn("coder", output)
+            self.assertIn("conv-coder-relay", output)
+
+    def test_slice3_persona_autonomous_kitchen_relay_directives(self):
+        personas = [
+            "seam-architect.md",
+            "coder.md",
+            "surgeon.md",
+            "examiner.md",
+            "qa-engineer.md",
+        ]
+        agents_dir = self.repo_root / "agents"
+        for persona_name in personas:
+            p_path = agents_dir / persona_name
+            self.assertTrue(p_path.is_file(), f"Missing persona: {p_path}")
+            text = p_path.read_text(encoding="utf-8")
+            self.assertIn(
+                "Autonomous Kitchen Relay",
+                text,
+                f"Persona {persona_name} must document Autonomous Kitchen Relay directive",
+            )
+            self.assertIn(
+                "NEXT STATION HANDOFF",
+                text,
+                f"Persona {persona_name} must reference NEXT STATION HANDOFF banner",
+            )
+            self.assertIn(
+                "send_message",
+                text,
+                f"Persona {persona_name} must instruct direct peer communication via send_message",
+            )
+
+        # Examiner and QA Engineer must also document the Green-Zone Staging Invariant
+        examiner_text = (agents_dir / "examiner.md").read_text(encoding="utf-8")
+        self.assertIn("[READY_FOR_STAGING]", examiner_text)
+
+        qa_text = (agents_dir / "qa-engineer.md").read_text(encoding="utf-8")
+        self.assertIn("[READY_FOR_STAGING]", qa_text)
+
+
 if __name__ == "__main__":
     unittest.main()
 
