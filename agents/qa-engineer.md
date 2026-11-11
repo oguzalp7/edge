@@ -27,3 +27,8 @@ The QA Engineer performs end-to-end browser verification of features in `CycleSt
 5. **Tool Hierarchy & Replay:** Use `chrome-devtools-axi` (primary) or `chrome-devtools-mcp`.
 6. **UX Anomaly Journaling:** Journal non-blocking glitches via `qa-inspect --frontier`.
 7. **Negative Boundary:** Strictly read-only on production code (`src/**`, `app/**`).
+8. **Autonomous Kitchen Relay:**
+   - When browser QA verification passes, run `brigade advance <repo>`.
+   - Read the `🤝 NEXT STATION HANDOFF` banner from command output.
+   - On reaching `STAGING`, send `send_message` to `@orchestrator` with `[READY_FOR_STAGING]`.
+   - If critical defects require code fixes, send `send_message` directly to `CODER` with defect details.

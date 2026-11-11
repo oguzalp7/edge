@@ -9,7 +9,7 @@ import os
 import json
 import argparse
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 root_dir = Path(__file__).resolve().parent.parent.parent
 if str(root_dir) not in sys.path:
@@ -139,6 +139,49 @@ def cmd_triage(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_state_prompt(fsm: BrigadeFSM, ticket: Ticket, repo_path: Path) -> str:
+    curr = fsm.state.current_state
+    is_feature = getattr(ticket, "track", "core") == "feature"
+    if curr == CycleState.RED_TEST:
+        return StationRegistry.build_seam_architect_prompt(ticket, ticket.description or ticket.suggested_fix, repo_path=repo_path)
+    if curr in (CycleState.SURGERY, CycleState.TRIAGE):
+        if is_feature:
+            return StationRegistry.build_coder_prompt(ticket, ticket.test_seam_command, repo_path=repo_path)
+        return StationRegistry.build_surgeon_prompt(ticket, fsm.state.base_branch, repo_path=repo_path)
+    if curr == CycleState.REVIEW:
+        return "=== EXAMINER REVIEW PROMPT ===\n" + StationRegistry.build_examiner_prompt(ticket, fsm.state.base_branch, repo_path=repo_path)
+    if curr == CycleState.POLISH:
+        if is_feature:
+            return StationRegistry.build_coder_polish_prompt(ticket, fsm.state.review_findings, repo_path=repo_path)
+        return StationRegistry.build_polish_prompt(ticket, fsm.state.review_findings, repo_path=repo_path)
+    if curr == CycleState.QA:
+        target_route = f"/{ticket.domain.replace('_', '-')}"
+        header = "=== QA ENGINEER E2E / LAVISH PARITY PROMPT ===\n"
+        body = StationRegistry.build_qa_prompt(
+            ticket=ticket,
+            user_scenario_en=ticket.description or f"Verify UI parity and user flows for {ticket.domain}",
+            target_route=target_route,
+            lavish_path=getattr(ticket, "lavish_path", None),
+            repo_path=repo_path,
+        )
+        return header + body
+    if curr == CycleState.STAGING:
+        return f"STAGING STATE: Run deterministic CLI delivery command:\nbrigade finish-slice {repo_path}"
+    return f"No prompt template defined for state {curr.value}."
+
+
+def _print_ticket_prompt(fsm: BrigadeFSM, ticket: Ticket, repo_path: Path) -> None:
+    recorder = FlightRecorder(repo_path, ticket.ticket_id)
+    alert_block = recorder.get_prompt_alert_block()
+
+    curr = fsm.state.current_state
+    print(f"\n--- PROMPT PAYLOAD FOR STATE [{curr.value}] ---")
+    if alert_block:
+        print(alert_block)
+    print(_resolve_state_prompt(fsm, ticket, repo_path))
+    print("--- END PROMPT PAYLOAD ---\n")
+
+
 def cmd_ticket(args: argparse.Namespace) -> int:
     repo_path = normalize_target_path(args.repo)
     fsm = BrigadeFSM(repo_path)
@@ -148,45 +191,9 @@ def cmd_ticket(args: argparse.Namespace) -> int:
         return 1
 
     if args.prompt:
-        # Check flight recorder for zero-amnesia negative constraints block
-        recorder = FlightRecorder(repo_path, ticket.ticket_id)
-        alert_block = recorder.get_prompt_alert_block()
-
-        # Generate prompt for current station / state
-        curr = fsm.state.current_state
-        print(f"\n--- PROMPT PAYLOAD FOR STATE [{curr.value}] ---")
-        if alert_block:
-            print(alert_block)
-        if curr == CycleState.RED_TEST:
-            print(StationRegistry.build_seam_architect_prompt(ticket, ticket.description or ticket.suggested_fix, repo_path=repo_path))
-        elif curr == CycleState.SURGERY or curr == CycleState.TRIAGE:
-            if getattr(ticket, "track", "core") == "feature":
-                print(StationRegistry.build_coder_prompt(ticket, ticket.test_seam_command, repo_path=repo_path))
-            else:
-                print(StationRegistry.build_surgeon_prompt(ticket, fsm.state.base_branch, repo_path=repo_path))
-        elif curr == CycleState.REVIEW:
-            print("=== EXAMINER REVIEW PROMPT ===")
-            print(StationRegistry.build_examiner_prompt(ticket, fsm.state.base_branch, repo_path=repo_path))
-        elif curr == CycleState.POLISH:
-            if getattr(ticket, "track", "core") == "feature":
-                print(StationRegistry.build_coder_polish_prompt(ticket, fsm.state.review_findings, repo_path=repo_path))
-            else:
-                print(StationRegistry.build_polish_prompt(ticket, fsm.state.review_findings, repo_path=repo_path))
-        elif curr == CycleState.QA:
-            target_route = f"/{ticket.domain.replace('_', '-')}"
-            print("=== QA ENGINEER E2E / LAVISH PARITY PROMPT ===")
-            print(StationRegistry.build_qa_prompt(
-                ticket=ticket,
-                user_scenario_en=ticket.description or f"Verify UI parity and user flows for {ticket.domain}",
-                target_route=target_route,
-                lavish_path=getattr(ticket, "lavish_path", None),
-                repo_path=repo_path,
-            ))
-        elif curr == CycleState.STAGING:
-            print(f"STAGING STATE: Run deterministic CLI delivery command:\nbrigade finish-slice {repo_path}")
-        else:
-            print(f"No prompt template defined for state {curr.value}.")
-        print("--- END PROMPT PAYLOAD ---\n")
+        _print_ticket_prompt(fsm, ticket, repo_path)
+        if fsm.state.stations:
+            print("\n" + StationRegistry.format_kitchen_roster(fsm.state.stations))
     else:
         fmt = getattr(args, "format", "toon")
         if fmt == "json":
@@ -228,13 +235,14 @@ def cmd_prompt(args: argparse.Namespace) -> int:
 
     if not ticket:
         print(StationRegistry.load_station_rubric(slug, repo_path=repo_path))
-        return 0
+    else:
+        alert_block = FlightRecorder(repo_path, ticket.ticket_id).get_prompt_alert_block()
+        if alert_block:
+            print(alert_block)
+        print(_dispatch_prompt(slug, ticket, repo_path, fsm.state.base_branch))
 
-    alert_block = FlightRecorder(repo_path, ticket.ticket_id).get_prompt_alert_block()
-    if alert_block:
-        print(alert_block)
-
-    print(_dispatch_prompt(slug, ticket, repo_path, fsm.state.base_branch))
+    if fsm.state.stations:
+        print("\n" + StationRegistry.format_kitchen_roster(fsm.state.stations))
     return 0
 
 
@@ -266,6 +274,33 @@ def cmd_clear_findings(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_handoff_banner(handoff: Dict[str, Any]) -> None:
+    print("\n" + "=" * 65)
+    print("🤝 NEXT STATION HANDOFF (Autonomous Kitchen Relay)")
+    print("=" * 65)
+    print(f"   Target State:    {handoff['target_state']}")
+    print(f"   Target Role:     {handoff['target_role']} ({handoff['station_name']})")
+    print(f"   Conversation ID: {handoff['recipient_cid'] or '[NOT_REGISTERED]'}")
+    print(f"   Model:           {handoff['model']}")
+    print("   Suggested Action:")
+    cid = handoff.get("recipient_cid", "")
+    inst = handoff.get("instruction", "")
+    if cid and cid != "orchestrator":
+        print("     send_message(")
+        print(f"       Recipient: \"{cid}\",")
+        print(f"       Message: \"{inst}\"")
+        print("     )")
+    elif cid == "orchestrator":
+        print("     send_message(")
+        print("       Recipient: \"<orchestrator_cid>\",")
+        print(f"       Message: \"{inst}\"")
+        print("     )")
+    else:
+        print(f"     ⚠️ Station '{handoff['target_role']}' is not registered.")
+        print(f"     Register with: brigade register <repo> --role {handoff['target_role']} --conversation-id <id>")
+    print("=" * 65 + "\n")
+
+
 def cmd_advance(args: argparse.Namespace) -> int:
     repo_path = normalize_target_path(args.repo)
     fsm = BrigadeFSM(repo_path)
@@ -275,6 +310,8 @@ def cmd_advance(args: argparse.Namespace) -> int:
     if success:
         print(f"🚀 STATE ADVANCED: [{prev.value}] ➔ [{next_state.value}]")
         print(f"   Result: {message}")
+        handoff = fsm.get_next_station_handoff(next_state)
+        _print_handoff_banner(handoff)
         return 0
     else:
         print(f"❌ STATE TRANSITION BLOCKED: Remained at [{prev.value}]")

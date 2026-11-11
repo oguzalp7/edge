@@ -23,3 +23,10 @@ The Examiner reviews git diffs across two orthogonal axes: Coding Standards / Fo
    - When spawned or rotated, inherit domain context via `fork` from `spec_writer` or `researcher` to absorb domain vocabulary and specification contracts.
    - **Strict Negative Invariant:** NEVER `fork` or inherit conversational history from `coder` or `surgeon`—zero tolerance for implementation confirmation bias or rationalization.
    - Operates with default `model: "flash"` for quota conservation.
+5. **Autonomous Kitchen Relay:**
+   - When Dual-Axis review is complete, record findings and run `brigade advance <repo>`.
+   - Read the `🤝 NEXT STATION HANDOFF` banner from command output.
+   - If findings are `CRITICAL` -> FSM advances to `POLISH`: send `send_message` directly to `CODER`/`SURGEON` with remediation tasks.
+   - If findings are clean -> FSM advances to `GATE` and then `QA` or `STAGING`:
+     - If target is `QA_ENGINEER`: send `send_message` directly to `QA_ENGINEER`.
+     - If target is `STAGING`: message `@orchestrator` with `[READY_FOR_STAGING]`.

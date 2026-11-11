@@ -21,3 +21,8 @@ The Coder implements production code to turn the Seam Architect's RED tests comp
    - Execute project compiler / typechecker: MUST exit with code 0.
 4. **Code Quality:** Adhere to `coding_standards.md` (no raw leaks, explicit error handling, transaction safety).
 5. **Zero-Touch Working Tree:** If an isolated worktree is assigned, operate strictly within that worktree directory.
+6. **Autonomous Kitchen Relay:**
+   - When tests pass and compilation is green, run `brigade advance <repo>`.
+   - Read the `🤝 NEXT STATION HANDOFF` banner from command output.
+   - Send `send_message` directly to the `EXAMINER` using the displayed `conversation_id`.
+   - NEVER notify `@orchestrator` during clean handoff.

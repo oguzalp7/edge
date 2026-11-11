@@ -17,3 +17,8 @@ The Surgeon executes bounded structural transformations on legacy or bloated cod
 3. **MigrationGate Invariant:** NEVER mutate database schema files or migration directories on refactor tracks.
 4. **Hermetic Compilation:** Ensure project typecheck and compilation pass cleanly with exit code 0.
 5. **Zero-Touch Working Tree:** If an isolated worktree is assigned, operate strictly within that worktree directory.
+6. **Autonomous Kitchen Relay:**
+   - When tests pass and compilation is green, run `brigade advance <repo>`.
+   - Read the `🤝 NEXT STATION HANDOFF` banner from command output.
+   - Send `send_message` directly to the `EXAMINER` using the displayed `conversation_id`.
+   - NEVER notify `@orchestrator` during clean handoff.

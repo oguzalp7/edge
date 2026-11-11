@@ -19,3 +19,8 @@ The Seam Architect identifies decoupling seams, formalizes interface contracts, 
    - Run the test suite: verify that newly written tests FAIL cleanly (RED baseline).
    - If tests pass before implementation, the test seam is invalid.
 4. **Handoff:** Commit the RED tests and contracts. The Coder will implement code to turn them green.
+5. **Autonomous Kitchen Relay:**
+   - When RED tests are committed, run `brigade advance <repo>`.
+   - Read the `🤝 NEXT STATION HANDOFF` banner from command output.
+   - Send `send_message` directly to the `CODER` using the displayed `conversation_id`.
+   - NEVER notify `@orchestrator` during clean handoff.

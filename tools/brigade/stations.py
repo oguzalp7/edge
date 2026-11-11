@@ -27,6 +27,45 @@ class StationRegistry:
     def stations(self) -> Dict[str, Station]:
         return self.state.stations
 
+    @staticmethod
+    def format_kitchen_roster(stations: Dict[str, Station]) -> str:
+        """Renders a clean Markdown block listing registered stations and P2P handoff rules."""
+        if not stations:
+            return (
+                "### 📋 ACTIVE KITCHEN ROSTER\n"
+                "No persistent station workers currently registered.\n"
+                "Register stations with: brigade register <repo> --role <role> --conversation-id <id>\n"
+            )
+        return StationRegistry._render_roster_table(stations)
+
+    @staticmethod
+    def _render_roster_table(stations: Dict[str, Station]) -> str:
+        lines = [
+            "### 📋 ACTIVE KITCHEN ROSTER",
+            "| Role | Station Name | Conversation ID | Model | Status |",
+            "| :--- | :--- | :--- | :--- | :--- |",
+        ]
+        for role_slug, st in sorted(stations.items()):
+            lines.append(StationRegistry._format_roster_row(st))
+        lines.extend([
+            "",
+            "🤝 **PEER-TO-PEER HANDOFF RULES (Autonomous Kitchen Relay):**",
+            "- `seam_architect` -> `coder`: Red tests passing -> advance to `SURGERY`, message `coder` directly.",
+            "- `coder`/`surgeon` -> `examiner`: Verify passing -> advance to `REVIEW`, message `examiner` directly.",
+            "- `examiner` -> `coder` (POLISH) or `gate`: Review findings clean -> advance to `GATE`.",
+            "- `gate` -> `qa_engineer` (if Lavish prototype present) or `STAGING`.",
+            "- **Green-Zone Invariant:** Message `@orchestrator` ONLY upon reaching `STAGING` (`[READY_FOR_STAGING]`) or unresolvable `[ESCALATION]`!",
+        ])
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_roster_row(st: Station) -> str:
+        name = st.name if st.name else f"{st.role.replace('_', ' ').title()} Station"
+        cid = f"`{st.conversation_id}`" if st.conversation_id else "*none*"
+        model = getattr(st, "model", None) or "flash"
+        status = getattr(st, "status", None) or "IDLE"
+        return f"| `{st.role}` | {name} | {cid} | `{model}` | {status} |"
+
     def register(
         self,
         role: StationRole,
