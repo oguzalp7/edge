@@ -19,6 +19,22 @@ except ImportError:
     from tools.brigade.models import Station, StationRole, Ticket, ReviewFinding, BrigadeState
 
 
+def _resolve_target_label(ticket: Ticket) -> str:
+    if ticket.target_file:
+        return ticket.target_file
+    if getattr(ticket, "expected_files", None):
+        return ", ".join(ticket.expected_files)
+    return "(dynamic-slice)"
+
+
+def _resolve_stage_target(ticket: Ticket) -> str:
+    if ticket.target_file:
+        return ticket.target_file
+    if getattr(ticket, "expected_files", None):
+        return " ".join(ticket.expected_files)
+    return "-u"
+
+
 class StationRegistry:
     def __init__(self, state: BrigadeState):
         self.state = state
@@ -162,6 +178,8 @@ class StationRegistry:
         """Constructs a hermetic surgery ticket for the SURGEON station."""
         is_ui = getattr(ticket, "track", "core") == "ui"
         rubric = StationRegistry.load_station_rubric("surgeon", repo_path=repo_path)
+        target_label = _resolve_target_label(ticket)
+        stage_target = _resolve_stage_target(ticket)
 
         if is_ui:
             neg_constraints = "\n".join([f"- {c}" for c in ticket.negative_constraints]) or (
@@ -173,7 +191,7 @@ class StationRegistry:
             )
             protocol = f"""1. Git Isolation: Check out isolated branch `{ticket.branch_name}`.
 2. Baseline Verification: Run `{ticket.test_seam_command}` before changes.
-3. Surgery: Follow `skills/edge-ui-refactor/SKILL.md`. Consolidate repeated raw JSX in `{ticket.target_file}` into centralized primitives per `coding_standards.md`. If an unused legacy shallow wrapper exists, delete it (`git rm`).
+3. Surgery: Follow `skills/edge-ui-refactor/SKILL.md`. Consolidate repeated raw JSX in `{target_label}` into centralized primitives per `coding_standards.md`. If an unused legacy shallow wrapper exists, delete it (`git rm`).
 4. Hermetic Verification: Run project tests and compiler. Both must pass with exit code 0.
 5. Deterministic Visual Parity: If dev server running, compare screenshots via visual audit tools.
 6. Gate Verification: Run `python tools/gate.py . --track ui --base {base_branch}`.
@@ -190,10 +208,10 @@ class StationRegistry:
             )
             protocol = f"""1. Git Isolation: Check out isolated branch `{ticket.branch_name}`.
 2. Characterization Test: Run `{ticket.test_seam_command}` to verify test baseline before changes.
-3. Surgery: Extract queries/mutations to domain repository (`src/lib/{ticket.domain}/repository.ts`). Thin `{ticket.target_file}`.
+3. Surgery: Extract queries/mutations to domain repository (`src/lib/{ticket.domain}/repository.ts`). Thin `{target_label}`.
 4. Hermetic Verification: Run `{ticket.test_seam_command}`. Passes with exit code 0.
 5. Gate Verification: Run `python tools/gate.py . --track core --base {base_branch}`.
-6. Commit: Stage modified files (`git add {ticket.target_file} src/lib/{ticket.domain}/repository.ts`) and commit with message:
+6. Commit: Stage modified files (`git add {stage_target} src/lib/{ticket.domain}/repository.ts`) and commit with message:
    `refactor({ticket.domain}): {ticket.description.lower()} ({ticket.ticket_id})`
 7. Output: Report git diff summary, test output, and gate verification status."""
 
@@ -214,13 +232,13 @@ Before mutating production code, ensure a Treehouse worktree is leased to preser
         return f"""You are the SURGEON station worker in Edge Brigade operating in `{base_branch}`.
 {wt_block}
 MISSION:
-Execute the bounded refactor ticket `{ticket.ticket_id}` targeting `{ticket.rule_id}` in `{ticket.target_file}` (line {ticket.line_number}).
+Execute the bounded refactor ticket `{ticket.ticket_id}` targeting `{ticket.rule_id}` in '{target_label}' (line {ticket.line_number}).
 
 TICKET SPECIFICATION:
 - Ticket ID: {ticket.ticket_id}
 - Track: {getattr(ticket, 'track', 'core')}
 - Domain: {ticket.domain}
-- Target File: {ticket.target_file}
+- Target File: {target_label}
 - Target Symbol: {ticket.target_symbol or 'N/A'}
 - Severity: {ticket.severity}
 - Description: {ticket.description}
@@ -304,6 +322,7 @@ DIRECTIVES:
     def build_seam_architect_prompt(ticket: Ticket, spec_summary: str, repo_path: Optional[Path] = None) -> str:
         """Constructs a prompt for the SEAM_ARCHITECT station."""
         rubric = StationRegistry.load_station_rubric("seam-architect", repo_path=repo_path)
+        target_label = _resolve_target_label(ticket)
         return f"""You are the SEAM_ARCHITECT station worker in Edge Brigade.
 
 MISSION:
@@ -313,7 +332,7 @@ SPECIFICATION:
 {spec_summary}
 
 DIRECTIVES:
-1. Identify Seams: Determine clean sensing/enabling seams (interfaces, repository abstractions, DTO contracts) in `{ticket.target_file}`.
+1. Identify Seams: Determine clean sensing/enabling seams (interfaces, repository abstractions, DTO contracts) in '{target_label}'.
 2. Declare Contracts: Define explicit interfaces and type signatures.
 3. Write RED Unit/Contract Tests (TDD Anchor):
    - Author hermetic tests in `tests/` covering the acceptance criteria.
@@ -371,6 +390,12 @@ CONSTRAINTS (STRICT):
     def build_examiner_prompt(ticket: Ticket, base_branch: str, repo_path: Optional[Path] = None) -> str:
         """Constructs a unified dual-axis review ticket for the EXAMINER station."""
         rubric = StationRegistry.load_station_rubric("examiner", repo_path=repo_path)
+        target_label = _resolve_target_label(ticket)
+        expected_line = (
+            f"\n- Expected Files: {', '.join(ticket.expected_files)}"
+            if getattr(ticket, "expected_files", None)
+            else ""
+        )
         return f"""You are the EXAMINER station worker in Edge Brigade.
 
 DIFF INSPECTION:
@@ -384,7 +409,7 @@ REVIEW SOURCES:
 TICKET CONTEXT:
 - Refactoring Ticket: {ticket.ticket_id}
 - Domain: {ticket.domain}
-- Target File: {ticket.target_file}
+- Target File: {target_label}{expected_line}
 
 DUAL-AXIS REVIEW DIRECTIVES:
 Axis 1 (Standards & Fowler Smells):

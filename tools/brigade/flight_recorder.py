@@ -76,11 +76,14 @@ class FlightRecorder:
         domain: str = "unknown",
         target_file: str = "",
         worktree_path: str = "",
+        expected_files: Optional[List[str]] = None,
     ) -> None:
         self.data["track"] = track
         self.data["domain"] = domain
         self.data["target_file"] = target_file
         self.data["worktree_path"] = worktree_path
+        if expected_files is not None:
+            self.data["expected_files"] = expected_files
         self.save()
 
     def record_dead_end(
@@ -292,6 +295,49 @@ class FlightRecorder:
                 md.append(f"  * Suggested Fix: {rf.get('suggested_fix')}")
         md.append("")
 
+    def _resolve_target_display(self) -> str:
+        if self.data.get("target_file"):
+            return self.data["target_file"]
+        if self.data.get("expected_files"):
+            return ", ".join(self.data["expected_files"])
+        return "(dynamic-slice)"
+
+    def _render_dead_ends(self, md: List[str]) -> None:
+        dead_ends = self.data.get("dead_ends", [])
+        if not dead_ends:
+            md.append("*Henüz kaydedilmiş negatif kısıt bulunmuyor.*")
+            return
+        for de in dead_ends:
+            md.append(f"### ❌ {de['id']}: {de['title']}")
+            md.append(f"* **Neden Başarısız Oldu:** {de['reason']}")
+            md.append(f"* **Yasaklı Kural (Constraint):** `{de['prohibited_rule']}`")
+            if de.get("failure_output"):
+                md.append(f"```text\n{de['failure_output']}\n```")
+            md.append("")
+
+    def _render_escalations(self, md: List[str]) -> None:
+        escalations = self.data.get("escalations", [])
+        if not escalations:
+            md.append("*Henüz eskalasyon yaşanmadı.*")
+            return
+        for i, esc in enumerate(escalations, 1):
+            decision_str = f"**Cevap:** {esc['decision']}" if esc.get("decision") else "*(Henüz Cevaplanmadı - BEKLEMEDE)*"
+            md.append(f"{i}. **Soru / Neden ({esc['timestamp']}):** {esc['reason']}")
+            md.append(f"   - {decision_str}")
+            md.append("")
+
+    def _render_attempts(self, md: List[str]) -> None:
+        attempts = self.data.get("attempts", [])
+        if not attempts:
+            md.append("*Henüz deneme kaydı yok.*")
+            return
+        for att in attempts:
+            icon = "🟢" if att["exit_code"] == 0 else "🔴"
+            md.append(f"* {icon} **Attempt {att['attempt_num']}** (Exit: {att['exit_code']}) - `{att['timestamp']}`")
+            md.append(f"  * {att['summary']}")
+            if att.get("diff_stat"):
+                md.append(f"  * Diff: `{att['diff_stat']}`")
+
     def _render_markdown(self) -> None:
         """Generates human-readable Markdown post-mortem/living report."""
         status_icons = {
@@ -302,11 +348,13 @@ class FlightRecorder:
             "STAGNATED": "⚠️ STAGNATED",
         }
 
+        target_display = self._resolve_target_display()
+
         md = [
             f"# 📓 Flight Recorder: [{self.ticket_id}]",
             f"- **Status:** {status_icons.get(self.data['status'], self.data['status'])}",
             f"- **Track / Domain:** `{self.data.get('track')}` / `{self.data.get('domain')}`",
-            f"- **Target File:** `{self.data.get('target_file')}`",
+            f"- **Target File:** `{target_display}`",
             f"- **Worktree Path:** `{self.data.get('worktree_path') or 'N/A'}`",
             f"- **Last Updated:** `{self.data.get('updated_at')}`",
             "",
@@ -314,53 +362,23 @@ class FlightRecorder:
             "",
             "## 🚫 Negatif Kısıtlar & Çıkmaz Yollar (Dead Ends)",
         ]
+        if self.data.get("expected_files"):
+            md.insert(4, f"- **Expected Files:** `{', '.join(self.data['expected_files'])}`")
 
-        dead_ends = self.data.get("dead_ends", [])
-        if not dead_ends:
-            md.append("*Henüz kaydedilmiş negatif kısıt bulunmuyor.*")
-        else:
-            for de in dead_ends:
-                md.append(f"### ❌ {de['id']}: {de['title']}")
-                md.append(f"* **Neden Başarısız Oldu:** {de['reason']}")
-                md.append(f"* **Yasaklı Kural (Constraint):** `{de['prohibited_rule']}`")
-                if de.get("failure_output"):
-                    md.append(f"```text\n{de['failure_output']}\n```")
-                md.append("")
-
-        md.append("---")
-        md.append("")
-        md.append("## ⏸️ Escalation & İnsan Kararları (Captain Calls)")
-        escalations = self.data.get("escalations", [])
-        if not escalations:
-            md.append("*Henüz eskalasyon yaşanmadı.*")
-        else:
-            for i, esc in enumerate(escalations, 1):
-                decision_str = f"**Cevap:** {esc['decision']}" if esc.get("decision") else "*(Henüz Cevaplanmadı - BEKLEMEDE)*"
-                md.append(f"{i}. **Soru / Neden ({esc['timestamp']}):** {esc['reason']}")
-                md.append(f"   - {decision_str}")
-                md.append("")
-
-        md.append("---")
-        md.append("")
-        md.append("## 📊 Deneme Geçmişi (Attempt History)")
-        attempts = self.data.get("attempts", [])
-        if not attempts:
-            md.append("*Henüz deneme kaydı yok.*")
-        else:
-            for att in attempts:
-                icon = "🟢" if att["exit_code"] == 0 else "🔴"
-                md.append(f"* {icon} **Attempt {att['attempt_num']}** (Exit: {att['exit_code']}) - `{att['timestamp']}`")
-                md.append(f"  * {att['summary']}")
-                if att.get("diff_stat"):
-                    md.append(f"  * Diff: `{att['diff_stat']}`")
-
+        self._render_dead_ends(md)
+        md.extend(["---", "", "## ⏸️ Escalation & İnsan Kararları (Captain Calls)"])
+        self._render_escalations(md)
+        md.extend(["---", "", "## 📊 Deneme Geçmişi (Attempt History)"])
+        self._render_attempts(md)
         self._render_guard_failures(md)
         self._render_review_findings(md)
 
+        rendered = "\n".join(md) + "\n"
         tmp_md = self.md_file.with_suffix(".tmp")
         with open(tmp_md, "w", encoding="utf-8") as f:
-            f.write("\n".join(md) + "\n")
+            f.write(rendered)
         if tmp_md.exists():
             if self.md_file.exists():
                 self.md_file.unlink()
             tmp_md.rename(self.md_file)
+        return rendered

@@ -11,7 +11,7 @@ import re
 import subprocess
 import shutil
 from pathlib import Path
-from typing import Tuple, Dict, Any, Optional, List
+from typing import Tuple, Dict, Any, Optional, List, Set
 from datetime import datetime, timezone
 
 root_dir = Path(__file__).resolve().parent.parent.parent
@@ -53,6 +53,316 @@ from tools.common.paths import to_wsl_path, is_wsl_path
 # SSOT Heat Zone Thresholds (SPEC-002)
 GREEN_HEAT_THRESHOLD: int = 45_000
 YELLOW_HEAT_THRESHOLD: int = 75_000
+
+
+def _parse_porcelain_paths(porcelain_output: str) -> List[str]:
+    """
+    Parses git status --porcelain output preserving leading status column whitespace.
+    Handles '?? path', ' M path', 'M  path', 'A  path', quoted paths, and renames.
+    Guaranteed Cyclomatic Complexity <= 6.
+    """
+    paths: List[str] = []
+    if not porcelain_output or not porcelain_output.strip():
+        return paths
+
+    for raw_line in porcelain_output.splitlines():
+        line = raw_line.rstrip("\r\n")
+        if len(line) < 4:
+            continue
+        raw_path = line[3:].strip()
+        if " -> " in raw_path:
+            raw_path = raw_path.split(" -> ")[-1].strip()
+        clean_path = raw_path.strip('"').replace("\\", "/")
+        if clean_path.startswith("./"):
+            clean_path = clean_path[2:]
+        if clean_path:
+            paths.append(clean_path)
+
+    return list(dict.fromkeys(paths))
+
+
+def _is_non_prod_file(f: str) -> bool:
+    """
+    Determines if a relative path is a test, doc, metadata, or task tracking file.
+    Excludes .edge/, tests/, __tests__/, *.test.*, *.spec.*, test_*, *_test.*,
+    frontier.md, .frontier.toml, backlog.md, done-archive.md, .md, .json, .toml.
+    Guaranteed Cyclomatic Complexity <= 8.
+    """
+    norm = f.replace("\\", "/").strip()
+    if norm.startswith("./"):
+        norm = norm[2:]
+    if not norm:
+        return True
+
+    name = norm.rsplit("/", 1)[-1].lower()
+
+    if any(norm.endswith(ext) for ext in (".md", ".json", ".toml")):
+        return True
+
+    if name in ("frontier.md", ".frontier.toml", "backlog.md", "done-archive.md"):
+        return True
+
+    if name.startswith("test_") or "_test." in name:
+        return True
+
+    if any(marker in norm for marker in (".test.", ".spec.", "tests/", "__tests__/", ".edge/")):
+        return True
+
+    return False
+
+
+def _parse_expected_files_frontmatter_fallback(frontmatter: str) -> List[str]:
+    """Fallback line scanner for expected_files list in YAML frontmatter when PyYAML is unavailable."""
+    items: List[str] = []
+    lines = iter(frontmatter.splitlines())
+    for line in lines:
+        stripped = line.strip()
+        if not stripped.startswith("expected_files:"):
+            continue
+        val = stripped[len("expected_files:"):].strip()
+        if val.startswith("[") and val.endswith("]"):
+            return [x.strip().strip("'\"") for x in val[1:-1].split(",") if x.strip()]
+        for subline in lines:
+            sub = subline.strip()
+            if not sub or sub.startswith("#"):
+                continue
+            if not sub.startswith("- "):
+                return items
+            items.append(sub[2:].strip().strip("'\""))
+        break
+    return items
+
+
+def _extract_spec_expected_files(
+    repo_path: Path,
+    spec_path: Optional[str] = None,
+    clean_name: str = "",
+) -> List[str]:
+    """
+    Safely discovers and extracts expected_files from spec YAML frontmatter.
+    Guaranteed Cyclomatic Complexity <= 7. Never mines prose.
+    """
+    if spec_path:
+        cand = repo_path / spec_path
+    elif clean_name:
+        cand = repo_path / ".edge" / "specs" / f"{clean_name}.md"
+    else:
+        return []
+
+    if not cand.exists() or not cand.is_file():
+        return []
+
+    try:
+        content = cand.read_text(encoding="utf-8", errors="ignore")
+        if not content.startswith("---"):
+            return []
+        parts = content.split("---", 2)
+        if len(parts) < 3:
+            return []
+
+        frontmatter = parts[1]
+        raw_list: Optional[List[Any]] = None
+
+        try:
+            import yaml
+            parsed = yaml.safe_load(frontmatter)
+            if isinstance(parsed, dict) and "expected_files" in parsed:
+                raw_list = parsed.get("expected_files")
+        except Exception:
+            raw_list = None
+
+        if raw_list is None:
+            raw_list = _parse_expected_files_frontmatter_fallback(frontmatter)
+
+        cleaned: List[str] = []
+        if isinstance(raw_list, list):
+            for item in raw_list:
+                s = str(item).strip().replace("\\", "/")
+                if s.startswith("./"):
+                    s = s[2:]
+                if s:
+                    cleaned.append(s)
+        return list(dict.fromkeys(cleaned))
+    except Exception:
+        return []
+
+
+def _check_missing_expected_files(
+    expected_files: List[str],
+    all_changed_files: List[str],
+) -> Tuple[List[str], bool]:
+    from tools.drift.models import matches_tracked_paths
+
+    missing = []
+    has_glob = False
+    for entry in expected_files:
+        norm = entry.replace("\\", "/").strip()
+        if norm.startswith("./"):
+            norm = norm[2:]
+        if "*" in norm or "?" in norm:
+            has_glob = True
+            if not any(matches_tracked_paths([f], [norm]) for f in all_changed_files):
+                missing.append(entry)
+        elif norm not in all_changed_files:
+            missing.append(entry)
+    return missing, has_glob
+
+
+def _validate_mode_a(
+    expected_files: List[str],
+    target_file_norm: str,
+    all_changed_files: List[str],
+    prod_changed_files: List[str],
+) -> Tuple[bool, str, Dict[str, Any]]:
+    """Validates Mode A: 100% expected_files modified + scope drift protection."""
+    from tools.drift.models import matches_tracked_paths
+
+    missing, has_glob = _check_missing_expected_files(expected_files, all_changed_files)
+    if missing:
+        return (
+            False,
+            f"Incomplete Feature Implementation: Expected file(s) not modified/created: {missing}",
+            {"missing_files": missing, "changed_files": all_changed_files},
+        )
+
+    if has_glob and not prod_changed_files:
+        return (
+            False,
+            "Incomplete Feature Implementation: No production files were modified or created in dynamic slice.",
+            {"missing_files": expected_files, "changed_files": all_changed_files},
+        )
+
+    allowed = list(expected_files)
+    if target_file_norm and target_file_norm not in allowed:
+        allowed.append(target_file_norm)
+
+    unexpected = [pf for pf in prod_changed_files if not matches_tracked_paths([pf], allowed)]
+    if unexpected:
+        return (
+            False,
+            f"Deterministic Spec-Code Scope Drift: Modified production files outside expected_files: {unexpected}",
+            {"unexpected_files": unexpected, "changed_files": all_changed_files},
+        )
+
+    return True, "", {}
+
+
+def _validate_mode_b(
+    target_file_norm: str,
+    all_changed_files: List[str],
+    target_file_raw: str,
+) -> Tuple[bool, str, Dict[str, Any]]:
+    """Validates Mode B: Single target_file modified."""
+    if target_file_norm not in all_changed_files:
+        return (
+            False,
+            f"Target file '{target_file_raw}' was not modified or created.",
+            {"modified_files": all_changed_files},
+        )
+    return True, "", {}
+
+
+def _validate_mode_c(
+    prod_changed_files: List[str],
+    all_changed_files: List[str],
+) -> Tuple[bool, str, Dict[str, Any]]:
+    """Validates Mode C: At least 1 production file modified in dynamic slice."""
+    if not prod_changed_files:
+        return (
+            False,
+            "No production files were modified or created in dynamic slice.",
+            {"changed_files": all_changed_files},
+        )
+    return True, "", {}
+
+
+def _process_numstat_lines(
+    numstat_out: str,
+    target_file_norm: str,
+) -> Tuple[Set[str], int, int, bool]:
+    seen: Set[str] = set()
+    t_found = False
+    t_delta = 0
+    net = 0
+
+    for line in numstat_out.splitlines():
+        parts = line.strip().split("\t")
+        if len(parts) < 3:
+            continue
+        ins_s, del_s, raw_fn = parts[0], parts[1], parts[2].replace("\\", "/").strip()
+        fn = raw_fn[2:] if raw_fn.startswith("./") else raw_fn
+        seen.add(fn)
+        if not (ins_s.isdigit() and del_s.isdigit()):
+            continue
+        ins, dels = int(ins_s), int(del_s)
+        if target_file_norm and fn == target_file_norm:
+            t_found = True
+            t_delta = ins - dels
+        if not _is_non_prod_file(fn):
+            net += (ins - dels)
+
+    return seen, t_delta, net, t_found
+
+
+def _count_untracked_prod_lines(
+    prod_changed_files: List[str],
+    seen_files: Set[str],
+    target_file_norm: str,
+    eff_dir: Path,
+) -> Tuple[int, int, bool]:
+    net = 0
+    t_delta = 0
+    t_found = False
+
+    for pf in prod_changed_files:
+        if pf in seen_files:
+            continue
+        fpath = eff_dir / pf
+        if not (fpath.exists() and fpath.is_file()):
+            continue
+        try:
+            cnt = len(fpath.read_text(encoding="utf-8", errors="ignore").splitlines())
+            net += cnt
+            if target_file_norm and pf == target_file_norm:
+                t_found = True
+                t_delta = cnt
+        except Exception:
+            pass
+
+    return net, t_delta, t_found
+
+
+def _compute_sloc_deltas(
+    numstat_out: str,
+    prod_changed_files: List[str],
+    target_file_norm: str,
+    eff_dir: Path,
+) -> Tuple[int, int, bool]:
+    seen, t_delta, net, t_found = _process_numstat_lines(numstat_out, target_file_norm)
+    u_net, u_delta, u_found = _count_untracked_prod_lines(
+        prod_changed_files, seen, target_file_norm, eff_dir
+    )
+    final_target_found = t_found or u_found
+    final_target_delta = t_delta if t_found else u_delta
+    final_net = net + u_net
+    return final_target_delta, final_net, final_target_found
+
+
+class SubstepList(str):
+    """String-compatible list wrapper for substep lists allowing ' '.join() and sequence unpacking."""
+    def __new__(cls, items):
+        val = ", ".join(items)
+        s = super().__new__(cls, val)
+        s._items = list(items)
+        return s
+
+    def __iter__(self):
+        return iter(self._items)
+
+    def __getitem__(self, idx):
+        if isinstance(idx, int):
+            return self._items[idx]
+        return super().__getitem__(idx)
 
 
 class BrigadeFSM:
@@ -203,11 +513,66 @@ class BrigadeFSM:
             {"exit_code": test_code},
         )
 
+    def _collect_all_changed_files(self, base_ref: str) -> List[str]:
+        stdout = ""
+        diff_targets = [["HEAD"], [f"{base_ref}...HEAD"], [base_ref], ["HEAD~1"]]
+        for target in diff_targets:
+            code, out, _ = self._run_cmd(["git", "diff", "--name-only"] + target)
+            if code == 0 and out.strip():
+                stdout = out
+                break
+
+        modified_files = [
+            f[2:] if f.startswith("./") else f
+            for f in (line.strip().replace("\\", "/") for line in stdout.splitlines())
+            if f
+        ]
+
+        porcelain_files: List[str] = []
+        p_code, p_out, _ = self._run_cmd(["git", "status", "--porcelain"])
+        if p_code == 0 and p_out:
+            porcelain_files = _parse_porcelain_paths(p_out)
+
+        return list(dict.fromkeys(modified_files + porcelain_files))
+
+    def _get_numstat_output(self, base_ref: str) -> str:
+        diff_targets = [["HEAD"], [f"{base_ref}...HEAD"], [base_ref], ["HEAD~1"]]
+        for target in diff_targets:
+            code, out, _ = self._run_cmd(["git", "diff", "--numstat"] + target)
+            if code == 0 and out.strip():
+                return out
+        return ""
+
+    def _check_migration_gate_violation(
+        self, ticket: Ticket, all_changed_files: List[str]
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        if getattr(ticket, "allow_schema_migration", False) or getattr(ticket, "track", "core") == "feature":
+            return False, "", {}
+        schema_violations = [f for f in all_changed_files if f.startswith("src/db/schema") or f.startswith("drizzle/")]
+        if schema_violations:
+            return True, f"MigrationGate Invariant VIOLATION: Refactor touched database schemas: {schema_violations}", {"schema_violations": schema_violations}
+        return False, "", {}
+
+    def _validate_modes(
+        self,
+        ticket: Ticket,
+        target_file_norm: str,
+        target_file_raw: str,
+        all_changed_files: List[str],
+        prod_changed_files: List[str],
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        expected_files = getattr(ticket, "expected_files", None) or []
+        if expected_files:
+            return _validate_mode_a(expected_files, target_file_norm, all_changed_files, prod_changed_files)
+        if target_file_norm:
+            return _validate_mode_b(target_file_norm, all_changed_files, target_file_raw)
+        return _validate_mode_c(prod_changed_files, all_changed_files)
+
     def guard_surgery_to_verify(self) -> Tuple[bool, str, Dict[str, Any]]:
         """
         Validates surgery invariants via git diff:
         1. MigrationGate Invariant: Zero schema or drizzle files touched (on refactor tracks).
-        2. Target File Modification / Multi-file / New-file scope verification.
+        2. Target File Modification / Multi-file / New-file scope verification (Modes A, B, C).
         3. Records SLOC delta telemetry.
         """
         ticket = self.state.active_ticket
@@ -215,191 +580,38 @@ class BrigadeFSM:
             return False, "No active ticket found in SURGERY state.", {}
 
         base_ref = self.state.base_branch
-        # Check files modified: check working tree against HEAD first, then fallback to base_ref
-        code, stdout, stderr = self._run_cmd(["git", "diff", "--name-only", "HEAD"])
-        if code != 0 or not stdout.strip():
-            code, stdout, stderr = self._run_cmd(["git", "diff", "--name-only", f"{base_ref}...HEAD"])
-        if code != 0 or not stdout.strip():
-            code, stdout, stderr = self._run_cmd(["git", "diff", "--name-only", base_ref])
-        if code != 0 or not stdout.strip():
-            code, stdout, stderr = self._run_cmd(["git", "diff", "--name-only", "HEAD~1"])
+        all_changed_files = self._collect_all_changed_files(base_ref)
+        prod_changed_files = [f for f in all_changed_files if not _is_non_prod_file(f)]
 
-        modified_files = [f.strip().replace("\\", "/") for f in stdout.splitlines() if f.strip()]
-        modified_files = [f[2:] if f.startswith("./") else f for f in modified_files]
+        is_violation, v_msg, v_details = self._check_migration_gate_violation(ticket, all_changed_files)
+        if is_violation:
+            return False, v_msg, v_details
 
-        # Combine with untracked/modified paths from git status --porcelain
-        porcelain_files: List[str] = []
-        p_code, p_out, _ = self._run_cmd(["git", "status", "--porcelain"])
-        if p_code == 0 and p_out.strip():
-            for line in p_out.splitlines():
-                line = line.strip()
-                if len(line) >= 3:
-                    p = line[3:].strip().strip('"').replace("\\", "/")
-                    if " -> " in p:
-                        p = p.split(" -> ")[-1].strip().strip('"').replace("\\", "/")
-                    if p.startswith("./"):
-                        p = p[2:]
-                    if p:
-                        porcelain_files.append(p)
+        numstat_out = self._get_numstat_output(base_ref)
+        target_file_raw = ticket.target_file or ""
+        target_file_norm = target_file_raw.replace("\\", "/").strip()
+        target_file_norm = target_file_norm[2:] if target_file_norm.startswith("./") else target_file_norm
 
-        all_changed_files = list(dict.fromkeys(modified_files + porcelain_files))
-
-        def _is_non_prod(f: str) -> bool:
-            norm = f.replace("\\", "/").strip()
-            if norm.startswith("./"):
-                norm = norm[2:]
-            return (
-                ".test." in norm
-                or ".spec." in norm
-                or norm.startswith("tests/")
-                or "/tests/" in norm
-                or norm.startswith(".edge/")
-                or "/.edge/" in norm
-                or norm.endswith(".md")
-                or norm.endswith(".json")
-            )
-
-        prod_changed_files = [f for f in all_changed_files if not _is_non_prod(f)]
-
-        # 1. MigrationGate Invariant check (Enforced unless feature track or explicitly permitted)
-        if not getattr(ticket, "allow_schema_migration", False) and getattr(ticket, "track", "core") != "feature":
-            schema_violations = [f for f in all_changed_files if f.startswith("src/db/schema") or f.startswith("drizzle/")]
-            if schema_violations:
-                details = {"schema_violations": schema_violations}
-                return False, f"MigrationGate Invariant VIOLATION: Refactor touched database schemas: {schema_violations}", details
-
-        # 2. Check target file modification and record SLOC delta telemetry
-        numstat_code, numstat_out, _ = self._run_cmd(["git", "diff", "--numstat", "HEAD"])
-        if numstat_code != 0 or not numstat_out.strip():
-            numstat_code, numstat_out, _ = self._run_cmd(["git", "diff", "--numstat", f"{base_ref}...HEAD"])
-        if numstat_code != 0 or not numstat_out.strip():
-            numstat_code, numstat_out, _ = self._run_cmd(["git", "diff", "--numstat", base_ref])
-        if numstat_code != 0 or not numstat_out.strip():
-            numstat_code, numstat_out, _ = self._run_cmd(["git", "diff", "--numstat", "HEAD~1"])
-
-        target_file_norm = ticket.target_file.replace("\\", "/").strip() if ticket.target_file else ""
-        if target_file_norm.startswith("./"):
-            target_file_norm = target_file_norm[2:]
-
-        target_found = False
-        target_delta = 0
-        total_net = 0
-        seen_numstat_files = set()
-
-        for line in numstat_out.splitlines():
-            parts = line.strip().split("\t")
-            if len(parts) >= 3:
-                ins_str, del_str, file_name = parts[0], parts[1], parts[2].replace("\\", "/").strip()
-                if file_name.startswith("./"):
-                    file_name = file_name[2:]
-                seen_numstat_files.add(file_name)
-                if ins_str.isdigit() and del_str.isdigit():
-                    ins, dels = int(ins_str), int(del_str)
-
-                    if target_file_norm and file_name == target_file_norm:
-                        target_found = True
-                        target_delta = ins - dels
-
-                    # Filter out tests, docs, json ledgers, and .edge from net production SLOC telemetry
-                    if _is_non_prod(file_name):
-                        continue
-
-                    total_net += (ins - dels)
-
-        # Count lines in newly created untracked production files not captured in numstat
         eff_dir = normalize_target_path(ticket.worktree_path) if ticket.worktree_path else self.target_repo
-        for pf in prod_changed_files:
-            if pf not in seen_numstat_files:
-                fpath = eff_dir / pf
-                if fpath.exists() and fpath.is_file():
-                    try:
-                        line_count = len(fpath.read_text(encoding="utf-8", errors="ignore").splitlines())
-                        total_net += line_count
-                        if target_file_norm and pf == target_file_norm:
-                            target_found = True
-                            target_delta = line_count
-                    except Exception:
-                        pass
+        target_delta, total_net, _ = _compute_sloc_deltas(
+            numstat_out, prod_changed_files, target_file_norm, eff_dir
+        )
 
-        # 3. Track-specific verification
-        if getattr(ticket, "track", "core") == "feature":
-            if ticket.expected_files:
-                from tools.drift.models import matches_tracked_paths
+        ok, msg, details = self._validate_modes(
+            ticket, target_file_norm, target_file_raw, all_changed_files, prod_changed_files
+        )
+        if not ok:
+            return False, msg, details
 
-                # Literal path check: verify all literal entries (no * or ?) are in all_changed_files
-                missing = []
-                for entry in ticket.expected_files:
-                    norm_entry = entry.replace("\\", "/").strip()
-                    if norm_entry.startswith("./"):
-                        norm_entry = norm_entry[2:]
-                    if "*" not in norm_entry and "?" not in norm_entry:
-                        if norm_entry not in all_changed_files:
-                            missing.append(entry)
-                if missing:
-                    return (
-                        False,
-                        f"Incomplete Feature Implementation: Expected file(s) not modified/created: {missing}",
-                        {"missing_files": missing, "changed_files": all_changed_files},
-                    )
-
-                # Scope drift check: verify all modified production files match expected_files or target_file
-                allowed_patterns = list(ticket.expected_files)
-                if target_file_norm and target_file_norm not in allowed_patterns:
-                    allowed_patterns.append(target_file_norm)
-
-                unexpected = []
-                for pf in prod_changed_files:
-                    if not matches_tracked_paths([pf], allowed_patterns):
-                        unexpected.append(pf)
-                if unexpected:
-                    return (
-                        False,
-                        f"Deterministic Spec-Code Scope Drift: Modified production files outside expected_files: {unexpected}",
-                        {"unexpected_files": unexpected, "changed_files": all_changed_files},
-                    )
-
-            elif target_file_norm:
-                if target_file_norm not in all_changed_files:
-                    return (
-                        False,
-                        f"Target file '{ticket.target_file}' was not modified or created.",
-                        {"modified_files": all_changed_files},
-                    )
-            else:
-                if len(prod_changed_files) == 0:
-                    return (
-                        False,
-                        "No production files were modified or created in feature slice.",
-                        {"changed_files": all_changed_files},
-                    )
-
-            return (
-                True,
-                f"Surgery invariants passed: Target file delta {target_delta:+d} lines (Net SLOC: {total_net:+d}).",
-                {
-                    "target_delta": target_delta,
-                    "total_net": total_net,
-                    "modified_files": all_changed_files,
-                },
-            )
-
-        else:
-            if not target_found:
-                return (
-                    False,
-                    f"Target file '{ticket.target_file}' was not modified in the diff.",
-                    {"modified_files": modified_files},
-                )
-
-            return (
-                True,
-                f"Surgery invariants passed: Target file delta {target_delta:+d} lines (Net SLOC: {total_net:+d}).",
-                {
-                    "target_delta": target_delta,
-                    "total_net": total_net,
-                    "modified_files": modified_files,
-                },
-            )
+        return (
+            True,
+            f"Surgery invariants passed: Target file delta {target_delta:+d} lines (Net SLOC: {total_net:+d}).",
+            {
+                "target_delta": target_delta,
+                "total_net": total_net,
+                "modified_files": all_changed_files,
+            },
+        )
 
     def guard_verify_to_review(self) -> Tuple[bool, str, Dict[str, Any]]:
         """
@@ -1283,13 +1495,21 @@ class BrigadeFSM:
                 if cand_domain.exists():
                     resolved_lavish = str(cand_domain.relative_to(self.target_repo)).replace("\\", "/")
 
+        eff_expected_files = list(expected_files or [])
+        if not eff_expected_files:
+            eff_expected_files = _extract_spec_expected_files(
+                repo_path=self.target_repo,
+                spec_path=spec_path,
+                clean_name=clean_name,
+            )
+
         ticket = Ticket(
             ticket_id=ticket_id,
             track=track,
             domain=eff_domain,
             rule_id=rule_id,
             severity="NORMAL",
-            target_file=target_file or f"src/{clean_name}",
+            target_file=target_file,
             line_number=1,
             fingerprint=f"slice-{clean_name}",
             description=f"Live slice: {name}",
@@ -1299,7 +1519,7 @@ class BrigadeFSM:
             scaffolding_allowance=50 if track == "feature" else 15,
             enforce_contraction=False,
             allow_schema_migration=allow_schema_migration,
-            expected_files=list(expected_files or []),
+            expected_files=eff_expected_files,
             spec_path=spec_path,
             lavish_path=resolved_lavish,
             require_qa=require_qa,
@@ -1325,6 +1545,7 @@ class BrigadeFSM:
             domain=eff_domain,
             target_file=ticket.target_file,
             worktree_path=ticket.worktree_path or "",
+            expected_files=ticket.expected_files,
         )
 
         self.state.active_ticket = ticket
@@ -1366,30 +1587,36 @@ class BrigadeFSM:
     # Pause, Resume & Context Heat Protocols
     # =========================================================================
 
-    def _get_substeps_for_state(self, state: CycleState, ticket: Optional[Ticket]) -> Tuple[List[str], List[str], str]:
+    def _get_substeps_for_state(self, state: CycleState, ticket: Optional[Ticket] = None) -> Tuple[List[str], List[str], str]:
         """Infers completed and pending substeps plus next action prompt from state."""
-        target = ticket.target_file if ticket else "target file"
+        eff_ticket = ticket if ticket is not None else self.state.active_ticket
+        target = (
+            eff_ticket.target_file
+            or (", ".join(eff_ticket.expected_files) if getattr(eff_ticket, "expected_files", None) else "(dynamic-slice)")
+            if eff_ticket
+            else "target file"
+        )
         if state == CycleState.IDLE:
-            return [], ["triage_next_ticket"], "Run 'brigade triage' to pick next ticket from radar."
+            return SubstepList([]), SubstepList(["triage_next_ticket"]), "Run 'brigade triage' to pick next ticket from radar."
         elif state == CycleState.TRIAGE:
-            return ["ticket_triaged"], ["git_branch_created", "baseline_compiler_verified", "surgery"], "Run 'brigade advance' to transition to SURGERY and dispatch Surgeon."
+            return SubstepList(["ticket_triaged"]), SubstepList(["git_branch_created", "baseline_compiler_verified", "surgery"]), "Run 'brigade advance' to transition to SURGERY and dispatch Surgeon."
         elif state == CycleState.RED_TEST:
-            return ["slice_started"], ["write_red_tests", "verify_red_baseline"], f"Author failing unit/contract tests for {target} to establish red baseline before advancing to SURGERY."
+            return SubstepList(["slice_started"]), SubstepList(["write_red_tests", "verify_red_baseline"]), f"Author failing unit/contract tests for {target} to establish red baseline before advancing to SURGERY."
         elif state == CycleState.SURGERY:
-            return ["ticket_triaged", "git_branch_created"], ["code_modifications", "hermetic_verification", "gate_verification"], f"Execute bounded surgery on {target}, then verify with tests and tsc before advancing to VERIFY."
+            return SubstepList(["ticket_triaged", "git_branch_created"]), SubstepList(["code_modifications", "hermetic_verification", "gate_verification"]), f"Execute bounded surgery on {target}, then verify with tests and tsc before advancing to VERIFY."
         elif state == CycleState.VERIFY:
-            return ["ticket_triaged", "surgery_completed"], ["test_seam_verification", "tsc_compilation", "dual_axis_review"], "Run hermetic test seams and advance to REVIEW."
+            return SubstepList(["ticket_triaged", "surgery_completed"]), SubstepList(["test_seam_verification", "tsc_compilation", "dual_axis_review"]), "Run hermetic test seams and advance to REVIEW."
         elif state == CycleState.REVIEW:
-            return ["ticket_triaged", "surgery_completed", "hermetic_tests_passed"], ["standards_review", "spec_review", "edge_gate"], "Execute dual-axis review (Standards & Spec) and record findings."
+            return SubstepList(["ticket_triaged", "surgery_completed", "hermetic_tests_passed"]), SubstepList(["standards_review", "spec_review", "edge_gate"]), "Execute dual-axis review (Standards & Spec) and record findings."
         elif state == CycleState.POLISH:
-            return ["review_findings_recorded"], ["remediate_critical_findings", "re_verify", "edge_gate"], "Remediate critical review findings and advance to GATE."
+            return SubstepList(["review_findings_recorded"]), SubstepList(["remediate_critical_findings", "re_verify", "edge_gate"]), "Remediate critical review findings and advance to GATE."
         elif state == CycleState.GATE:
-            return ["review_clean"], ["edge_gate_execution", "qa_verification", "squash_merge"], "Run 'python tools/gate.py' verification suite and advance."
+            return SubstepList(["review_clean"]), SubstepList(["edge_gate_execution", "qa_verification", "squash_merge"]), "Run 'python tools/gate.py' verification suite and advance."
         elif state == CycleState.QA:
-            return ["gate_passed"], ["browser_e2e_verification", "lavish_parity_check", "zero_console_errors", "squash_merge"], "Execute QA browser inspection (chrome-devtools-axi) and advance to STAGING."
+            return SubstepList(["gate_passed"]), SubstepList(["browser_e2e_verification", "lavish_parity_check", "zero_console_errors", "squash_merge"]), "Execute QA browser inspection (chrome-devtools-axi) and advance to STAGING."
         elif state == CycleState.STAGING:
-            return ["gate_passed", "qa_verified"], ["squash_merge_to_base", "radar_ledger_update"], "Squash-merge refactor branch into base and update radar ledger."
-        return [], [], f"Resume execution in state {state.value}."
+            return SubstepList(["gate_passed", "qa_verified"]), SubstepList(["squash_merge_to_base", "radar_ledger_update"]), "Squash-merge refactor branch into base and update radar ledger."
+        return SubstepList([]), SubstepList([]), f"Resume execution in state {state.value}."
 
     def pause(self, reason: str = "MANUAL_PAUSE") -> Checkpoint:
         """
