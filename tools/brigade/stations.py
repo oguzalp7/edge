@@ -447,21 +447,45 @@ CONSTRAINTS & INSTRUCTIONS (STRICT):
 
     @staticmethod
     def build_qa_prompt(
-        user_scenario_en: str,
+        user_scenario_en: str = "",
         target_route: str = "http://localhost:3000",
         assertions: Optional[List[str]] = None,
         scenario_slug: str = "qa_scenario",
         repo_path: Optional[Path] = None,
+        ticket: Optional[Ticket] = None,
+        lavish_path: Optional[str] = None,
     ) -> str:
         """Constructs an E2E Browser & Visual QA ticket for the QA_ENGINEER (Sommelier) station."""
         rubric = StationRegistry.load_station_rubric("qa-engineer", repo_path=repo_path)
         q3 = chr(34) * 3
-        assertions_str = "\n".join([f"- {a}" for a in (assertions or [])]) or (
-            "- Target flow completes with expected UI transitions.\n"
-            "- Zero unhandled exceptions or console errors in devtools.\n"
-            "- Network requests return status 200/expected HTTP responses.\n"
-            "- Visual state matches design expectations (screenshot captured)."
-        )
+
+        eff_scenario = user_scenario_en or (ticket.description if ticket else "") or "E2E UI & user flow verification"
+        eff_lavish = lavish_path or (getattr(ticket, "lavish_path", None) if ticket else None)
+        eff_slug = scenario_slug if scenario_slug != "qa_scenario" else (ticket.domain.lower().replace("_", "-") if ticket else "qa_scenario")
+
+        lavish_section = ""
+        if eff_lavish:
+            lavish_section = f"""
+LAVISH-TO-REALITY PARITY & TIER-1 CONSOLE/SMOKE GATE:
+- Approved Lavish Prototype: {eff_lavish}
+- Inspect {eff_lavish} prior to launching browser verification.
+- Verify that every interactive control, state, button, and layout from the Lavish prototype exists in the live DOM.
+- TIER-1 CONSOLE/SMOKE GATE: Zero tolerance for unhandled exceptions, console.error messages, React hydration failures, or unexpected 4xx/5xx network responses. Any occurrence fails the QA gate (CRITICAL).
+"""
+
+        base_assertions = list(assertions or [])
+        if not base_assertions:
+            base_assertions = [
+                "Target flow completes with expected UI transitions.",
+                "Zero unhandled exceptions or console errors in devtools (Tier-1 Zero Tolerance).",
+                "Network requests return status 200/expected HTTP responses.",
+                "Visual state matches design expectations (screenshot captured).",
+            ]
+            if eff_lavish:
+                base_assertions.insert(0, f"Full structural and visual parity verified against {eff_lavish}.")
+
+        assertions_str = "\n".join([f"- {a}" for a in base_assertions])
+
         return f"""You are the QA_ENGINEER (Sommelier) station worker in Edge Brigade.
 
 MISSION:
@@ -471,11 +495,11 @@ TARGET ROUTE:
 {target_route}
 
 SCENARIO SLUG:
-{scenario_slug}
-
+{eff_slug}
+{lavish_section}
 TRANSLATED USER SCENARIO (UBIQUITOUS DOMAIN SPEC):
 {q3}
-{user_scenario_en}
+{eff_scenario}
 {q3}
 
 VERIFICATION ASSERTIONS (CRITERIA):
@@ -484,9 +508,9 @@ VERIFICATION ASSERTIONS (CRITERIA):
 EXECUTION PROTOCOL & TOOL HIERARCHY:
 1. Primary Tool: `chrome-devtools-axi` (WSL /usr/local/bin/chrome-devtools-axi) or `chrome-devtools-mcp`.
 2. Fast-Forward Replay (Codegen-Style Replay):
-   - Check if `.edge/qa/replays/{scenario_slug}.axi.js` exists from a previous partial run.
-     - If it exists: Run `chrome-devtools-axi run < .edge/qa/replays/{scenario_slug}.axi.js` to instantly fast-forward browser state to the failure seam without spending LLM tokens on re-discovering preambles!
-   - As you execute new actions, continuously record the JavaScript commands into `.edge/qa/replays/{scenario_slug}.axi.js` using the standard `chrome-devtools-axi run` API:
+   - Check if `.edge/qa/replays/{eff_slug}.axi.js` exists from a previous partial run.
+     - If it exists: Run `chrome-devtools-axi run < .edge/qa/replays/{eff_slug}.axi.js` to instantly fast-forward browser state to the failure seam without spending LLM tokens on re-discovering preambles!
+   - As you execute new actions, continuously record the JavaScript commands into `.edge/qa/replays/{eff_slug}.axi.js` using the standard `chrome-devtools-axi run` API:
      `await page.open("{target_route}");`
      `await page.click("<selector>");`
      `await page.fill("<selector>", "<value>");`

@@ -172,6 +172,16 @@ def cmd_ticket(args: argparse.Namespace) -> int:
                 print(StationRegistry.build_coder_polish_prompt(ticket, fsm.state.review_findings, repo_path=repo_path))
             else:
                 print(StationRegistry.build_polish_prompt(ticket, fsm.state.review_findings, repo_path=repo_path))
+        elif curr == CycleState.QA:
+            target_route = f"/{ticket.domain.replace('_', '-')}"
+            print("=== QA ENGINEER E2E / LAVISH PARITY PROMPT ===")
+            print(StationRegistry.build_qa_prompt(
+                ticket=ticket,
+                user_scenario_en=ticket.description or f"Verify UI parity and user flows for {ticket.domain}",
+                target_route=target_route,
+                lavish_path=getattr(ticket, "lavish_path", None),
+                repo_path=repo_path,
+            ))
         elif curr == CycleState.STAGING:
             print(f"STAGING STATE: Run deterministic CLI delivery command:\nbrigade finish-slice {repo_path}")
         else:
@@ -296,6 +306,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         CycleState.REVIEW: "🧐 REVIEW",
         CycleState.POLISH: "✨ POLISH",
         CycleState.GATE: "🚪 GATE",
+        CycleState.QA: "🍷 QA",
         CycleState.STAGING: "🚢 STAGING",
         CycleState.COMPLETED: "🏆 COMPLETED",
         CycleState.BLOCKED: "🛑 BLOCKED",
@@ -587,6 +598,8 @@ def cmd_start_slice(args: argparse.Namespace) -> int:
         else None
     )
     spec_path = getattr(args, "spec", None)
+    lavish_path = getattr(args, "lavish", None)
+    require_qa = getattr(args, "require_qa", None)
 
     ok, ticket, msg = fsm.start_slice(
         name=args.name,
@@ -598,6 +611,8 @@ def cmd_start_slice(args: argparse.Namespace) -> int:
         auto_lease_worktree=True,
         expected_files=expected_files,
         spec_path=spec_path,
+        lavish_path=lavish_path,
+        require_qa=require_qa,
     )
     if not ok:
         print(f"❌ {msg}")
@@ -616,6 +631,10 @@ def cmd_start_slice(args: argparse.Namespace) -> int:
         print(f"Expected Files:  {', '.join(ticket.expected_files)}")
     if ticket.spec_path:
         print(f"Spec Path:       {ticket.spec_path}")
+    if getattr(ticket, "lavish_path", None):
+        print(f"Lavish Path:     {ticket.lavish_path}")
+    if getattr(ticket, "require_qa", None) is not None:
+        print(f"Require QA:      {ticket.require_qa}")
     print(f"Test Seam:       {ticket.test_seam_command}")
     print(f"Worktree Path:   {ticket.worktree_path or 'Primary (no treehouse)'}")
     print("=======================================================")
@@ -957,6 +976,10 @@ def main() -> int:
     p_start.add_argument("--allow-migration", action="store_true", default=True, help="Allow schema migrations")
     p_start.add_argument("--expected-files", help="Comma-separated expected files to create or modify")
     p_start.add_argument("--spec", help="Path to specification document")
+    p_start.add_argument("--lavish", help="Path to associated Lavish prototype HTML file")
+    qa_group = p_start.add_mutually_exclusive_group()
+    qa_group.add_argument("--qa", dest="require_qa", action="store_true", default=None, help="Explicitly mandate QA stage")
+    qa_group.add_argument("--no-qa", dest="require_qa", action="store_false", default=None, help="Explicitly bypass QA stage")
 
     # prompt
     p_prompt = subparsers.add_parser("prompt", help="Compose and print 2-layer prompt for a station")

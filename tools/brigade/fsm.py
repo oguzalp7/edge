@@ -532,6 +532,88 @@ class BrigadeFSM:
 
         return True, "Edge Verification Gate PASSED all invariant stages.", {"output": stdout}
 
+    def should_run_qa(self, ticket: Optional[Ticket] = None) -> bool:
+        """
+        Evaluates the runtime invariant 'Lavish Varsa QA Yap, Yoksa Es Geç':
+        1. Explicit ticket flag override (require_qa is True -> True, require_qa is False -> False).
+        2. Explicit ticket lavish_path set and non-empty -> True.
+        3. Existing Lavish prototype on disk (.lavish/<domain>.html or .lavish/<branch_slug>.html) -> True.
+        4. Touched .lavish/ files in git diff -> True.
+        5. Fallback -> False (pure backend/engine slice).
+        """
+        t = ticket or self.state.active_ticket
+        if not t:
+            return False
+
+        # 1. Explicit override
+        if t.require_qa is True:
+            return True
+        if t.require_qa is False:
+            return False
+
+        # 2. Explicit Lavish path
+        if t.lavish_path and str(t.lavish_path).strip():
+            return True
+
+        work_dir = Path(t.worktree_path) if t.worktree_path else self.target_repo
+
+        # 3. Existing Lavish prototype on disk
+        slug = t.domain.lower().replace("_", "-")
+        candidates = [
+            work_dir / ".lavish" / f"{slug}.html",
+            self.target_repo / ".lavish" / f"{slug}.html",
+        ]
+        if t.branch_name:
+            branch_slug = t.branch_name.removeprefix("feat/").removeprefix("refactor/").replace("_", "-")
+            candidates.extend([
+                work_dir / ".lavish" / f"{branch_slug}.html",
+                self.target_repo / ".lavish" / f"{branch_slug}.html",
+            ])
+        for cand in candidates:
+            if cand.is_file():
+                return True
+
+        # 4. Check git diff for touched .lavish/ files
+        base = self.state.base_branch or "development"
+        code, stdout, _ = self._run_cmd(["git", "diff", "--name-only", f"{base}...HEAD"], cwd=work_dir)
+        if code == 0 and stdout:
+            for line in stdout.splitlines():
+                line_str = line.strip()
+                if line_str.startswith(".lavish/") or line_str.endswith(".lavish.html"):
+                    return True
+
+        return False
+
+    def guard_qa_to_staging(self) -> Tuple[bool, str, Dict[str, Any]]:
+        """
+        Validates the QA verification stage:
+        Fails if any CRITICAL review finding exists (e.g. unhandled console errors, broken flows).
+        Non-blocking advisory or warning findings pass cleanly.
+        """
+        ticket = self.state.active_ticket
+        if not ticket:
+            return False, "No active ticket found for QA gate.", {}
+
+        critical_findings = [
+            f for f in self.state.review_findings
+            if getattr(f, "severity", "").upper() == "CRITICAL"
+        ]
+        if critical_findings:
+            return (
+                False,
+                f"QA verification blocked by {len(critical_findings)} critical defects.",
+                {
+                    "critical_count": len(critical_findings),
+                    "findings": [f.to_dict() if hasattr(f, "to_dict") else f for f in critical_findings],
+                },
+            )
+
+        return (
+            True,
+            "QA verification passed (0 critical findings). Advancing to STAGING.",
+            {"total_findings": len(self.state.review_findings)},
+        )
+
     def _archive_ticket_spec(self, ticket: Ticket) -> None:
         """Archives ephemeral slice spec from .edge/specs/ to .edge/archive/specs/."""
         try:
@@ -756,6 +838,24 @@ class BrigadeFSM:
             if not passed and not force:
                 self._record_guard_failure(curr, msg, details)
                 return False, curr, f"Edge Gate blocked advancement: {msg}"
+
+            if self.should_run_qa(self.state.active_ticket):
+                adv_msg = "Gate passed; Lavish prototype detected -> advancing to QA."
+                self._transition(CycleState.QA, adv_msg, details)
+                return True, self.state.current_state, adv_msg
+            else:
+                adv_msg = "Gate passed; no Lavish session -> bypassing QA to STAGING."
+                self._transition(CycleState.STAGING, adv_msg, details)
+                return True, self.state.current_state, adv_msg
+
+        elif curr == CycleState.QA:
+            passed, msg, details = self.guard_qa_to_staging()
+            if not passed and not force:
+                self._record_guard_failure(curr, msg, details)
+                if details.get("critical_count", 0) > 0:
+                    self._transition(CycleState.POLISH, f"QA failed with critical defects -> routing to POLISH: {msg}", details)
+                    return False, CycleState.POLISH, f"Critical QA defects detected. Routed to POLISH: {msg}"
+                return False, curr, f"QA guard blocked advancement: {msg}"
             self._transition(CycleState.STAGING, msg, details)
             return True, self.state.current_state, msg
 
@@ -1075,6 +1175,8 @@ class BrigadeFSM:
         auto_lease_worktree: bool = True,
         expected_files: Optional[List[str]] = None,
         spec_path: Optional[str] = None,
+        lavish_path: Optional[str] = None,
+        require_qa: Optional[bool] = None,
     ) -> Tuple[bool, Optional[Ticket], str]:
         """
         Deterministically initiates a live feature or refactor slice:
@@ -1109,6 +1211,17 @@ class BrigadeFSM:
 
         all_constraints = base_constraints + [c for c in prior_constraints if c not in base_constraints]
 
+        # Resolve lavish prototype path (explicit or auto-detected in .lavish/)
+        resolved_lavish = lavish_path
+        if not resolved_lavish:
+            cand = self.target_repo / ".lavish" / f"{clean_name}.html"
+            if cand.exists():
+                resolved_lavish = str(cand.relative_to(self.target_repo)).replace("\\", "/")
+            elif eff_domain:
+                cand_domain = self.target_repo / ".lavish" / f"{eff_domain}.html"
+                if cand_domain.exists():
+                    resolved_lavish = str(cand_domain.relative_to(self.target_repo)).replace("\\", "/")
+
         ticket = Ticket(
             ticket_id=ticket_id,
             track=track,
@@ -1127,6 +1240,8 @@ class BrigadeFSM:
             allow_schema_migration=allow_schema_migration,
             expected_files=list(expected_files or []),
             spec_path=spec_path,
+            lavish_path=resolved_lavish,
+            require_qa=require_qa,
             negative_constraints=all_constraints,
         )
 
@@ -1208,9 +1323,11 @@ class BrigadeFSM:
         elif state == CycleState.POLISH:
             return ["review_findings_recorded"], ["remediate_critical_findings", "re_verify", "edge_gate"], "Remediate critical review findings and advance to GATE."
         elif state == CycleState.GATE:
-            return ["review_clean"], ["edge_gate_execution", "squash_merge"], "Run 'python tools/gate.py' verification suite and advance to STAGING."
+            return ["review_clean"], ["edge_gate_execution", "qa_verification", "squash_merge"], "Run 'python tools/gate.py' verification suite and advance."
+        elif state == CycleState.QA:
+            return ["gate_passed"], ["browser_e2e_verification", "lavish_parity_check", "zero_console_errors", "squash_merge"], "Execute QA browser inspection (chrome-devtools-axi) and advance to STAGING."
         elif state == CycleState.STAGING:
-            return ["gate_passed"], ["squash_merge_to_base", "radar_ledger_update"], "Squash-merge refactor branch into base and update radar ledger."
+            return ["gate_passed", "qa_verified"], ["squash_merge_to_base", "radar_ledger_update"], "Squash-merge refactor branch into base and update radar ledger."
         return [], [], f"Resume execution in state {state.value}."
 
     def pause(self, reason: str = "MANUAL_PAUSE") -> Checkpoint:

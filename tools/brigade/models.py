@@ -25,6 +25,7 @@ class CycleState(str, Enum):
     REVIEW = "REVIEW"                         # Dual-axis review by standards & spec examiners
     POLISH = "POLISH"                         # Targeted remediation of review findings
     GATE = "GATE"                             # Edge Verification Gate (gate.py)
+    QA = "QA"                                 # End-to-End Browser & Visual QA Verification
     STAGING = "STAGING"                       # Squash-merge to base branch & radar ledger update
     COMPLETED = "COMPLETED"                   # Hillclimbing micro-slice verified and delivered
     BLOCKED = "BLOCKED"                       # Guard failed; manual triage or fix needed
@@ -116,6 +117,8 @@ class Ticket:
     allow_schema_migration: bool = False      # Allowed for feature track or schema expansion
     expected_files: List[str] = field(default_factory=list)
     spec_path: Optional[str] = None
+    lavish_path: Optional[str] = None         # Path to associated Lavish prototype HTML
+    require_qa: Optional[bool] = None         # Explicit override: True=force QA, False=skip QA
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     @staticmethod

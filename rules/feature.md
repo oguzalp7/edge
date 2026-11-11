@@ -29,7 +29,13 @@ Bu doküman, `edge` eklentisi bünyesinde **Yeni Davranış & Feature Ekleme** o
    * Çıkış kriteri: Kırmızı testleri YEŞİLE çevirmek (`vitest` exit 0) ve `npx tsc --noEmit` exit 0.
 7. **EXAMINER (Tek Geçişte Çift Eksenli Denetim):**
    * `coding_standards.md` kurallarını, Fowler kokularını ve 3-tier decoupling mimarisini/kapsam sınırlarını tek geçişte denetler. 0 kritik bulgu aranır.
-8. **Deterministik Teslimat (`brigade finish-slice` & `edge-drift`):**
+8. **QA_ENGINEER (E2E Browser & Visual QA Sommelier):**
+   * **`CycleState.QA` & Lavish-Gated QA İnvaryantı ("Lavish varsa QA yap, yoksa es geç"):**
+     * Sliceda `.lavish/` prototipi varsa veya `--qa` verilmişse, FSM `GATE` sonrası doğrudan `CycleState.QA` aşamasına geçer.
+     * Saf backend/motor işlerinde (`.lavish/` yoksa veya `--no-qa` verilmişse) QA aşaması atlanarak doğrudan `STAGING` aşamasına varılır (`GATE -> STAGING`).
+   * **Paralel Lavish-QA Hazırlık Hattı:** `QA_ENGINEER`, `SPEC_WRITER` Lavish prototipini mühürler mühürlemez test hazırlıklarına başlar; `.edge/qa/replays/<slug>.axi.js` dosyalarını önceden yazar. Kod `QA` aşamasına geldiğinde fast-forward replay ile sıfır gecikmeyle anında icra eder.
+   * **Lavish-to-Reality Parity & Tier-1 Console Gate:** Prototip ile canlı DOM arasındaki görsel/fonksiyonel birebirliği denetler. Sıfır konsol hatası (`console.error`), sıfır unhandled exception ve sıfır hydration hatası kuralını işletir. Kritik hata çıkarsa FSM `POLISH` durumuna geri döner.
+9. **Deterministik Teslimat (`brigade finish-slice` & `edge-drift`):**
    * Doğrulanan dalı FSM üzerinden ana depodaki `development` dalına fast-forward birleştirir, worktree'yi havuza iade eder ve `no-mistakes` kapısıyla PR'a hazırlar.
    * Geçici dilim şartnamesini (`.edge/specs/<slice>.md`) otomatik olarak `.edge/archive/specs/` dizinine arşivler.
    * Yaşayan alan sözleşmeleri `docs/domains/<domain>.md` altında saklanır ve `/edge-drift` (`python3 tools/drift/cli.py check <repo>`) ile değişmeyen alanlarda sıfır token israfıyla mimari sapma denetimine tabi tutulur.
@@ -60,6 +66,16 @@ Bu doküman, `edge` eklentisi bünyesinde **Yeni Davranış & Feature Ekleme** o
 [EXAMINER]       ──────────────────────► [REVIEW GATE: 0 Critical Findings]
        │
        ▼
+[GATE]           ──────────────────────► [EDGE GATE: tools/gate.py = 0]
+       │
+       ├─────────────────────────────────┐ ("Lavish varsa QA yap, yoksa es geç")
+       │ (Lavish prototip / --qa VAR)     │ (Lavish prototip YOK / --no-qa)
+       ▼                                 │
+[CycleState.QA]  ──────────────────────┐ │
+       │ (QA_ENGINEER: Lavish-to-Reality │ │
+       │  Parity & Tier-1 Zero Console)  │ │
+       │                                 │ │
+       ▼                                 ▼ ▼
 [FINISH-SLICE]   ──────────────────────► [STAGING & DRIFT: git merge --ff-only, spec archival
                                           to .edge/archive/specs/, living deeds via /edge-drift]
 ```
@@ -95,6 +111,15 @@ Bu doküman, `edge` eklentisi bünyesinde **Yeni Davranış & Feature Ekleme** o
 1. **İskele Şartname Arşivi:** `EXAMINER` onayı sonrası `brigade finish-slice <repo>` çalıştırıldığında, worktree dalı `development` dalına fast-forward (`git merge --ff-only`) birleştirilir, worktree havuza iade edilir ve tamamlanan geçici dilim şartnamesi (`.edge/specs/<slice>.md`) otomatik olarak `.edge/archive/specs/` dizinine arşivlenir.
 2. **Yaşayan Alan Senetleri (Living Domain Deeds):** Kalıcı alan kuralları `docs/domains/<domain>.md` altında saklanır (YAML frontmatter'da `tracked_paths` içerir).
 3. **Sıfır Token İsraflı Sapma Denetimi:** Bu yaşayan alan senetleri `/edge-drift` (`python3 tools/drift/cli.py check <repo>`) ile taranır; git diff sayesinde değişmeyen alanlar için token harcanmaz ve mimari sapma (drift) anında tespit edilir.
+
+### 🛑 2.5 Lavish-Gated QA İnvaryantı (`GATE -> QA -> STAGING` vs `GATE -> STAGING`)
+1. **"Lavish varsa QA yap, yoksa es geç" Doktrini:**
+   * `CycleState.GATE` aşaması başarıyla tamamlandığında `fsm.should_run_qa()` çalıştırılır.
+   * Eğer slice `.lavish/` dosyalarına dokunmuşsa veya açıkça `--qa` / `--lavish` belirtilmişse, FSM otomatik olarak `CycleState.QA` durumuna ilerler.
+   * Eğer slice salt backend/motor işiyse, `CycleState.QA` güvenle atlanarak doğrudan `CycleState.STAGING` aşamasına geçilir.
+2. **Tier-1 Sıfır Konsol Hatası ve POLISH Yönlendirmesi:**
+   * `CycleState.QA` içinde tespit edilen herhangi bir `console.error`, unhandled exception veya Lavish prototipinden kopukluk `CRITICAL` bulgu sayılır ve `brigade advance` FSM'i `POLISH` aşamasına geri yönlendirir.
+   * Kusursuz çalışan ancak kozmetik/stil pürüzü içeren durumlar `frontier-axi`'ye journal edilir ve teslimatı bloklamaz.
 
 
 ---
