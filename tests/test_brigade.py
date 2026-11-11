@@ -1768,6 +1768,283 @@ class TestStackAwareVerification(unittest.TestCase):
             self.assertTrue(any("tsc" in str(c) for c in executed_cmds))
 
 
+class TestBrigadeSlice2LavishGatedQAState(unittest.TestCase):
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.repo_path = Path(self.test_dir)
+        self.repo_root = Path(__file__).resolve().parents[1]
+        self.fsm = BrigadeFSM(self.repo_path)
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def test_cycle_state_enum_has_qa_and_ticket_lavish_fields(self):
+        # 1. CycleState.QA enum member
+        self.assertTrue(hasattr(CycleState, "QA"), "CycleState must have QA member")
+        self.assertEqual(CycleState.QA.value, "QA")
+        self.assertEqual(CycleState("QA"), CycleState.QA)
+
+        # 2. Ticket constructor defaults
+        ticket = Ticket(
+            ticket_id="TICK-LAVISH-1",
+            track="ui",
+            domain="portal",
+            rule_id="RULE-UI",
+            severity="NORMAL",
+            target_file="src/portal.tsx",
+            line_number=1,
+            fingerprint="fp1",
+            description="Portal UI",
+            suggested_fix="Fix",
+            branch_name="feat/portal",
+            test_seam_command="npm test",
+        )
+        self.assertIsNone(ticket.lavish_path)
+        self.assertIsNone(ticket.require_qa)
+
+        # 3. Ticket constructor explicit values
+        ticket_custom = Ticket(
+            ticket_id="TICK-LAVISH-2",
+            track="ui",
+            domain="portal",
+            rule_id="RULE-UI",
+            severity="NORMAL",
+            target_file="src/portal.tsx",
+            line_number=1,
+            fingerprint="fp2",
+            description="Portal UI with Lavish",
+            suggested_fix="Fix",
+            branch_name="feat/portal",
+            test_seam_command="npm test",
+            lavish_path=".lavish/portal.html",
+            require_qa=True,
+        )
+        self.assertEqual(ticket_custom.lavish_path, ".lavish/portal.html")
+        self.assertIs(ticket_custom.require_qa, True)
+
+        # 4. to_dict serialization
+        d = ticket_custom.to_dict()
+        self.assertEqual(d.get("lavish_path"), ".lavish/portal.html")
+        self.assertIs(d.get("require_qa"), True)
+
+        # 5. from_dict deserialization with fields present
+        restored = Ticket.from_dict(d)
+        self.assertEqual(restored.lavish_path, ".lavish/portal.html")
+        self.assertIs(restored.require_qa, True)
+
+        # 6. from_dict deserialization backward compatibility (missing lavish_path and require_qa)
+        legacy_dict = ticket.to_dict()
+        legacy_dict.pop("lavish_path", None)
+        legacy_dict.pop("require_qa", None)
+        restored_legacy = Ticket.from_dict(legacy_dict)
+        self.assertIsNone(restored_legacy.lavish_path)
+        self.assertIsNone(restored_legacy.require_qa)
+
+    def test_should_run_qa_lavish_gate_logic(self):
+        ticket = Ticket(
+            ticket_id="TICK-QA-GATE",
+            track="ui",
+            domain="billing",
+            rule_id="RULE-UI",
+            severity="NORMAL",
+            target_file="src/billing.tsx",
+            line_number=1,
+            fingerprint="fp-qa",
+            description="Billing UI",
+            suggested_fix="Fix",
+            branch_name="feat/billing-portal",
+            test_seam_command="npm test",
+        )
+        self.fsm.state.active_ticket = ticket
+
+        # 1. Default: No .lavish/ file on disk and require_qa is None -> False
+        self.assertFalse(self.fsm.should_run_qa(ticket))
+
+        # 2. Explicit flag: require_qa = True -> True (even without files on disk)
+        ticket.require_qa = True
+        self.assertTrue(self.fsm.should_run_qa(ticket))
+
+        # 3. Explicit flag: require_qa = False -> False (even if .lavish file exists)
+        lavish_dir = self.repo_path / ".lavish"
+        lavish_dir.mkdir(parents=True, exist_ok=True)
+        (lavish_dir / "billing.html").write_text("<h1>Billing</h1>", encoding="utf-8")
+        ticket.require_qa = False
+        self.assertFalse(self.fsm.should_run_qa(ticket))
+
+        # 4. Prototype on disk: require_qa is None, but <repo>/.lavish/<domain>.html exists -> True
+        ticket.require_qa = None
+        self.assertTrue(self.fsm.should_run_qa(ticket))
+
+        # 5. Explicit lavish_path: points to prototype -> True
+        (lavish_dir / "billing.html").unlink()
+        self.assertFalse(self.fsm.should_run_qa(ticket))
+        ticket.lavish_path = ".lavish/portal.html"
+        self.assertTrue(self.fsm.should_run_qa(ticket))
+
+    def test_advance_from_gate_routes_to_qa_or_bypasses_to_staging(self):
+        ticket = Ticket(
+            ticket_id="TICK-GATE-ROUTING",
+            track="ui",
+            domain="checkout",
+            rule_id="RULE-UI",
+            severity="NORMAL",
+            target_file="src/checkout.tsx",
+            line_number=1,
+            fingerprint="fp-gate",
+            description="Checkout",
+            suggested_fix="Fix",
+            branch_name="feat/checkout",
+            test_seam_command="npm test",
+        )
+        self.fsm.state.active_ticket = ticket
+        self.fsm.state.current_state = CycleState.GATE
+
+        # Case A: When should_run_qa is True -> advance from GATE transitions to CycleState.QA
+        ticket.require_qa = True
+        qa_state = getattr(CycleState, "QA", "QA")
+        with patch.object(self.fsm, "guard_gate_to_staging", return_value=(True, "Gate passed", {})):
+            ok, next_state, msg = self.fsm.advance()
+            self.assertTrue(ok)
+            self.assertEqual(next_state, qa_state)
+            self.assertEqual(self.fsm.state.current_state, qa_state)
+            self.assertIn("QA", msg)
+
+        # Case B: When should_run_qa is False -> advance from GATE bypasses QA directly to CycleState.STAGING
+        ticket.require_qa = False
+        self.fsm.state.current_state = CycleState.GATE
+        with patch.object(self.fsm, "guard_gate_to_staging", return_value=(True, "Gate passed", {})):
+            ok, next_state, msg = self.fsm.advance()
+            self.assertTrue(ok)
+            self.assertEqual(next_state, CycleState.STAGING)
+            self.assertEqual(self.fsm.state.current_state, CycleState.STAGING)
+            self.assertIn("STAGING", msg)
+
+    def test_guard_qa_to_staging_passes_or_routes_to_polish(self):
+        ticket = Ticket(
+            ticket_id="TICK-QA-POLISH",
+            track="ui",
+            domain="dashboard",
+            rule_id="RULE-UI",
+            severity="NORMAL",
+            target_file="src/dashboard.tsx",
+            line_number=1,
+            fingerprint="fp-qa-pol",
+            description="Dashboard",
+            suggested_fix="Fix",
+            branch_name="feat/dashboard",
+            test_seam_command="npm test",
+        )
+        self.fsm.state.active_ticket = ticket
+        qa_state = getattr(CycleState, "QA", "QA")
+        self.fsm.state.current_state = qa_state
+
+        # Case A: Clean findings or non-blocking advisory/warning -> advance to STAGING
+        self.fsm.state.review_findings = [
+            ReviewFinding(
+                axis="qa",
+                severity="WARNING",
+                file_path="src/dashboard.tsx",
+                rule="QA-SOMMELIER",
+                description="Minor padding irregularity",
+                suggested_fix="Adjust p-4 to p-6",
+            )
+        ]
+        ok, next_state, msg = self.fsm.advance()
+        self.assertTrue(ok)
+        self.assertEqual(next_state, CycleState.STAGING)
+        self.assertEqual(self.fsm.state.current_state, CycleState.STAGING)
+
+        # Case B: Critical finding exists -> advance fails and transitions to POLISH
+        self.fsm.state.current_state = qa_state
+        self.fsm.state.review_findings.append(
+            ReviewFinding(
+                axis="qa",
+                severity="CRITICAL",
+                file_path="src/dashboard.tsx",
+                rule="TIER1-CONSOLE-ERROR",
+                description="Unhandled hydration error in UserCard",
+                suggested_fix="Ensure client-only rendering or match SSR markup",
+            )
+        )
+        ok, next_state, msg = self.fsm.advance()
+        self.assertFalse(ok)
+        self.assertEqual(next_state, CycleState.POLISH)
+        self.assertEqual(self.fsm.state.current_state, CycleState.POLISH)
+        self.assertIn("POLISH", msg)
+
+    def test_cli_start_slice_qa_and_lavish_flags_and_qa_directives(self):
+        import argparse
+        from io import StringIO
+        from tools.brigade.cli import cmd_start_slice
+
+        # 1. start-slice with --lavish and --qa
+        args_qa = argparse.Namespace(
+            repo=str(self.repo_path),
+            name="checkout-flow",
+            track="ui",
+            expected_files="src/checkout.tsx",
+            spec=".edge/specs/checkout.md",
+            lavish=".lavish/checkout-flow.html",
+            require_qa=True,
+        )
+        with patch("sys.stdout", new=StringIO()):
+            ret = cmd_start_slice(args_qa)
+        self.assertEqual(ret, 0)
+
+        reloaded_fsm = BrigadeFSM(self.repo_path)
+        ticket = reloaded_fsm.state.active_ticket
+        self.assertIsNotNone(ticket)
+        self.assertEqual(getattr(ticket, "lavish_path", None), ".lavish/checkout-flow.html")
+        self.assertIs(getattr(ticket, "require_qa", None), True)
+
+        # Reset state for next slice invocation
+        reloaded_fsm.state.active_ticket = None
+        reloaded_fsm.state.current_state = CycleState.IDLE
+        reloaded_fsm.save()
+
+        # 2. start-slice with --no-qa
+        args_no_qa = argparse.Namespace(
+            repo=str(self.repo_path),
+            name="cli-tool",
+            track="core",
+            expected_files="src/cli.ts",
+            spec=None,
+            lavish=None,
+            require_qa=False,
+        )
+        with patch("sys.stdout", new=StringIO()):
+            ret2 = cmd_start_slice(args_no_qa)
+        self.assertEqual(ret2, 0)
+
+        reloaded_fsm2 = BrigadeFSM(self.repo_path)
+        ticket2 = reloaded_fsm2.state.active_ticket
+        self.assertIsNotNone(ticket2)
+        self.assertIs(getattr(ticket2, "require_qa", None), False)
+
+        # 3. Assert agents/qa-engineer.md and rules/feature.md document Slice 2 contracts
+        qa_doc = self.repo_root / "agents" / "qa-engineer.md"
+        self.assertTrue(qa_doc.is_file(), f"Missing persona: {qa_doc}")
+        qa_text = qa_doc.read_text(encoding="utf-8")
+        self.assertIn("lavish", qa_text.lower(), "qa-engineer.md must reference Lavish prototype inspection")
+        self.assertTrue(
+            "console" in qa_text.lower() or "smoke" in qa_text.lower(),
+            "qa-engineer.md must document Tier-1 Console/Smoke Gate",
+        )
+        self.assertTrue(
+            "parity" in qa_text.lower() or "reality" in qa_text.lower(),
+            "qa-engineer.md must document Lavish-to-Reality parity",
+        )
+
+        feat_rules = self.repo_root / "rules" / "feature.md"
+        self.assertTrue(feat_rules.is_file(), f"Missing feature rules: {feat_rules}")
+        feat_text = feat_rules.read_text(encoding="utf-8")
+        self.assertIn("CycleState.QA", feat_text, "rules/feature.md must document CycleState.QA")
+        self.assertTrue(
+            "lavish varsa qa yap" in feat_text.lower() or "lavish-gated" in feat_text.lower(),
+            "rules/feature.md must document Lavish-Gated QA Invariant ('Lavish varsa QA yap, yoksa es geç')",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
 
