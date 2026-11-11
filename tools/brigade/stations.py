@@ -6,7 +6,7 @@ and prepares hermetic, deterministic prompt payloads for each station.
 
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Union
+from typing import Dict, List, Optional, Any, Union, Tuple
 from datetime import datetime, timezone
 
 root_dir = Path(__file__).resolve().parent.parent.parent
@@ -446,6 +446,70 @@ CONSTRAINTS & INSTRUCTIONS (STRICT):
 """
 
     @staticmethod
+    def _resolve_qa_scenario(user_scenario_en: str, ticket: Optional[Ticket]) -> str:
+        if user_scenario_en:
+            return user_scenario_en
+        if ticket and ticket.description:
+            return ticket.description
+        return "E2E UI & user flow verification"
+
+    @staticmethod
+    def _resolve_qa_lavish(lavish_path: Optional[str], ticket: Optional[Ticket]) -> Optional[str]:
+        if lavish_path:
+            return lavish_path
+        if ticket:
+            return getattr(ticket, "lavish_path", None)
+        return None
+
+    @staticmethod
+    def _resolve_qa_slug(scenario_slug: str, ticket: Optional[Ticket]) -> str:
+        if scenario_slug != "qa_scenario":
+            return scenario_slug
+        if ticket and ticket.domain:
+            return ticket.domain.lower().replace("_", "-")
+        return scenario_slug
+
+    @staticmethod
+    def _resolve_qa_prompt_params(
+        user_scenario_en: str,
+        ticket: Optional[Ticket],
+        lavish_path: Optional[str],
+        scenario_slug: str,
+    ) -> Tuple[str, Optional[str], str]:
+        """Resolves scenario text, lavish prototype path, and scenario slug for QA prompt."""
+        scenario = StationRegistry._resolve_qa_scenario(user_scenario_en, ticket)
+        lavish = StationRegistry._resolve_qa_lavish(lavish_path, ticket)
+        slug = StationRegistry._resolve_qa_slug(scenario_slug, ticket)
+        return scenario, lavish, slug
+
+    @staticmethod
+    def _build_qa_lavish_section(eff_lavish: Optional[str]) -> str:
+        if not eff_lavish:
+            return ""
+        return f"""
+LAVISH-TO-REALITY PARITY & TIER-1 CONSOLE/SMOKE GATE:
+- Approved Lavish Prototype: {eff_lavish}
+- Inspect {eff_lavish} prior to launching browser verification.
+- Verify that every interactive control, state, button, and layout from the Lavish prototype exists in the live DOM.
+- TIER-1 CONSOLE/SMOKE GATE: Zero tolerance for unhandled exceptions, console.error messages, React hydration failures, or unexpected 4xx/5xx network responses. Any occurrence fails the QA gate (CRITICAL).
+"""
+
+    @staticmethod
+    def _build_qa_assertions(assertions: Optional[List[str]], eff_lavish: Optional[str]) -> str:
+        if assertions:
+            return "\n".join(f"- {a}" for a in assertions)
+
+        items = [
+            "Target flow completes with expected UI transitions.",
+            "Zero unhandled exceptions or console errors in devtools (Tier-1 Zero Tolerance).",
+            "Network requests return status 200/expected HTTP responses.",
+            "Visual state matches design expectations (screenshot captured).",
+        ]
+        if eff_lavish:
+            items.insert(0, f"Full structural and visual parity verified against {eff_lavish}.")
+        return "\n".join(f"- {a}" for a in items)
+
+    @staticmethod
     def build_qa_prompt(
         user_scenario_en: str = "",
         target_route: str = "http://localhost:3000",
@@ -459,32 +523,11 @@ CONSTRAINTS & INSTRUCTIONS (STRICT):
         rubric = StationRegistry.load_station_rubric("qa-engineer", repo_path=repo_path)
         q3 = chr(34) * 3
 
-        eff_scenario = user_scenario_en or (ticket.description if ticket else "") or "E2E UI & user flow verification"
-        eff_lavish = lavish_path or (getattr(ticket, "lavish_path", None) if ticket else None)
-        eff_slug = scenario_slug if scenario_slug != "qa_scenario" else (ticket.domain.lower().replace("_", "-") if ticket else "qa_scenario")
-
-        lavish_section = ""
-        if eff_lavish:
-            lavish_section = f"""
-LAVISH-TO-REALITY PARITY & TIER-1 CONSOLE/SMOKE GATE:
-- Approved Lavish Prototype: {eff_lavish}
-- Inspect {eff_lavish} prior to launching browser verification.
-- Verify that every interactive control, state, button, and layout from the Lavish prototype exists in the live DOM.
-- TIER-1 CONSOLE/SMOKE GATE: Zero tolerance for unhandled exceptions, console.error messages, React hydration failures, or unexpected 4xx/5xx network responses. Any occurrence fails the QA gate (CRITICAL).
-"""
-
-        base_assertions = list(assertions or [])
-        if not base_assertions:
-            base_assertions = [
-                "Target flow completes with expected UI transitions.",
-                "Zero unhandled exceptions or console errors in devtools (Tier-1 Zero Tolerance).",
-                "Network requests return status 200/expected HTTP responses.",
-                "Visual state matches design expectations (screenshot captured).",
-            ]
-            if eff_lavish:
-                base_assertions.insert(0, f"Full structural and visual parity verified against {eff_lavish}.")
-
-        assertions_str = "\n".join([f"- {a}" for a in base_assertions])
+        eff_scenario, eff_lavish, eff_slug = StationRegistry._resolve_qa_prompt_params(
+            user_scenario_en, ticket, lavish_path, scenario_slug
+        )
+        lavish_section = StationRegistry._build_qa_lavish_section(eff_lavish)
+        assertions_str = StationRegistry._build_qa_assertions(assertions, eff_lavish)
 
         return f"""You are the QA_ENGINEER (Sommelier) station worker in Edge Brigade.
 
