@@ -92,7 +92,7 @@ def execute_gnhf_run(options: GnhfRunOptions) -> int:
 
     if options.agent in ("agy", "antigravity"):
         with shim.create_agy_shim(model=options.model):
-            proc = subprocess.run(cmd, cwd=options.repo_path, env=env)
+            proc = subprocess.run(cmd, cwd=options.repo_path, env=_build_env(options))
             return proc.returncode
 
     proc = subprocess.run(cmd, cwd=options.repo_path, env=env)

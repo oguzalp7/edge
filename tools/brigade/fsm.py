@@ -67,9 +67,12 @@ def _parse_porcelain_paths(porcelain_output: str) -> List[str]:
 
     for raw_line in porcelain_output.splitlines():
         line = raw_line.rstrip("\r\n")
-        if len(line) < 4:
+        if len(line) < 3:
             continue
-        raw_path = line[3:].strip()
+        if len(line) >= 2 and line[1] == " ":
+            raw_path = line[2:].strip()
+        else:
+            raw_path = line[3:].strip()
         if " -> " in raw_path:
             raw_path = raw_path.split(" -> ")[-1].strip()
         clean_path = raw_path.strip('"').replace("\\", "/")

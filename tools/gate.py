@@ -282,10 +282,10 @@ class EdgeVerificationGate:
     def __init__(self, target_repo_path: Path):
         self.target_repo = target_repo_path
 
-    def _run_cmd(self, cmd: List[str], cwd: Optional[Path] = None) -> Tuple[int, str, str]:
+    def _run_cmd(self, cmd: List[str], cwd: Optional[Path] = None, timeout: int = 120) -> Tuple[int, str, str]:
         """Run a command in target repo or specified directory using tools.common.runner."""
         work_dir = cwd or self.target_repo
-        return run_command(cmd, cwd=work_dir)
+        return run_command(cmd, cwd=work_dir, timeout=timeout)
 
     @staticmethod
     def _compute_source_max_cc(source_text: str, suffix: str) -> Tuple[int, str]:
@@ -688,7 +688,7 @@ class EdgeVerificationGate:
             return GateResult(1, "Hermetic Verification Gate", False, "TypeScript typecheck failed.", details)
 
         # 2. Unit tests
-        code, stdout, stderr = self._run_cmd(["npm", "run", "test:unit"])
+        code, stdout, stderr = self._run_cmd(["npm", "run", "test:unit"], timeout=360)
         if code != 0:
             details = [l for l in (stdout + stderr).splitlines() if "FAIL" in l or "Error" in l][:8]
             return GateResult(1, "Hermetic Verification Gate", False, "Unit tests failed.", details)

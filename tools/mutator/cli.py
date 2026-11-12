@@ -7,8 +7,15 @@ import argparse
 import shlex
 from pathlib import Path
 
-from .sites import discover_mutation_sites
-from .runner import run_mutation_suite, enforce_core_scope
+try:
+    from .sites import discover_mutation_sites
+    from .runner import run_mutation_suite, enforce_core_scope
+except (ImportError, ValueError):
+    parent = Path(__file__).resolve().parent.parent.parent
+    if str(parent) not in sys.path:
+        sys.path.insert(0, str(parent))
+    from tools.mutator.sites import discover_mutation_sites
+    from tools.mutator.runner import run_mutation_suite, enforce_core_scope
 
 
 def main():
