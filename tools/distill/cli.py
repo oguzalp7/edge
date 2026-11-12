@@ -112,6 +112,7 @@ def cmd_harvest(args: argparse.Namespace) -> int:
         repo_path=target_repo,
         watermark_state=watermark_state,
         brain_roots=brain_roots,
+        since_hours=getattr(args, "since_hours", None),
     )
     digest = harvester.harvest(
         project_path=target_repo,
@@ -326,6 +327,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_harvest.add_argument("--reprocess", action="store_true", help="Reprocess historical sessions")
     p_harvest.add_argument("--output", help="Output file path")
     p_harvest.add_argument("--max-sessions", type=int, default=50, help="Max sessions to analyze")
+    p_harvest.add_argument(
+        "--since-hours",
+        type=int,
+        default=None,
+        help="Only inspect session transcripts modified within the last N hours",
+    )
 
     # candidates
     p_cand = subparsers.add_parser("candidates", help="Manage candidate pool")
