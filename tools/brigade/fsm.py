@@ -48,6 +48,9 @@ except ImportError:
     from tools.brigade.flight_recorder import FlightRecorder
 
 from tools.common import normalize_target_path, run_command
+
+if not hasattr(BrigadeState, "guard_failures"):
+    BrigadeState.guard_failures = property(lambda self: [h for h in self.history if not h.success])
 from tools.common.paths import to_wsl_path, is_wsl_path
 
 # SSOT Heat Zone Thresholds (SPEC-002)
@@ -693,43 +696,54 @@ class BrigadeFSM:
             },
         )
 
-    def guard_verify_to_review(self) -> Tuple[bool, str, Dict[str, Any]]:
+    def _resolve_test_command(self, eff_dir: Path) -> str:
+        ticket = self.state.active_ticket
+        if ticket and ticket.test_seam_command:
+            return ticket.test_seam_command
+        if (eff_dir / "package.json").exists():
+            return "npm run test:unit"
+        uv_bin = shutil.which("uv") or (Path.home() / ".local/bin/uv")
+        if uv_bin and (isinstance(uv_bin, str) or (isinstance(uv_bin, Path) and uv_bin.is_file())):
+            return f"{uv_bin} run --with pytest pytest -q"
+        return f"{sys.executable} -m pytest -q"
+
+    def _run_hermetic_verification(self, work_dir: Optional[Path] = None) -> Tuple[bool, str]:
         """
-        Validates hermetic verification:
-        1. Characterization test command exits 0.
-        2. TypeScript compiler tsc --noEmit exits 0 (if TypeScript/Node environment).
+        Executes hermetic verification (scoped tests + TypeScript compilation) in work_dir.
+        
+        Args:
+            work_dir: Target directory (defaults to active ticket worktree_path or target_repo).
+            
+        Returns:
+            Tuple[bool, str]: (passed, detailed_status_message).
         """
         ticket = self.state.active_ticket
-        work_dir = Path(ticket.worktree_path) if (ticket and ticket.worktree_path) else self.target_repo
+        eff_dir = work_dir or (
+            normalize_target_path(ticket.worktree_path) if (ticket and ticket.worktree_path) else self.target_repo
+        )
 
-        if ticket and ticket.test_seam_command:
-            test_cmd = ticket.test_seam_command
-        elif (work_dir / "package.json").exists():
-            test_cmd = "npm run test:unit"
-        else:
-            uv_bin = shutil.which("uv") or (Path.home() / ".local/bin/uv")
-            if uv_bin and (isinstance(uv_bin, str) or (isinstance(uv_bin, Path) and uv_bin.is_file())):
-                test_cmd = f"{uv_bin} run --with pytest pytest -q"
-            else:
-                test_cmd = f"{sys.executable} -m pytest -q"
-
-        # 1. Run scoped test command
-        test_parts = test_cmd.split()
-        test_code, test_out, test_err = self._run_cmd(test_parts)
+        test_cmd = self._resolve_test_command(eff_dir)
+        test_code, test_out, test_err = self._run_cmd(test_cmd.split(), cwd=eff_dir)
         if test_code != 0:
-            return False, f"Characterization test failed (exit code {test_code}): {test_cmd}\n{test_err or test_out}", {"output": test_out, "stderr": test_err}
+            return False, f"Characterization test failed (exit code {test_code}): {test_cmd}\n{test_err or test_out}"
 
-        # 2. Run TypeScript compiler if applicable
-        should_run_tsc = (work_dir / "tsconfig.json").exists() or any(
+        should_run_tsc = (eff_dir / "tsconfig.json").exists() or any(
             tok in (ticket.test_seam_command if ticket and ticket.test_seam_command else "")
             for tok in ("vitest", "jest", "tsc", "npm ", "pnpm ", "yarn ")
         )
 
         if should_run_tsc:
-            tsc_code, tsc_out, tsc_err = self._run_cmd(["npx", "tsc", "--noEmit"])
+            tsc_code, tsc_out, tsc_err = self._run_cmd(["npx", "tsc", "--noEmit"], cwd=eff_dir)
             if tsc_code != 0:
-                return False, f"TypeScript compiler check failed (exit code {tsc_code}):\n{tsc_out or tsc_err}", {"output": tsc_out, "stderr": tsc_err}
+                return False, f"TypeScript compiler check failed (exit code {tsc_code}):\n{tsc_out or tsc_err}"
 
+        return True, "Hermetic verification passed: Tests and TypeScript compilation clean."
+
+    def guard_verify_to_review(self) -> Tuple[bool, str, Dict[str, Any]]:
+        """Validates hermetic verification (characterization tests + tsc) before review."""
+        passed, msg = self._run_hermetic_verification()
+        if not passed:
+            return False, msg, {}
         return True, "Verification passed: Characterization tests and TypeScript compilation are 100% clean.", {}
 
     def guard_review_to_next(self) -> Tuple[CycleState, str, Dict[str, Any]]:
@@ -755,34 +769,9 @@ class BrigadeFSM:
 
     def guard_polish_to_gate(self) -> Tuple[bool, str, Dict[str, Any]]:
         """Re-verifies compiler and tests after polish remediation."""
-        ticket = self.state.active_ticket
-        work_dir = Path(ticket.worktree_path) if (ticket and ticket.worktree_path) else self.target_repo
-
-        if ticket and ticket.test_seam_command:
-            test_cmd = ticket.test_seam_command
-        elif (work_dir / "package.json").exists():
-            test_cmd = "npm run test:unit"
-        else:
-            uv_bin = shutil.which("uv") or (Path.home() / ".local/bin/uv")
-            if uv_bin and (isinstance(uv_bin, str) or (isinstance(uv_bin, Path) and uv_bin.is_file())):
-                test_cmd = f"{uv_bin} run --with pytest pytest -q"
-            else:
-                test_cmd = f"{sys.executable} -m pytest -q"
-
-        test_code, test_out, test_err = self._run_cmd(test_cmd.split())
-        if test_code != 0:
-            return False, f"Post-polish test verification failed:\n{test_err or test_out}", {}
-
-        should_run_tsc = (work_dir / "tsconfig.json").exists() or any(
-            tok in (ticket.test_seam_command if ticket and ticket.test_seam_command else "")
-            for tok in ("vitest", "jest", "tsc", "npm ", "pnpm ", "yarn ")
-        )
-
-        if should_run_tsc:
-            tsc_code, tsc_out, tsc_err = self._run_cmd(["npx", "tsc", "--noEmit"])
-            if tsc_code != 0:
-                return False, f"Post-polish TypeScript verification failed:\n{tsc_out or tsc_err}", {}
-
+        passed, msg = self._run_hermetic_verification()
+        if not passed:
+            return False, f"Post-polish verification failed:\n{msg}", {}
         return True, "Post-polish verification passed. Advancing to GATE.", {}
 
     def guard_gate_to_staging(self) -> Tuple[bool, str, Dict[str, Any]]:
@@ -876,6 +865,36 @@ class BrigadeFSM:
 
         return False
 
+    def _run_qa_db_drift_preflight(self, work_dir: Optional[Path] = None) -> Tuple[bool, str]:
+        """
+        Executes 'npm run db:check-drift' preflight if defined in package.json.
+        Returns (True, msg) if script is absent or passes; returns (False, error) on schema drift.
+        """
+        ticket = self.state.active_ticket
+        eff_dir = work_dir or (
+            normalize_target_path(ticket.worktree_path) if (ticket and ticket.worktree_path) else self.target_repo
+        )
+        pkg_json = eff_dir / "package.json"
+
+        if not pkg_json.exists():
+            return True, "No package.json found; skipping db:check-drift preflight (bypass)."
+
+        try:
+            with open(pkg_json, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            scripts = data.get("scripts", {})
+        except Exception as e:
+            return True, f"Could not parse package.json for db:check-drift: {e} (bypass)"
+
+        if "db:check-drift" not in scripts:
+            return True, "db:check-drift script not defined in package.json; zero-cost bypass."
+
+        code, out, err = self._run_cmd(["npm", "run", "db:check-drift"], cwd=eff_dir)
+        if code != 0:
+            return False, f"QA DB Drift Preflight FAILED (exit code {code}): Database migration schema drift detected!\n{err or out}"
+
+        return True, "QA DB Drift Preflight PASSED: Database schema is fully synchronized with migrations."
+
     def guard_qa_to_staging(self) -> Tuple[bool, str, Dict[str, Any]]:
         """
         Validates the QA verification stage:
@@ -906,6 +925,10 @@ class BrigadeFSM:
         )
         if not proof_ok:
             return False, proof_msg, proof_details
+
+        drift_ok, drift_msg = self._run_qa_db_drift_preflight(work_dir)
+        if not drift_ok:
+            return False, drift_msg, {"db_drift": True}
 
         return (
             True,
@@ -1017,6 +1040,69 @@ class BrigadeFSM:
             except Exception as e:
                 print(f"[WARN] Failed to archive spec {c}: {e}")
 
+    def _sync_diverged_worktree(self, ticket: Ticket) -> Tuple[bool, str, Dict[str, Any]]:
+        """
+        Automates in-situ git rebase inside leased worktree and validates hermetic tests.
+        On syntactic conflict or semantic verification failure, aborts and escalates to PAUSED.
+        """
+        if not ticket.worktree_path:
+            return False, (
+                f"REFUSED: Branch '{ticket.branch_name}' has diverged from '{self.state.base_branch}' (not a clean fast-forward), "
+                f"and no worktree is available for automated rebase. Rebase '{ticket.branch_name}' manually before merging."
+            ), {}
+
+        wt_dir = normalize_target_path(ticket.worktree_path)
+        if not wt_dir.is_dir():
+            return False, f"Leased worktree path does not exist on disk: {wt_dir}", {}
+
+        # 1. Run git rebase <base_branch> inside worktree
+        reb_code, reb_out, reb_err = run_command(["git", "rebase", self.state.base_branch], cwd=wt_dir)
+        if reb_code != 0:
+            diff_code, diff_out, _ = run_command(["git", "diff", "--name-only", "--diff-filter=U"], cwd=wt_dir)
+            conflicting_files = [line.strip() for line in diff_out.splitlines() if line.strip()]
+
+            run_command(["git", "rebase", "--abort"], cwd=wt_dir)
+
+            reason = (
+                f"Rebase conflict onto {self.state.base_branch}: "
+                f"{', '.join(conflicting_files) if conflicting_files else reb_err or reb_out}"
+            )
+            self.escalate(reason)
+            return False, reason, {
+                "escalated": True,
+                "conflicting_files": conflicting_files,
+                "error": reb_err or reb_out,
+            }
+
+        # 2. Rebase clean: run hermetic verification on rebased code
+        verify_ok, verify_msg = self._run_hermetic_verification(work_dir=wt_dir)
+        if not verify_ok:
+            reason = f"Post-rebase verification failed on {ticket.branch_name}: {verify_msg}"
+            self.escalate(reason)
+            return False, reason, {
+                "escalated": True,
+                "semantic_conflict": True,
+                "verification_error": verify_msg,
+            }
+
+        return True, "Worktree cleanly rebased and verified.", {}
+
+    def _run_radar_rescan(self) -> None:
+        """Refreshes radar ledger to resolve debt after ticket completion."""
+        radar_cli = Path(__file__).resolve().parent.parent / "radar" / "cli.py"
+        target_path_str = str(self.target_repo)
+
+        if target_path_str.startswith(r"\\wsl.localhost") or target_path_str.startswith("/home/"):
+            wsl_target = target_path_str.replace(r"\\wsl.localhost\Ubuntu-24.04", "").replace("\\", "/")
+            wsl_radar = str(radar_cli).replace(r"C:\Users\oguz_\.gemini\config\plugins\edge", "/mnt/c/Users/oguz_/.gemini/config/plugins/edge").replace("\\", "/")
+            cmd = ["python3", wsl_radar, "scan", wsl_target]
+        else:
+            cmd = [sys.executable, str(radar_cli), "scan", str(self.target_repo)]
+
+        code, stdout, stderr = run_command(cmd, cwd=self.target_repo)
+        if code != 0:
+            print(f"[WARN] Radar scan had issues: {stderr}")
+
     def guard_staging_to_completed(self) -> Tuple[bool, str, Dict[str, Any]]:
         """
         Executes local codebase fast-forward synchronization and cleanup:
@@ -1057,10 +1143,9 @@ class BrigadeFSM:
             cwd=self.target_repo,
         )
         if code != 0:
-            return False, (
-                f"REFUSED: Branch '{ticket.branch_name}' has diverged from '{self.state.base_branch}' (not a clean fast-forward). "
-                f"Rebase '{ticket.branch_name}' onto '{self.state.base_branch}' inside worktree before merging."
-            ), {}
+            rebase_ok, rebase_msg, rebase_details = self._sync_diverged_worktree(ticket)
+            if not rebase_ok:
+                return False, rebase_msg, rebase_details
 
         # 3. Fast-forward merge into primary repo
         code, merge_out, merge_err = run_command(
@@ -1087,19 +1172,7 @@ class BrigadeFSM:
         self._archive_ticket_spec(ticket)
 
         # 6. Refresh radar ledger to resolve debt
-        radar_cli = Path(__file__).resolve().parent.parent / "radar" / "cli.py"
-        target_path_str = str(self.target_repo)
-        
-        if target_path_str.startswith(r"\\wsl.localhost") or target_path_str.startswith("/home/"):
-            wsl_target = target_path_str.replace(r"\\wsl.localhost\Ubuntu-24.04", "").replace("\\", "/")
-            wsl_radar = str(radar_cli).replace(r"C:\Users\oguz_\.gemini\config\plugins\edge", "/mnt/c/Users/oguz_/.gemini/config/plugins/edge").replace("\\", "/")
-            cmd = ["python3", wsl_radar, "scan", wsl_target]
-        else:
-            cmd = [sys.executable, str(radar_cli), "scan", str(self.target_repo)]
-
-        code, stdout, stderr = run_command(cmd, cwd=self.target_repo)
-        if code != 0:
-            print(f"[WARN] Radar scan had issues: {stderr}")
+        self._run_radar_rescan()
 
         return True, f"Ticket {ticket.ticket_id} successfully merged into {self.state.base_branch} and worktree released to pool.", {"output": merge_out}
 
@@ -1136,6 +1209,28 @@ class BrigadeFSM:
                 )
             except Exception as e:
                 print(f"[WARN] Failed to record guard failure in flight recorder: {e}")
+
+    def _advance_from_gate(self, force: bool = False) -> Tuple[bool, CycleState, str]:
+        """Handles advance logic from GATE to either QA (preflight checked) or STAGING."""
+        curr = CycleState.GATE
+        passed, msg, details = self.guard_gate_to_staging()
+        if not passed and not force:
+            self._record_guard_failure(curr, msg, details)
+            return False, curr, f"Edge Gate blocked advancement: {msg}"
+
+        if self.should_run_qa(self.state.active_ticket):
+            drift_ok, drift_msg = self._run_qa_db_drift_preflight()
+            if not drift_ok:
+                self._record_guard_failure(curr, drift_msg, {"db_drift": True})
+                return False, curr, f"QA Preflight blocked advancement: {drift_msg}"
+
+            adv_msg = "Gate passed; Lavish prototype detected -> advancing to QA."
+            self._transition(CycleState.QA, adv_msg, details)
+            return True, self.state.current_state, adv_msg
+        else:
+            adv_msg = "Gate passed; no Lavish session -> bypassing QA to STAGING."
+            self._transition(CycleState.STAGING, adv_msg, details)
+            return True, self.state.current_state, adv_msg
 
     def advance(self, force: bool = False) -> Tuple[bool, CycleState, str]:
         """
@@ -1197,19 +1292,7 @@ class BrigadeFSM:
             return True, self.state.current_state, msg
 
         elif curr == CycleState.GATE:
-            passed, msg, details = self.guard_gate_to_staging()
-            if not passed and not force:
-                self._record_guard_failure(curr, msg, details)
-                return False, curr, f"Edge Gate blocked advancement: {msg}"
-
-            if self.should_run_qa(self.state.active_ticket):
-                adv_msg = "Gate passed; Lavish prototype detected -> advancing to QA."
-                self._transition(CycleState.QA, adv_msg, details)
-                return True, self.state.current_state, adv_msg
-            else:
-                adv_msg = "Gate passed; no Lavish session -> bypassing QA to STAGING."
-                self._transition(CycleState.STAGING, adv_msg, details)
-                return True, self.state.current_state, adv_msg
+            return self._advance_from_gate(force)
 
         elif curr == CycleState.QA:
             passed, msg, details = self.guard_qa_to_staging()

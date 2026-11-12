@@ -279,7 +279,40 @@ class GateResult:
 
 
 class EdgeVerificationGate:
+    GHOST_ROOT_DIRS: Tuple[str, ...] = ("rc", "pecs", "ests", "pp", "ib", "omponents")
+
     def __init__(self, target_repo_path: Path):
+        self.target_repo = target_repo_path
+
+    def check_ghost_root_directories(self) -> GateResult:
+        """
+        Stage-0 Invariant: Detects truncated ghost root directories (e.g., 'rc', 'pecs', 'ests')
+        caused by string slicing defects or malformed scripts.
+        """
+        detected: List[str] = [
+            name for name in self.GHOST_ROOT_DIRS
+            if (self.target_repo / name).is_dir()
+        ]
+        if detected:
+            details = [f"Found invalid ghost directory: {self.target_repo / d}" for d in detected]
+            return GateResult(
+                stage_num=0,
+                name="Ghost Root Directory Sanitizer Gate",
+                passed=False,
+                message=(
+                    f"Truncated ghost root directories detected: {', '.join(detected)}. "
+                    f"These indicate path-slicing defects (e.g. 'rc' instead of 'src'). "
+                    f"Clean up or remove these directories before proceeding."
+                ),
+                details=details,
+            )
+
+        return GateResult(
+            stage_num=0,
+            name="Ghost Root Directory Sanitizer Gate",
+            passed=True,
+            message="No truncated ghost root directories detected in repository root.",
+        )
         self.target_repo = target_repo_path
 
     def _run_cmd(self, cmd: List[str], cwd: Optional[Path] = None, timeout: int = 120) -> Tuple[int, str, str]:
@@ -713,6 +746,17 @@ class EdgeVerificationGate:
 
         results: List[GateResult] = []
 
+        # Stage 0: Ghost root directory check (fail fast)
+        ghost_result = self.check_ghost_root_directories()
+        results.append(ghost_result)
+        if not ghost_result.passed:
+            print(str(ghost_result))
+            print("-" * 70)
+            print("\n" + ("=" * 70))
+            print("🚫 GATE CHECK FAILED: Ghost root directories present. Halting audit immediately.")
+            print("=" * 70)
+            return False
+
         if is_refactor and track != "feature":
             results.append(self.check_migration_gate(base_ref=base_ref))
 
@@ -735,7 +779,7 @@ class EdgeVerificationGate:
             print("  (Skipping Hermetic verification per --skip-verify)")
 
         all_passed = True
-        for idx, r in enumerate(results, start=1):
+        for idx, r in enumerate(results):
             r.stage_num = idx
             print(str(r))
             print("-" * 70)
