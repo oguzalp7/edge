@@ -3567,6 +3567,396 @@ class TestWorktreeAutoRebaseAndQaPreflight(unittest.TestCase):
             self.assertTrue(details.get("db_drift"))
 
 
+
+
+class TestBrigadeFSMHardeningAndWorktreePreemption(unittest.TestCase):
+    """
+    Contract and Unit tests for Brigade FSM Hardening:
+    - Polish-to-Review Re-Verification Quality Loop
+    - Zero-Exit Hermetic Verification Gate before GATE
+    - FlightRecorder record_dead_end is_abort flag and status protection
+    - Suffix-preserving collision-free ticket ID generation
+    - Checkpoint model active_worktree and stashed_ticket persistence
+    - Worktree-aware pause() and resume() executing strictly in worktree
+    - Hotfix Preemption in start_slice() while state is PAUSED
+    """
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.repo_path = Path(self.test_dir)
+        self.fsm = BrigadeFSM(self.repo_path)
+        self.worktree_dir = tempfile.mkdtemp()
+        self.worktree_path = Path(self.worktree_dir)
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+        shutil.rmtree(self.worktree_dir, ignore_errors=True)
+
+    def test_polish_advances_to_review_and_clears_findings(self):
+        """Scenario 1: Polish transitions to REVIEW and clears prior review findings."""
+        self.fsm.state.current_state = CycleState.POLISH
+        self.fsm.state.review_findings = [
+            ReviewFinding(
+                axis="spec",
+                severity="CRITICAL",
+                file_path="src/lib/auth.ts",
+                rule="SEC-01",
+                description="Token leak",
+                suggested_fix="Sanitize token",
+            )
+        ]
+
+        with patch.object(self.fsm, "_run_hermetic_verification", return_value=(True, "Tests & TSC clean")):
+            success, next_state, msg = self.fsm.advance()
+            self.assertTrue(success)
+            self.assertEqual(next_state, CycleState.REVIEW, "POLISH must transition to REVIEW for examiner re-audit")
+            self.assertEqual(self.fsm.state.current_state, CycleState.REVIEW)
+            self.assertEqual(self.fsm.state.review_findings, [], "Remediated review findings must be cleared")
+
+    def test_review_blocked_by_hermetic_verification_failure(self):
+        """Scenario 2: REVIEW to GATE blocked when hermetic verification fails (routes to POLISH)."""
+        self.fsm.state.current_state = CycleState.REVIEW
+        self.fsm.state.review_findings = [
+            ReviewFinding(
+                axis="standards",
+                severity="WARNING",
+                file_path="src/lib/auth.ts",
+                rule="STYLE-01",
+                description="Minor comment style",
+                suggested_fix="Fix style",
+            )
+        ]
+
+        with patch.object(self.fsm, "_run_hermetic_verification", return_value=(False, "Test failed: syntax error in main.py")):
+            next_state, msg, details = self.fsm.guard_review_to_next()
+            self.assertEqual(next_state, CycleState.POLISH, "Must route to POLISH when tests/tsc fail even with 0 critical findings")
+            self.assertIn("verification failed", msg.lower())
+
+            adv_success, adv_state, adv_msg = self.fsm.advance()
+            self.assertTrue(adv_success)
+            self.assertEqual(adv_state, CycleState.POLISH)
+            self.assertEqual(self.fsm.state.current_state, CycleState.POLISH)
+
+    def test_review_advances_to_gate_when_verification_passes_and_zero_critical(self):
+        """Scenario 2b: REVIEW advances to GATE when 0 critical findings AND verification passes."""
+        self.fsm.state.current_state = CycleState.REVIEW
+        self.fsm.state.review_findings = [
+            ReviewFinding(
+                axis="standards",
+                severity="WARNING",
+                file_path="src/lib/auth.ts",
+                rule="STYLE-01",
+                description="Minor comment style",
+                suggested_fix="Fix style",
+            )
+        ]
+
+        with patch.object(self.fsm, "_run_hermetic_verification", return_value=(True, "Tests & compilation clean")):
+            next_state, msg, details = self.fsm.guard_review_to_next()
+            self.assertEqual(next_state, CycleState.GATE)
+
+            adv_success, adv_state, adv_msg = self.fsm.advance()
+            self.assertTrue(adv_success)
+            self.assertEqual(adv_state, CycleState.GATE)
+            self.assertEqual(self.fsm.state.current_state, CycleState.GATE)
+
+    def test_flight_recorder_record_dead_end_is_abort_flag(self):
+        """Scenario 3 & 4: record_dead_end preserves ACTIVE status unless is_abort=True."""
+        from tools.brigade.flight_recorder import FlightRecorder
+
+        recorder = FlightRecorder(self.repo_path, "TICK-TEST-FR")
+        self.assertEqual(recorder.data["status"], "ACTIVE")
+
+        # Guard retry (default is_abort=False)
+        recorder.record_dead_end(
+            title="Attempted approach 1",
+            reason="Compilation error",
+            prohibited_rule="Do not use any",
+        )
+        self.assertEqual(
+            recorder.data["status"],
+            "ACTIVE",
+            "Guard retries with is_abort=False must NOT set status to ABANDONED",
+        )
+        self.assertEqual(len(recorder.data["dead_ends"]), 1)
+
+        # Deliberate abort (is_abort=True)
+        recorder.record_dead_end(
+            title="Deadlock path",
+            reason="Unresolvable cyclic dependency",
+            prohibited_rule="Avoid cyclic coupling",
+            is_abort=True,
+        )
+        self.assertEqual(
+            recorder.data["status"],
+            "ABANDONED",
+            "Deliberate abort with is_abort=True must mark status as ABANDONED",
+        )
+        self.assertEqual(len(recorder.data["dead_ends"]), 2)
+
+    def test_fsm_abort_marks_flight_recorder_abandoned(self):
+        """Scenario 4: fsm.abort() marks FlightRecorder status as ABANDONED."""
+        from tools.brigade.flight_recorder import FlightRecorder
+
+        ticket = Ticket(
+            ticket_id="TICK-FEAT-ABORT-TEST",
+            track="feature",
+            domain="auth",
+            rule_id="RULE-AUTH",
+            severity="NORMAL",
+            target_file="src/auth.ts",
+            line_number=1,
+            fingerprint="fp_abort",
+            description="Abort test",
+            suggested_fix="None",
+            branch_name="feat/abort-test",
+            test_seam_command="pytest",
+        )
+        self.fsm.state.active_ticket = ticket
+        self.fsm.state.current_state = CycleState.SURGERY
+
+        self.fsm.abort("Deadlock condition")
+
+        recorder = FlightRecorder(self.repo_path, ticket.ticket_id)
+        self.assertEqual(
+            recorder.data["status"],
+            "ABANDONED",
+            "fsm.abort() must mark FlightRecorder status as ABANDONED",
+        )
+
+    def test_start_slice_collision_free_ticket_id_generation(self):
+        """Scenario 5: start_slice preserves suffix in ticket_id to prevent collision across slices."""
+        # Short / normal names (<= 18 chars)
+        ok1, t1, _ = self.fsm.start_slice("distill-v2-slice1", track="feature", auto_lease_worktree=False)
+        self.assertTrue(ok1)
+        self.assertEqual(t1.ticket_id, "TICK-FEAT-DISTILL-V2-SLICE1")
+
+        self.fsm.state.active_ticket = None
+        self.fsm.state.current_state = CycleState.IDLE
+
+        ok2, t2, _ = self.fsm.start_slice("distill-v2-slice2", track="feature", auto_lease_worktree=False)
+        self.assertTrue(ok2)
+        self.assertEqual(t2.ticket_id, "TICK-FEAT-DISTILL-V2-SLICE2")
+        self.assertNotEqual(t1.ticket_id, t2.ticket_id, "Slice 1 and Slice 2 must have distinct ticket IDs")
+
+        # Long names (> 18 chars) sharing a long common prefix
+        self.fsm.state.active_ticket = None
+        self.fsm.state.current_state = CycleState.IDLE
+
+        ok3, t3, _ = self.fsm.start_slice("distill-v2-slice-long-seq1", track="feature", auto_lease_worktree=False)
+        self.assertTrue(ok3)
+
+        self.fsm.state.active_ticket = None
+        self.fsm.state.current_state = CycleState.IDLE
+
+        ok4, t4, _ = self.fsm.start_slice("distill-v2-slice-long-seq2", track="feature", auto_lease_worktree=False)
+        self.assertTrue(ok4)
+
+        # First 11 chars + last 6 chars: distill-v2- and g-seq1 / g-seq2
+        self.assertEqual(t3.ticket_id, "TICK-FEAT-DISTILL-V2--G-SEQ1")
+        self.assertEqual(t4.ticket_id, "TICK-FEAT-DISTILL-V2--G-SEQ2")
+        self.assertNotEqual(t3.ticket_id, t4.ticket_id, "Long names sharing prefix must not collide on ticket_id")
+
+    def test_checkpoint_model_active_worktree_and_stashed_ticket(self):
+        """Scenario 7a: Checkpoint model supports active_worktree and stashed_ticket serialization."""
+        ticket = Ticket(
+            ticket_id="TICK-STASHED-1",
+            track="feature",
+            domain="auth",
+            rule_id="RULE-AUTH",
+            severity="NORMAL",
+            target_file="src/auth.ts",
+            line_number=1,
+            fingerprint="fp_stash",
+            description="Stashed ticket",
+            suggested_fix="None",
+            branch_name="feat/auth-stash",
+            test_seam_command="pytest",
+            worktree_path=str(self.worktree_path),
+        )
+
+        cp = Checkpoint(
+            paused_at="2026-11-12T08:00:00Z",
+            reason="HOTFIX_PREEMPTION",
+            base_branch="main",
+            active_branch="feat/auth-stash",
+            worktree_path=str(self.worktree_path),
+            active_worktree=str(self.worktree_path),
+            active_ticket=ticket,
+            stashed_ticket=ticket.to_dict(),
+            fsm_state="SURGERY",
+        )
+
+        d = cp.to_dict()
+        self.assertEqual(d["active_worktree"], str(self.worktree_path))
+        self.assertIsNotNone(d["stashed_ticket"])
+        self.assertEqual(d["stashed_ticket"]["ticket_id"], "TICK-STASHED-1")
+
+        restored = Checkpoint.from_dict(d)
+        self.assertEqual(restored.active_worktree, str(self.worktree_path))
+        self.assertIsNotNone(restored.active_ticket)
+        self.assertEqual(restored.active_ticket.ticket_id, "TICK-STASHED-1")
+
+    def test_worktree_aware_pause_executes_strictly_in_worktree(self):
+        """Scenario 6: pause() executes git status, add, and commit strictly inside worktree_path."""
+        ticket = Ticket(
+            ticket_id="TICK-WT-PAUSE",
+            track="feature",
+            domain="auth",
+            rule_id="RULE-AUTH",
+            severity="NORMAL",
+            target_file="src/auth.ts",
+            line_number=1,
+            fingerprint="fp_wt_pause",
+            description="WT pause",
+            suggested_fix="None",
+            branch_name="feat/wt-pause",
+            test_seam_command="pytest",
+            worktree_path=str(self.worktree_path),
+        )
+        self.fsm.state.active_ticket = ticket
+        self.fsm.state.active_worktree = str(self.worktree_path)
+        self.fsm.state.active_branch = "feat/wt-pause"
+        self.fsm.state.current_state = CycleState.SURGERY
+
+        recorded_calls = []
+
+        def mock_run_cmd(cmd, cwd=None):
+            recorded_calls.append((cmd, cwd))
+            if "--porcelain" in cmd:
+                return (0, " M src/auth.ts\n", "")
+            if "rev-parse" in cmd:
+                return (0, "sha_wt_123\n", "")
+            return (0, "", "")
+
+        with patch.object(self.fsm, "_run_cmd", side_effect=mock_run_cmd):
+            cp = self.fsm.pause(reason="MANUAL_PAUSE")
+
+            self.assertEqual(self.fsm.state.current_state, CycleState.PAUSED)
+            self.assertEqual(cp.active_worktree, str(self.worktree_path))
+            self.assertIsNotNone(cp.stashed_ticket)
+
+            # Ensure all git commands ran inside the worktree
+            self.assertTrue(len(recorded_calls) > 0)
+            for cmd, cwd in recorded_calls:
+                self.assertEqual(
+                    Path(cwd),
+                    self.worktree_path,
+                    f"Command {cmd} was executed in {cwd} instead of worktree {self.worktree_path}",
+                )
+
+    def test_worktree_aware_resume_bypasses_primary_checkout(self):
+        """Scenario 8: resume() does NOT call git checkout in self.target_repo when active_worktree exists."""
+        self.fsm.checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
+        ticket = Ticket(
+            ticket_id="TICK-WT-RESUME",
+            track="feature",
+            domain="auth",
+            rule_id="RULE-AUTH",
+            severity="NORMAL",
+            target_file="src/auth.ts",
+            line_number=1,
+            fingerprint="fp_wt_res",
+            description="WT resume",
+            suggested_fix="None",
+            branch_name="feat/wt-resume",
+            test_seam_command="pytest",
+            worktree_path=str(self.worktree_path),
+        )
+        cp = Checkpoint(
+            paused_at="2026-11-12T08:00:00Z",
+            reason="MANUAL_PAUSE",
+            base_branch="main",
+            active_branch="feat/wt-resume",
+            worktree_path=str(self.worktree_path),
+            active_worktree=str(self.worktree_path),
+            active_ticket=ticket,
+            stashed_ticket=ticket.to_dict(),
+            fsm_state="SURGERY",
+        )
+        with open(self.fsm.checkpoint_file, "w", encoding="utf-8") as f:
+            json.dump(cp.to_dict(), f)
+
+        recorded_cmds = []
+
+        def mock_run_cmd(cmd, cwd=None):
+            recorded_cmds.append((cmd, cwd))
+            if "branch" in cmd and "--show-current" in cmd:
+                return (0, "main\n", "")
+            return (0, "", "")
+
+        with patch.object(self.fsm, "_run_cmd", side_effect=mock_run_cmd):
+            success, restored_cp, msg = self.fsm.resume()
+            self.assertTrue(success)
+            self.assertEqual(self.fsm.state.current_state, CycleState.SURGERY)
+            self.assertEqual(self.fsm.state.active_ticket.ticket_id, "TICK-WT-RESUME")
+            self.assertEqual(self.fsm.state.active_worktree, str(self.worktree_path))
+
+            # Verify git checkout was NOT executed in primary repository
+            for cmd, cwd in recorded_cmds:
+                if "checkout" in cmd:
+                    self.fail(f"git checkout was executed in {cwd} despite active_worktree presence!")
+
+    def test_hotfix_preemption_on_paused_state(self):
+        """Scenario 7: start_slice succeeds on PAUSED state, preserving stashed checkpoint for later resume."""
+        epic_ticket = Ticket(
+            ticket_id="TICK-FEAT-EPIC-SLIC1",
+            track="feature",
+            domain="auth",
+            rule_id="RULE-AUTH",
+            severity="NORMAL",
+            target_file="src/auth.ts",
+            line_number=1,
+            fingerprint="fp_epic",
+            description="Epic slice 1",
+            suggested_fix="None",
+            branch_name="feat/epic-slice1",
+            test_seam_command="pytest",
+            worktree_path=str(self.worktree_path),
+        )
+        self.fsm.state.active_ticket = epic_ticket
+        self.fsm.state.active_branch = "feat/epic-slice1"
+        self.fsm.state.active_worktree = str(self.worktree_path)
+        self.fsm.state.current_state = CycleState.PAUSED
+
+        # Create checkpoint file for the paused epic
+        self.fsm.checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
+        cp = Checkpoint(
+            paused_at="2026-11-12T07:30:00Z",
+            reason="CONTEXT_HEAT",
+            base_branch="main",
+            active_branch="feat/epic-slice1",
+            worktree_path=str(self.worktree_path),
+            active_worktree=str(self.worktree_path),
+            active_ticket=epic_ticket,
+            stashed_ticket=epic_ticket.to_dict(),
+            fsm_state="SURGERY",
+        )
+        with open(self.fsm.checkpoint_file, "w", encoding="utf-8") as f:
+            json.dump(cp.to_dict(), f)
+
+        # Start urgent hotfix slice while FSM is in PAUSED
+        ok, hotfix_ticket, msg = self.fsm.start_slice("urgent-hotfix", track="feature", auto_lease_worktree=False)
+        self.assertTrue(ok, f"Hotfix preemption must succeed on PAUSED state: {msg}")
+        self.assertEqual(hotfix_ticket.ticket_id, "TICK-FEAT-URGENT-HOTFIX")
+        self.assertEqual(self.fsm.state.current_state, CycleState.RED_TEST)
+        self.assertTrue(self.fsm.checkpoint_file.exists(), "Original checkpoint must NOT be destroyed by preemption")
+
+        # Simulate hotfix completion to IDLE
+        self.fsm.state.active_ticket = None
+        self.fsm.state.active_branch = None
+        self.fsm.state.active_worktree = None
+        self.fsm.state.current_state = CycleState.IDLE
+
+        # Resume the parked epic
+        with patch.object(self.fsm, "_run_cmd", return_value=(0, "main", "")):
+            res_ok, restored_cp, res_msg = self.fsm.resume()
+            self.assertTrue(res_ok)
+            self.assertEqual(self.fsm.state.current_state, CycleState.SURGERY)
+            self.assertEqual(self.fsm.state.active_ticket.ticket_id, "TICK-FEAT-EPIC-SLIC1")
+            self.assertEqual(self.fsm.state.active_worktree, str(self.worktree_path))
+
+
 if __name__ == "__main__":
     unittest.main()
 
