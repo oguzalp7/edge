@@ -13,7 +13,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
-from typing import Any, List, Dict
+from typing import Any, List, Dict, Optional, Set, Tuple
 from unittest.mock import patch, MagicMock
 
 # Add project root to sys.path
@@ -1740,6 +1740,309 @@ class TestDistillWatermarkAndRoleHyphenFix(unittest.TestCase):
             signals = inbox.load_signals()
             self.assertEqual(len(signals), 1)
             self.assertEqual(signals[0]["source_project"], "/home/oguz/real-app")
+
+
+
+class TestDistillHarvesterBackgroundHangTelemetry(unittest.TestCase):
+    """
+    Hermetic contract and unit tests for Distill v2.1 Slice 2:
+    - --since-hours sliding window filter (Scenarios 1)
+    - Cycle-safe BFS multi-level subagent lineage expansion (Scenarios 2-3)
+    - manage_task & background log tail telemetry (Scenarios 4-5)
+    - Two-layer workspace affiliation & harness keyword routing (Scenarios 6-8)
+    """
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp(prefix="test_hang_telemetry_")
+        self.brain_root = Path(self.temp_dir) / "brain"
+        self.brain_root.mkdir(parents=True, exist_ok=True)
+        self.repo_dir = Path(self.temp_dir) / "target_repo"
+        self.repo_dir.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _create_session(self, conv_id: str, steps: List[Dict[str, Any]], mtime_offset: Optional[float] = None) -> Path:
+        import time
+        sess_dir = self.brain_root / conv_id / ".system_generated" / "logs"
+        sess_dir.mkdir(parents=True, exist_ok=True)
+        transcript_path = sess_dir / "transcript.jsonl"
+        with open(transcript_path, "w", encoding="utf-8") as f:
+            for s in steps:
+                f.write(json.dumps(s) + "\n")
+        if mtime_offset is not None:
+            new_mtime = time.time() - mtime_offset
+            root_sess = self.brain_root / conv_id
+            os.utime(root_sess, (new_mtime, new_mtime))
+            os.utime(transcript_path, (new_mtime, new_mtime))
+        return self.brain_root / conv_id
+
+    # --- 1. --since-hours CLI & Mtime Filter ---
+    def test_cli_build_parser_and_cmd_harvest_since_hours(self):
+        """Validates that build_parser accepts --since-hours and passes it to TranscriptGraphHarvester."""
+        from tools.distill import cli
+        from tools.distill.harvester import TranscriptGraphHarvester
+        import argparse
+
+        parser = cli.build_parser()
+        args = parser.parse_args(["harvest", str(self.repo_dir), "--since-hours", "24"])
+        self.assertEqual(args.since_hours, 24)
+
+        args_default = parser.parse_args(["harvest", str(self.repo_dir)])
+        self.assertIsNone(args_default.since_hours)
+
+        # Verify TranscriptGraphHarvester accepts since_hours
+        harvester = TranscriptGraphHarvester(repo_path=self.repo_dir, since_hours=12)
+        self.assertEqual(getattr(harvester, "since_hours", None), 12)
+
+    def test_discover_candidates_since_hours_mtime_filter(self):
+        """Validates that _discover_candidates filters out sessions older than since_hours."""
+        import time
+        from tools.distill.harvester import TranscriptGraphHarvester
+
+        recent_dir = self._create_session("sess-recent", [{"step_index": 0}], mtime_offset=3600)
+        old_dir = self._create_session("sess-old", [{"step_index": 0}], mtime_offset=172800)
+
+        # 1. With since_hours=24: sess-old MUST be pruned
+        h_filtered = TranscriptGraphHarvester(brain_roots=[self.brain_root], since_hours=24)
+        candidates = h_filtered._discover_candidates()
+        cand_names = [c.name for c in candidates]
+        self.assertIn("sess-recent", cand_names)
+        self.assertNotIn("sess-old", cand_names)
+
+        # 2. With since_hours=None: both sessions returned
+        h_all = TranscriptGraphHarvester(brain_roots=[self.brain_root], since_hours=None)
+        all_cands = [c.name for c in h_all._discover_candidates()]
+        self.assertIn("sess-recent", all_cands)
+        self.assertIn("sess-old", all_cands)
+
+    # --- 2. Cycle-Safe BFS Multi-Level Graph Expansion ---
+    def test_expand_connected_session_graph_multi_level_lineage(self):
+        """Validates BFS discovers descendants and ancestors across arbitrary depths (R -> C1 -> G1 -> GG1)."""
+        from tools.distill import harvester
+
+        self.assertTrue(
+            hasattr(harvester, "_expand_connected_session_graph"),
+            "harvester module must define _expand_connected_session_graph",
+        )
+
+        parent_to_children = {
+            "R": ["C1"],
+            "C1": ["G1"],
+            "G1": ["GG1"],
+        }
+        child_to_parent = {
+            "C1": "R",
+            "G1": "C1",
+            "GG1": "G1",
+        }
+
+        # Downward expansion from Root
+        expanded_down = harvester._expand_connected_session_graph({"R"}, parent_to_children, child_to_parent)
+        self.assertEqual(expanded_down, {"R", "C1", "G1", "GG1"})
+
+        # Upward expansion from Great-Grandchild
+        expanded_up = harvester._expand_connected_session_graph({"GG1"}, parent_to_children, child_to_parent)
+        self.assertEqual(expanded_up, {"R", "C1", "G1", "GG1"})
+
+    def test_expand_connected_session_graph_cycle_safety(self):
+        """Validates BFS terminates cleanly on cyclic parent-child links (A <-> B) without looping."""
+        from tools.distill import harvester
+
+        self.assertTrue(hasattr(harvester, "_expand_connected_session_graph"))
+
+        parent_to_children = {"A": ["B"], "B": ["A"]}
+        child_to_parent = {"B": "A", "A": "B"}
+
+        result = harvester._expand_connected_session_graph({"A"}, parent_to_children, child_to_parent)
+        self.assertEqual(result, {"A", "B"})
+
+    # --- 3. manage_task & Background Log Telemetry ---
+    def test_extract_background_task_hangs_task_killed(self):
+        """Validates extraction of TASK_KILLED signal with log tail when manage_task kill is invoked."""
+        from tools.distill import harvester
+
+        self.assertTrue(
+            hasattr(harvester, "_extract_background_task_hangs"),
+            "harvester module must define _extract_background_task_hangs",
+        )
+        self.assertTrue(
+            hasattr(harvester, "_read_task_log_tail"),
+            "harvester module must define _read_task_log_tail",
+        )
+
+        sess_dir = self.brain_root / "sess-kill-1"
+        tasks_dir = sess_dir / ".system_generated" / "tasks"
+        tasks_dir.mkdir(parents=True, exist_ok=True)
+        log_file = tasks_dir / "task-42.log"
+        log_file.write_text("Build started\nCompiling TS\nFatal error: Out of memory\nKilled by supervisor\n", encoding="utf-8")
+
+        # Test log tail helper directly
+        tail = harvester._read_task_log_tail(sess_dir, "task-42", max_lines=2)
+        self.assertEqual(tail, "Fatal error: Out of memory\nKilled by supervisor")
+
+        step = {
+            "created_at": "2026-11-12T05:00:00Z",
+            "tool_calls": [
+                {
+                    "name": "manage_task",
+                    "args": {"Action": "kill", "TaskId": "task-42"},
+                }
+            ],
+        }
+
+        signals = harvester._extract_background_task_hangs([step], sess_dir, "sess-kill-1")
+        self.assertEqual(len(signals), 1)
+        sig = signals[0]
+        self.assertEqual(sig.error_type, "TASK_KILLED")
+        self.assertEqual(sig.exit_code, -9)
+        self.assertIn("task-42", sig.command_or_args)
+        self.assertIn("Killed by supervisor", sig.error_output)
+
+    def test_extract_background_task_hangs_consecutive_status_polling(self):
+        """Validates that >= 3 consecutive status checks on same TaskId trigger BACKGROUND_HANG signal."""
+        from tools.distill import harvester
+
+        self.assertTrue(hasattr(harvester, "_extract_background_task_hangs"))
+
+        sess_dir = self.brain_root / "sess-hang-1"
+        sess_dir.mkdir(parents=True, exist_ok=True)
+
+        steps = [
+            {"tool_calls": [{"name": "manage_task", "args": {"Action": "status", "TaskId": "task-99"}}]},
+            {"tool_calls": [{"name": "manage_task", "args": {"Action": "status", "TaskId": "task-99"}}]},
+            {"tool_calls": [{"name": "manage_task", "args": {"Action": "status", "TaskId": "task-99"}}]},
+            {"tool_calls": [{"name": "manage_task", "args": {"Action": "status", "TaskId": "task-99"}}]},
+        ]
+
+        # 2 checks: under threshold (count < 3) -> 0 signals
+        sigs_2 = harvester._extract_background_task_hangs(steps[:2], sess_dir, "sess-hang-1")
+        self.assertEqual(len(sigs_2), 0)
+
+        # 3 checks: triggers BACKGROUND_HANG signal with retry_count=3
+        sigs_3 = harvester._extract_background_task_hangs(steps[:3], sess_dir, "sess-hang-1")
+        self.assertEqual(len(sigs_3), 1)
+        self.assertEqual(sigs_3[0].error_type, "BACKGROUND_HANG")
+        self.assertEqual(sigs_3[0].retry_count, 3)
+        self.assertIn("task-99", sigs_3[0].command_or_args)
+        self.assertIn("hung or required excessive polling", sigs_3[0].error_output)
+
+        # 4 checks: does not double emit (only emitted at count == 3)
+        sigs_4 = harvester._extract_background_task_hangs(steps, sess_dir, "sess-hang-1")
+        self.assertEqual(len(sigs_4), 1)
+
+    # --- 4. Two-Layer Workspace Affiliation & Routing ---
+    def test_session_matches_project_layer1_workspace_uris(self):
+        """Validates Layer 1: Authoritative workspaceUris match or reject with cross-workspace isolation."""
+        from tools.distill import harvester
+
+        self.assertTrue(
+            hasattr(harvester, "_session_matches_project"),
+            "harvester module must define _session_matches_project",
+        )
+
+        target_path = Path("/home/oguz/target-project")
+
+        # 1. Matching workspaceUris returns True
+        steps_match = [
+            {"workspaceUris": ["file:///home/oguz/target-project"]},
+            {"tool_calls": [{"name": "run_command", "args": {"CommandLine": "ls"}}]},
+        ]
+        self.assertTrue(harvester._session_matches_project(steps_match, target_path))
+
+        # 2. Foreign workspaceUris rejects even if a single tool call accesses target repo file
+        steps_foreign = [
+            {"workspaceUris": ["file:///home/oguz/other-project"]},
+            {
+                "tool_calls": [
+                    {
+                        "name": "read_file",
+                        "args": {"Path": "/home/oguz/target-project/src/index.ts"},
+                    }
+                ]
+            },
+        ]
+        self.assertFalse(
+            harvester._session_matches_project(steps_foreign, target_path),
+            "Cross-workspace read must NOT claim foreign workspace session",
+        )
+
+    def test_session_matches_project_layer2_dominant_step_ratio(self):
+        """Validates Layer 2: Without workspaceUris, requires >= 30% tool-bearing steps matching target."""
+        from tools.distill import harvester
+
+        self.assertTrue(hasattr(harvester, "_session_matches_project"))
+        target_path = Path("/home/oguz/target-project")
+
+        # 10 tool steps: 1 step matches (10% < 30%) -> False
+        steps_low = [
+            {"tool_calls": [{"name": "run_command", "args": {"CommandLine": f"cat /home/oguz/target-project/foo"}}]}
+        ] + [
+            {"tool_calls": [{"name": "run_command", "args": {"CommandLine": "npm test"}}]} for _ in range(9)
+        ]
+        self.assertFalse(harvester._session_matches_project(steps_low, target_path))
+
+        # 10 tool steps: 4 steps match (40% >= 30%) -> True
+        steps_high = [
+            {"tool_calls": [{"name": "run_command", "args": {"CommandLine": f"cat /home/oguz/target-project/file_{i}"}}]}
+            for i in range(4)
+        ] + [
+            {"tool_calls": [{"name": "run_command", "args": {"CommandLine": "echo ok"}}]} for _ in range(6)
+        ]
+        self.assertTrue(harvester._session_matches_project(steps_high, target_path))
+
+    def test_split_project_signals_classifies_hang_and_killed_as_harness(self):
+        """Validates that manage_task, BACKGROUND_HANG, and TASK_KILLED route to harness/factory signals."""
+        from tools.distill.harvester import TranscriptGraphHarvester
+        from tools.distill.models import ToolFrictionSignal
+
+        h = TranscriptGraphHarvester(repo_path=self.repo_dir)
+
+        sig_kill = ToolFrictionSignal(
+            signal_id="SIG-1",
+            tool_name="manage_task",
+            command_or_args="manage_task kill TaskId=task-1",
+            error_output="Task task-1 was forcefully killed",
+            error_type="TASK_KILLED",
+            conversation_id="c1",
+            step_index=1,
+            timestamp="2026-11-12T00:00:00Z",
+            exit_code=-9,
+        )
+        sig_hang = ToolFrictionSignal(
+            signal_id="SIG-2",
+            tool_name="manage_task",
+            command_or_args="manage_task status TaskId=task-2 (polled 3x)",
+            error_output="Background task task-2 hung",
+            error_type="BACKGROUND_HANG",
+            conversation_id="c1",
+            step_index=2,
+            timestamp="2026-11-12T00:00:00Z",
+        )
+        sig_app = ToolFrictionSignal(
+            signal_id="SIG-3",
+            tool_name="run_command",
+            command_or_args="npm run test",
+            error_output="AssertionError: expected true",
+            error_type="TEST_FAILURE",
+            conversation_id="c1",
+            step_index=3,
+            timestamp="2026-11-12T00:00:00Z",
+            exit_code=1,
+        )
+
+        proj_sigs, harness_sigs = h._split_project_signals([sig_kill, sig_hang, sig_app], project_name="target_repo")
+
+        # sig_kill and sig_hang MUST be routed to harness_sigs
+        harness_ids = {s.signal_id for s in harness_sigs}
+        self.assertIn("SIG-1", harness_ids)
+        self.assertIn("SIG-2", harness_ids)
+
+        # Only sig_app should be in proj_sigs
+        proj_ids = {s.signal_id for s in proj_sigs}
+        self.assertIn("SIG-3", proj_ids)
+        self.assertNotIn("SIG-1", proj_ids)
+        self.assertNotIn("SIG-2", proj_ids)
 
 
 if __name__ == "__main__":
