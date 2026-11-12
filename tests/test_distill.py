@@ -1413,5 +1413,334 @@ class TestSessionMiner(unittest.TestCase):
             self.assertEqual(code, 0)
 
 
+
+class TestDistillWatermarkAndRoleHyphenFix(unittest.TestCase):
+    """
+    Hermetic contract and unit tests for Distill v2.1 Slice 1:
+    - CLI Harvest Watermark Injection & Persistence (Scenarios 1-2)
+    - Hyphenated / Underscored Agent Role File Resolution (Scenarios 3-5)
+    - FactoryInbox Dynamic Entropy Sanitization & Ephemeral Path Filter (Scenarios 6-8)
+    """
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp(prefix="test_watermark_slice_")
+        self.brain_root = Path(self.temp_dir) / "brain"
+        self.brain_root.mkdir(parents=True, exist_ok=True)
+        self.repo_dir = Path(self.temp_dir) / "project_beta"
+        self.repo_dir.mkdir(parents=True, exist_ok=True)
+        self.plugin_root = Path(self.temp_dir) / "plugin_edge"
+        self.plugin_root.mkdir(parents=True, exist_ok=True)
+        (self.plugin_root / "agents").mkdir(parents=True, exist_ok=True)
+
+        self.state_file = Path(self.temp_dir) / "distill_state.json"
+        self.candidates_file = Path(self.temp_dir) / "distill_candidates.json"
+        self.factory_inbox_file = Path(self.temp_dir) / "edge_factory_inbox.json"
+
+        self.orig_env = dict(os.environ)
+        os.environ["GEMINI_BRAIN_ROOT"] = str(self.brain_root)
+        os.environ["EDGE_DISTILL_STATE_FILE"] = str(self.state_file)
+        os.environ["EDGE_DISTILL_CANDIDATES_FILE"] = str(self.candidates_file)
+        os.environ["EDGE_DISTILL_FACTORY_INBOX_FILE"] = str(self.factory_inbox_file)
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self.orig_env)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _create_session(self, conv_id: str, steps: List[Dict[str, Any]]) -> Path:
+        sess_dir = self.brain_root / conv_id / ".system_generated" / "logs"
+        sess_dir.mkdir(parents=True, exist_ok=True)
+        transcript_path = sess_dir / "transcript.jsonl"
+        with open(transcript_path, "w", encoding="utf-8") as f:
+            for s in steps:
+                f.write(json.dumps(s) + "\n")
+        return transcript_path
+
+    # --- 1. cmd_harvest Watermark Injection & Persistence ---
+    def test_cmd_harvest_injects_watermark_and_skips_processed_sessions(self):
+        """
+        Scenario 1:
+        cmd_harvest loads DistillStateManager.load_state() and passes watermark_state
+        to TranscriptGraphHarvester so previously processed sessions are skipped.
+        """
+        from tools.distill.cli import cmd_harvest
+        from tools.distill.state import DistillStateManager
+        from tools.distill.models import DistillWatermarkState
+        import argparse
+
+        # Create two sessions for project_beta
+        self._create_session("sess-wm-old", [{"step_index": 0, "workspaceUris": [f"file://{self.repo_dir.as_posix()}"]}])
+        self._create_session("sess-wm-new", [{"step_index": 0, "workspaceUris": [f"file://{self.repo_dir.as_posix()}"]}])
+
+        # Pre-seed watermark with sess-wm-old
+        state_mgr = DistillStateManager(self.state_file)
+        initial_state = DistillWatermarkState(
+            processed_sessions=["sess-wm-old"],
+            project_sessions={str(self.repo_dir.resolve()): ["sess-wm-old"]},
+        )
+        state_mgr.save_state(initial_state)
+
+        # Run cmd_harvest with output directed to temp file
+        out_file = Path(self.temp_dir) / "digest.json"
+        args = argparse.Namespace(
+            project=str(self.repo_dir),
+            format="json",
+            output=str(out_file),
+            mode="project",
+            reprocess=False,
+            current=None,
+            max_sessions=50,
+        )
+
+        ret = cmd_harvest(args)
+        self.assertEqual(ret, 0)
+        self.assertTrue(out_file.exists())
+        data = json.loads(out_file.read_text(encoding="utf-8"))
+
+        # sess-wm-old MUST be skipped, only sess-wm-new analyzed
+        self.assertNotIn("sess-wm-old", data.get("sessions_analyzed", []))
+        self.assertIn("sess-wm-new", data.get("sessions_analyzed", []))
+        self.assertEqual(len(data.get("sessions_analyzed", [])), 1)
+
+    def test_cmd_harvest_persists_updated_watermark_to_state(self):
+        """
+        Scenario 2:
+        cmd_harvest updates and commits newly analyzed sessions to DistillStateManager.
+        """
+        from tools.distill.cli import cmd_harvest
+        from tools.distill.state import DistillStateManager
+        import argparse
+
+        self._create_session("sess-wm-commit", [{"step_index": 0, "workspaceUris": [f"file://{self.repo_dir.as_posix()}"]}])
+
+        out_file = Path(self.temp_dir) / "digest2.json"
+        args = argparse.Namespace(
+            project=str(self.repo_dir),
+            format="json",
+            output=str(out_file),
+            mode="project",
+            reprocess=False,
+            current=None,
+            max_sessions=50,
+        )
+
+        ret = cmd_harvest(args)
+        self.assertEqual(ret, 0)
+
+        # Verify state was committed
+        state_mgr = DistillStateManager(self.state_file)
+        loaded = state_mgr.load_state()
+        self.assertIn("sess-wm-commit", loaded.processed_sessions)
+        p_sessions = loaded.project_sessions.get(str(self.repo_dir.resolve()), [])
+        self.assertIn("sess-wm-commit", p_sessions)
+        self.assertTrue(loaded.last_harvested_at, "last_harvested_at should be updated")
+
+    # --- 2. Hyphen / Underscore Role File Resolution ---
+    def test_resolve_agent_rubric_path_canonical_precedence(self):
+        """
+        Scenario 3:
+        _resolve_agent_rubric_path prioritizes hyphenated files (e.g. 'spec-writer.md')
+        over underscored ones ('spec_writer.md').
+        """
+        from tools.distill import state
+
+        self.assertTrue(
+            hasattr(state, "_resolve_agent_rubric_path"),
+            "tools.distill.state must define _resolve_agent_rubric_path",
+        )
+
+        # 1. Existing hyphenated file is selected for underscored query
+        hyphen_file = self.plugin_root / "agents" / "spec-writer.md"
+        hyphen_file.write_text("# Spec Writer\n", encoding="utf-8")
+        resolved = state._resolve_agent_rubric_path(self.plugin_root, "spec_writer")
+        self.assertEqual(resolved, hyphen_file)
+
+        # 2. Existing underscored file fallback when hyphen absent
+        legacy_file = self.plugin_root / "agents" / "spec_critic.md"
+        legacy_file.write_text("# Spec Critic\n", encoding="utf-8")
+        resolved_legacy = state._resolve_agent_rubric_path(self.plugin_root, "spec_critic")
+        self.assertEqual(resolved_legacy, legacy_file)
+
+        # 3. Default to canonical hyphen path when neither exists
+        resolved_new = state._resolve_agent_rubric_path(self.plugin_root, "qa_engineer")
+        self.assertEqual(resolved_new, self.plugin_root / "agents" / "qa-engineer.md")
+
+    def test_promote_candidate_hyphenated_rubric_target(self):
+        """
+        Scenario 4:
+        promote_candidate writes to canonical hyphenated agent rubric ('agents/spec-writer.md')
+        even when target_role is underscored ('spec_writer') and does NOT create 'agents/spec_writer.md'.
+        """
+        from tools.distill.state import CandidatePool
+        from tools.distill.models import CandidateRule
+
+        canonical_file = self.plugin_root / "agents" / "spec-writer.md"
+        canonical_file.write_text("# Spec Writer\n\n## Rubrics\n", encoding="utf-8")
+
+        pool = CandidatePool(
+            candidates_file_override=self.candidates_file,
+            plugin_root=self.plugin_root,
+        )
+        cand = CandidateRule(
+            candidate_id="CAND-SPEC-1",
+            fingerprint="fp-spec-1",
+            rule_text="Always write hermetic Gherkin acceptance criteria.",
+            target_role="spec_writer",
+            scope_class="ROLE_OVERLAY",
+            source_projects=[str(self.repo_dir)],
+            status="READY_FOR_PROMOTION",
+        )
+        pool.save_candidates([cand])
+
+        promoted = pool.promote_candidate("CAND-SPEC-1", plugin_root=self.plugin_root, force=True)
+        self.assertTrue(promoted)
+
+        # Verify appended to canonical hyphenated file
+        content = canonical_file.read_text(encoding="utf-8")
+        self.assertIn("Always write hermetic Gherkin acceptance criteria.", content)
+
+        # Verify orphan underscored file was NOT created
+        orphan_file = self.plugin_root / "agents" / "spec_writer.md"
+        self.assertFalse(orphan_file.exists(), f"Orphan underscored file should not exist: {orphan_file}")
+
+    def test_clean_rule_from_all_projects_dual_variant_cleanup(self):
+        """
+        Scenario 5:
+        _clean_rule_from_all_projects removes candidate rule from both hyphenated ('seam-architect.md')
+        and underscored ('seam_architect.md') station overlays across projects.
+        """
+        from tools.distill import state
+        from tools.distill.models import CandidateRule
+
+        proj_a = Path(self.temp_dir) / "proj_alpha"
+        proj_b = Path(self.temp_dir) / "proj_bravo"
+        stations_a = proj_a / ".edge" / "stations"
+        stations_b = proj_b / ".edge" / "stations"
+        stations_a.mkdir(parents=True, exist_ok=True)
+        stations_b.mkdir(parents=True, exist_ok=True)
+
+        rule_text = "Always define characterization tests first."
+        cand = CandidateRule(
+            candidate_id="CAND-SEAM-1",
+            fingerprint="fp-seam-1",
+            rule_text=rule_text,
+            target_role="seam_architect",
+            scope_class="ROLE_OVERLAY",
+            source_projects=[str(proj_a), str(proj_b)],
+            status="READY_FOR_PROMOTION",
+        )
+
+        # Hyphenated overlay in Proj A
+        overlay_a = stations_a / "seam-architect.md"
+        overlay_a.write_text(f"# Seam Architect\n\n- {rule_text}\n- Keep CC under 8\n", encoding="utf-8")
+
+        # Underscored overlay in Proj B
+        overlay_b = stations_b / "seam_architect.md"
+        overlay_b.write_text(f"# Seam Architect\n\n- {rule_text}\n- Isolate repositories\n", encoding="utf-8")
+
+        state._clean_rule_from_all_projects([str(proj_a), str(proj_b)], cand)
+
+        content_a = overlay_a.read_text(encoding="utf-8")
+        content_b = overlay_b.read_text(encoding="utf-8")
+        self.assertNotIn(rule_text, content_a, "Rule was not removed from hyphenated overlay")
+        self.assertNotIn(rule_text, content_b, "Rule was not removed from underscored overlay")
+        self.assertIn("Keep CC under 8", content_a)
+        self.assertIn("Isolate repositories", content_b)
+
+    # --- 3. FactoryInbox Sanitization & Ephemeral Path Filter ---
+    def test_sanitize_signal_summary_deterministic_fingerprint(self):
+        """
+        Scenario 6 & 7:
+        _sanitize_signal_summary strips dynamic entropy (Created At, ISO timestamps, WSL PIDs, temp paths)
+        ensuring identical SHA-256 fingerprints and deduplication in FactoryInbox.
+        """
+        from tools.distill import state
+        from tools.distill.state import FactoryInbox
+
+        self.assertTrue(
+            hasattr(state, "_sanitize_signal_summary"),
+            "tools.distill.state must define _sanitize_signal_summary",
+        )
+
+        summary_a = (
+            "Created At: 2026-11-11T23:20:26-05:00\n"
+            "WSL (12345 - Relay) failed\n"
+            "TypeScript error in /tmp/pytest-run-1/code.ts: syntax error"
+        )
+        summary_b = (
+            "Created At: 2026-11-12T01:15:00Z\n"
+            "WSL (98765 - Relay) failed\n"
+            "TypeScript error in /tmp/pytest-run-2/code.ts: syntax error"
+        )
+
+        inbox = FactoryInbox(inbox_file_override=self.factory_inbox_file)
+        raw_a = {"kind": "HARNESS_FRICTION", "role_or_tool": "wsl", "summary": summary_a}
+        raw_b = {"kind": "HARNESS_FRICTION", "role_or_tool": "wsl", "summary": summary_b}
+
+        rec_a, fp_a = inbox._build_signal_record(raw_a)
+        rec_b, fp_b = inbox._build_signal_record(raw_b)
+
+        self.assertEqual(fp_a, fp_b, f"Fingerprints must match after sanitization: {fp_a} != {fp_b}")
+        self.assertEqual(len(fp_a), 16)
+
+        # Appending both to inbox must result in 1 added (deduplicated)
+        added = inbox.append_signals([raw_a, raw_b])
+        self.assertEqual(added, 1)
+        self.assertEqual(len(inbox.load_signals()), 1)
+
+    def test_is_ephemeral_test_path_detection(self):
+        """
+        Scenario 8a:
+        _is_ephemeral_test_path detects paths generated by pytest/unittest/tmp fixtures.
+        """
+        from tools.distill import state
+
+        self.assertTrue(
+            hasattr(state, "_is_ephemeral_test_path"),
+            "tools.distill.state must define _is_ephemeral_test_path",
+        )
+
+        self.assertTrue(state._is_ephemeral_test_path("/tmp/pytest-of-oguz/pytest-12/repo"))
+        self.assertTrue(state._is_ephemeral_test_path("/tmp/test_dir_abc/project"))
+        self.assertTrue(state._is_ephemeral_test_path(r"C:\Users\oguz_\AppData\Local\Temp\tmp_test\repo"))
+        self.assertTrue(state._is_ephemeral_test_path("/var/folders/xx/yy/T/temp_fixture"))
+
+        self.assertFalse(state._is_ephemeral_test_path("/home/oguz/projects/my-app"))
+        self.assertFalse(state._is_ephemeral_test_path("/mnt/c/Users/oguz_/workspace/edge"))
+        self.assertFalse(state._is_ephemeral_test_path(""))
+
+    def test_factory_inbox_drops_ephemeral_test_path_on_prod_inbox(self):
+        """
+        Scenario 8b:
+        When FactoryInbox uses the default production path, append_signals drops signals
+        originating from ephemeral test fixture paths.
+        """
+        from tools.distill import state
+        from tools.distill.state import FactoryInbox
+
+        # Point default path to our temp file for safe verification
+        with patch.object(state, "_default_factory_inbox_path", return_value=self.factory_inbox_file.resolve()):
+            inbox = FactoryInbox(inbox_file_override=self.factory_inbox_file)
+
+            raw_test = {
+                "kind": "HARNESS_FRICTION",
+                "role_or_tool": "run_command",
+                "summary": "Mock test failure",
+                "source_project": "/tmp/pytest-1234/test_fixture_project",
+            }
+            raw_real = {
+                "kind": "HARNESS_FRICTION",
+                "role_or_tool": "run_command",
+                "summary": "Real app failure",
+                "source_project": "/home/oguz/real-app",
+            }
+
+            added = inbox.append_signals([raw_test, raw_real])
+            self.assertEqual(added, 1, "Only real project signal should be accepted into production inbox")
+            signals = inbox.load_signals()
+            self.assertEqual(len(signals), 1)
+            self.assertEqual(signals[0]["source_project"], "/home/oguz/real-app")
+
+
 if __name__ == "__main__":
     unittest.main()
