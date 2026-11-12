@@ -916,6 +916,179 @@ def apply_afk_guard(payload: Dict[str, Any], afk_mode: str) -> Optional[Dict[str
     return None
 
 
+
+# =========================================================================
+# WSL Command Safety & Auto-Anchor Subroutines (SPEC-EDGE-BRIGADE-WSL-HOOK)
+# =========================================================================
+
+WSL_INVOCATION_PATTERN = re.compile(r"^\s*(?:wsl(?:\.exe)?)(?:\s+|$)", re.IGNORECASE)
+DOUBLE_QUOTE_SEGMENT_PATTERN = re.compile(r'"([^"\\]*(?:\\.[^"\\]*)*)"')
+UNESCAPED_PS_VAR_PATTERN = re.compile(r"(?<![`\\])\$([a-zA-Z_][a-zA-Z0-9_]*|\{[a-zA-Z_][a-zA-Z0-9_]*\})")
+BASH_C_PATTERN = re.compile(r"\bbash\s+-(?:l)?c\b", re.IGNORECASE)
+SHELL_METACHAR_PATTERN = re.compile(r"[();|&]")
+WSL_CD_CMD_PATTERN = re.compile(r"""(?:^|[\s;&|'"])cd\s+([\"']?)(~?/[^\"'\s;&|]+)\1""", re.IGNORECASE)
+WSL_MANAGEMENT_FLAGS = (
+    "--list", "-l", "--status", "--shutdown",
+    "--terminate", "-t", "--help", "-h", "--version", "-v",
+)
+WSL_PREFIX_PATTERN = re.compile(
+    r"^(\s*wsl(?:\.exe)?(?:\s+(?:-d|--distribution|-u|--user)\s+[^\s]+)*)",
+    re.IGNORECASE,
+)
+
+
+def _is_wsl_invocation(command_line: str) -> bool:
+    """Checks if a command line string begins with 'wsl' or 'wsl.exe'. CC = 2"""
+    if not command_line or not isinstance(command_line, str):
+        return False
+    return bool(WSL_INVOCATION_PATTERN.search(command_line))
+
+
+def _check_powershell_var_swallowing(command_line: str) -> Optional[Dict[str, Any]]:
+    """Detects unescaped PowerShell variables inside double quotes in WSL commands. CC = 4"""
+    for match in DOUBLE_QUOTE_SEGMENT_PATTERN.finditer(command_line):
+        content_seg = match.group(1)
+        var_match = UNESCAPED_PS_VAR_PATTERN.search(content_seg)
+        if var_match:
+            var_name = var_match.group(0)
+            return {
+                "decision": "deny",
+                "reason": (
+                    f"❌ [POWERSHELL VARIABLE SWALLOWING GUARD]: Unescaped PowerShell variable '{var_name}' "
+                    "detected inside double quotes in WSL command. PowerShell will evaluate and swallow this variable "
+                    "locally before WSL launches. Wrap the bash command in single quotes ('...') or escape the variable "
+                    f"using backtick (e.g. `{var_name}) or backslash."
+                ),
+            }
+    return None
+
+
+def _check_nested_quoting_collision(command_line: str) -> Optional[Dict[str, Any]]:
+    """Detects dangerous combinations of nested quotes (' and \") and shell metacharacters in bash -c. CC = 5"""
+    if not BASH_C_PATTERN.search(command_line):
+        return None
+
+    has_single_quote = "'" in command_line
+    has_double_quote = '"' in command_line
+    has_escaped_quote = r'\"' in command_line or r"\'" in command_line
+    has_metachar = bool(SHELL_METACHAR_PATTERN.search(command_line))
+
+    has_nested_quotes = (
+        (has_single_quote and has_double_quote)
+        or has_escaped_quote
+        or command_line.count('"') > 2
+        or command_line.count("'") > 2
+    )
+
+    if has_nested_quotes and has_metachar:
+        return {
+            "decision": "deny",
+            "reason": (
+                "❌ [NESTED QUOTING & METACHARACTER COLLISION GUARD]: Nested quotes (' and \") combined with shell "
+                "metacharacters ('(', ')', ';', '|', '&') detected in 'wsl bash -c'. Win32 argument wrapping will corrupt "
+                "inner quotes and break bash command parsing. Avoid nested 'bash -c' wrappers; invoke the target executable "
+                "directly using 'wsl --cd <linux_path> <executable> <args>', or write commands to a shell script file."
+            ),
+        }
+    return None
+
+
+def _normalize_cwd_to_linux(cwd: str) -> Optional[str]:
+    """Translates Windows UNC, drive, or Linux paths into canonical Linux paths. CC = 6"""
+    norm = cwd.strip().replace("\\", "/")
+    if not norm:
+        return None
+    # Handle UNC: //wsl.localhost/<distro>/... or //wsl$/<distro>/...
+    unc_match = re.match(r"^//wsl(?:\.localhost|\$)/[^/]+(/.*)$", norm, re.IGNORECASE)
+    if unc_match:
+        return unc_match.group(1)
+    if norm.startswith("/") or norm.startswith("~"):
+        return norm
+    # Handle mapped network drive Z:/home/... -> /home/...
+    if re.match(r"^[a-zA-Z]:/home/", norm, re.IGNORECASE):
+        return norm[2:]
+    # Handle Windows local drive C:/Users/... -> /mnt/c/Users/...
+    drive_match = re.match(r"^([a-zA-Z]):/(.*)$", norm)
+    if drive_match:
+        letter = drive_match.group(1).lower()
+        return f"/mnt/{letter}/{drive_match.group(2)}"
+    return None
+
+
+def _resolve_wsl_anchor_path(command_line: str, cwd: str = "") -> Optional[str]:
+    """Resolves target Linux anchor path from command-line 'cd' or 'cwd'. CC = 4"""
+    cd_match = WSL_CD_CMD_PATTERN.search(command_line)
+    if cd_match:
+        return cd_match.group(2)
+    if cwd:
+        return _normalize_cwd_to_linux(cwd)
+    return None
+
+
+def _transform_wsl_command_anchor(command_line: str, linux_path: str) -> str:
+    """Rewrites command_line to inject '--cd <linux_path>' and clean redundant inline 'cd'. CC = 4"""
+    strip_pattern = re.compile(
+        r"(cd\s+[\"']?" + re.escape(linux_path) + r"[\"']?\s*(?:&&|;)\s*)",
+        re.IGNORECASE,
+    )
+    cleaned_cmd = strip_pattern.sub("", command_line)
+    prefix_match = WSL_PREFIX_PATTERN.match(cleaned_cmd)
+    if not prefix_match:
+        return f"wsl --cd {linux_path} {cleaned_cmd.strip()}"
+
+    wsl_head = prefix_match.group(1).rstrip()
+    wsl_tail = cleaned_cmd[prefix_match.end():].lstrip()
+
+    if wsl_tail:
+        return f"{wsl_head} --cd {linux_path} {wsl_tail}"
+    return f"{wsl_head} --cd {linux_path}"
+
+
+def evaluate_wsl_command_guard(command_line: str, cwd: str = "") -> Optional[Dict[str, Any]]:
+    """Main evaluation pipeline for WSL commands. CC = 7"""
+    if not _is_wsl_invocation(command_line):
+        return None
+
+    swallow_deny = _check_powershell_var_swallowing(command_line)
+    if swallow_deny:
+        return swallow_deny
+
+    nested_deny = _check_nested_quoting_collision(command_line)
+    if nested_deny:
+        return nested_deny
+
+    tokens = command_line.split()
+    if any(tok.lower() in WSL_MANAGEMENT_FLAGS for tok in tokens) or "--cd" in tokens:
+        return None
+
+    linux_path = _resolve_wsl_anchor_path(command_line, cwd=cwd)
+    if not linux_path:
+        return None
+
+    transformed = _transform_wsl_command_anchor(command_line, linux_path)
+    return {
+        "decision": "allow",
+        "overwrite": {
+            "CommandLine": transformed,
+        },
+    }
+
+
+def _handle_run_command_wsl_guard(tool_name: str, args: dict) -> Optional[dict]:
+    """Helper to guard run_command and auto-anchor WSL calls with key preservation. CC = 6"""
+    cmd_key = "CommandLine" if "CommandLine" in args else ("command" if "command" in args else None)
+    if not ((tool_name == "run_command" or cmd_key is not None) and cmd_key):
+        return None
+    cmd_line = args.get(cmd_key, "")
+    cwd = args.get("cwd", "") or args.get("working_directory", "")
+    wsl_guard_result = evaluate_wsl_command_guard(cmd_line, cwd=cwd)
+    if wsl_guard_result is not None:
+        if wsl_guard_result.get("decision") == "allow" and "overwrite" in wsl_guard_result:
+            new_cmd = wsl_guard_result["overwrite"].get("CommandLine") or wsl_guard_result["overwrite"].get("command")
+            wsl_guard_result["overwrite"] = {cmd_key: new_cmd}
+        return wsl_guard_result
+    return None
+
 def handle_pre_tool(payload: dict) -> dict:
     is_afk, afk_mode = is_afk_session(payload)
     if is_afk:
@@ -929,6 +1102,11 @@ def handle_pre_tool(payload: dict) -> dict:
     args = tool_call.get("args", {})
     role, detection_source = detect_session_role(payload)
     parent_cid = payload.get("conversationId", "")
+
+    # 0. run_command: WSL Command Safety & Auto-Anchor Guard
+    wsl_res = _handle_run_command_wsl_guard(tool_name, args)
+    if wsl_res is not None:
+        return wsl_res
 
     # 1. invoke_subagent: Anti-Graveyard & Station Reuse Enforcement
     if tool_name == "invoke_subagent":
