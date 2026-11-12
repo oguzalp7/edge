@@ -1938,7 +1938,19 @@ class TestBrigadeSlice2LavishGatedQAState(unittest.TestCase):
         qa_state = getattr(CycleState, "QA", "QA")
         self.fsm.state.current_state = qa_state
 
-        # Case A: Clean findings or non-blocking advisory/warning -> advance to STAGING
+        # Case A: Clean findings or non-blocking advisory/warning with valid proof receipt -> advance to STAGING
+        proof_dir = self.repo_path / ".edge" / "qa" / "proofs"
+        proof_dir.mkdir(parents=True, exist_ok=True)
+        valid_receipt = {
+            "slug": "dashboard",
+            "visited_urls": ["http://localhost:3000/dashboard"],
+            "user_actions_executed": ["click button#filter", "reload"],
+            "persistence_verified": True,
+            "console_clean": True,
+            "screenshot_paths": [".edge/qa/screenshots/dash.png"],
+        }
+        (proof_dir / "dashboard.json").write_text(json.dumps(valid_receipt), encoding="utf-8")
+
         self.fsm.state.review_findings = [
             ReviewFinding(
                 axis="qa",
@@ -2846,6 +2858,353 @@ class TestDynamicSliceTargetGuardAndPorcelainParser(unittest.TestCase):
         self.assertNotIn("tests for  to establish", " ".join(hints2))
         self.assertIn("(dynamic-slice)", " ".join(hints2))
 
+
+
+
+class TestBrigadeQABrowserProofGate(unittest.TestCase):
+    """
+    Test suite for QA Browser Subagent Delegation & Behavioral Proof Receipt Gate
+    (SPEC-EDGE-BRIGADE-002)
+    """
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.repo_path = Path(self.test_dir)
+        self.fsm = BrigadeFSM(self.repo_path)
+        self.proofs_dir = self.repo_path / ".edge" / "qa" / "proofs"
+        self.proofs_dir.mkdir(parents=True, exist_ok=True)
+
+        self.ticket = Ticket(
+            ticket_id="TICK-DASHBOARD-1",
+            track="ui",
+            domain="dashboard",
+            rule_id="RULE-UI",
+            severity="NORMAL",
+            target_file="src/dashboard.tsx",
+            line_number=1,
+            fingerprint="fp-dash",
+            description="User dashboard view",
+            suggested_fix="Fix",
+            branch_name="feat/dashboard-v2",
+            test_seam_command="npm test",
+        )
+        self.fsm.state.active_ticket = self.ticket
+        self.fsm.state.current_state = CycleState.QA
+        self.fsm.state.review_findings = []
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def test_resolve_qa_slug_precedence(self):
+        # Priority 1: Explicit scenario_slug if not default 'qa_scenario'
+        self.assertEqual(
+            StationRegistry._resolve_qa_slug("Custom_Scenario_Slug", ticket=None),
+            "custom-scenario-slug",
+        )
+        self.assertEqual(
+            StationRegistry._resolve_qa_slug("Explicit_Slug", ticket=self.ticket),
+            "explicit-slug",
+        )
+
+        # Priority 2: ticket.domain (lowercased, '_' replaced with '-')
+        self.assertEqual(
+            StationRegistry._resolve_qa_slug("qa_scenario", ticket=self.ticket),
+            "dashboard",
+        )
+        t_domain = Ticket(
+            ticket_id="TICK-1",
+            track="ui",
+            domain="User_Profile",
+            rule_id="R",
+            severity="NORMAL",
+            target_file="",
+            line_number=1,
+            fingerprint="",
+            description="",
+            suggested_fix="",
+            branch_name="feat/some_branch",
+        )
+        self.assertEqual(
+            StationRegistry._resolve_qa_slug("qa_scenario", ticket=t_domain),
+            "user-profile",
+        )
+
+        # Priority 3: ticket.branch_name (prefixes stripped, lowercased, '_' replaced with '-')
+        for prefix, expected in [
+            ("feat/checkout_flow", "checkout-flow"),
+            ("refactor/user_auth", "user-auth"),
+            ("hotfix/crash_fix", "crash-fix"),
+            ("chore/cleanup_db", "cleanup-db"),
+        ]:
+            t_branch = Ticket(
+                ticket_id="TICK-2",
+                track="ui",
+                domain="",
+                rule_id="R",
+                severity="NORMAL",
+                target_file="",
+                line_number=1,
+                fingerprint="",
+                description="",
+                suggested_fix="",
+                branch_name=prefix,
+            )
+            self.assertEqual(
+                StationRegistry._resolve_qa_slug("qa_scenario", ticket=t_branch),
+                expected,
+            )
+
+        # Priority 4: ticket.ticket_id (lowercased, '_' replaced with '-')
+        t_tid = Ticket(
+            ticket_id="TICK_999_PAYMENT",
+            track="ui",
+            domain=None,
+            rule_id="R",
+            severity="NORMAL",
+            target_file="",
+            line_number=1,
+            fingerprint="",
+            description="",
+            suggested_fix="",
+            branch_name=None,
+        )
+        self.assertEqual(
+            StationRegistry._resolve_qa_slug("qa_scenario", ticket=t_tid),
+            "tick-999-payment",
+        )
+
+        # Priority 5: Fallback to 'qa_scenario'
+        t_empty = Ticket(
+            ticket_id="",
+            track="ui",
+            domain="",
+            rule_id="R",
+            severity="NORMAL",
+            target_file="",
+            line_number=1,
+            fingerprint="",
+            description="",
+            suggested_fix="",
+            branch_name="",
+        )
+        self.assertEqual(
+            StationRegistry._resolve_qa_slug("qa_scenario", ticket=t_empty),
+            "qa_scenario",
+        )
+        self.assertEqual(
+            StationRegistry._resolve_qa_slug("qa_scenario", ticket=None),
+            "qa_scenario",
+        )
+
+    def test_guard_qa_to_staging_missing_receipt(self):
+        # Ensure proof receipt does not exist
+        proof_file = self.proofs_dir / "dashboard.json"
+        if proof_file.exists():
+            proof_file.unlink()
+
+        ok, msg, details = self.fsm.guard_qa_to_staging()
+        self.assertFalse(ok)
+        self.assertIn("missing proof receipt at '.edge/qa/proofs/dashboard.json'", msg)
+        self.assertEqual(details.get("error"), "MISSING_PROOF_RECEIPT")
+        self.assertEqual(details.get("expected_slug"), "dashboard")
+
+        # advance() must block and stay in CycleState.QA
+        adv_ok, next_state, adv_msg = self.fsm.advance()
+        self.assertFalse(adv_ok)
+        self.assertEqual(next_state, CycleState.QA)
+        self.assertEqual(self.fsm.state.current_state, CycleState.QA)
+        self.assertIn("QA guard blocked advancement", adv_msg)
+
+    def test_guard_qa_to_staging_malformed_json(self):
+        proof_file = self.proofs_dir / "dashboard.json"
+        proof_file.write_text("{not a valid json syntax", encoding="utf-8")
+
+        ok, msg, details = self.fsm.guard_qa_to_staging()
+        self.assertFalse(ok)
+        self.assertIn("malformed JSON in proof receipt", msg)
+        self.assertEqual(details.get("error"), "MALFORMED_PROOF_RECEIPT")
+        self.assertEqual(details.get("expected_slug"), "dashboard")
+
+        adv_ok, next_state, _ = self.fsm.advance()
+        self.assertFalse(adv_ok)
+        self.assertEqual(next_state, CycleState.QA)
+        self.assertEqual(self.fsm.state.current_state, CycleState.QA)
+
+    def test_guard_qa_to_staging_empty_urls(self):
+        receipt = {
+            "slug": "dashboard",
+            "visited_urls": [],
+            "user_actions_executed": ["click button#filter"],
+            "persistence_verified": True,
+            "console_clean": True,
+            "screenshot_paths": [".edge/qa/screenshots/dash.png"],
+        }
+        (self.proofs_dir / "dashboard.json").write_text(json.dumps(receipt), encoding="utf-8")
+
+        ok, msg, details = self.fsm.guard_qa_to_staging()
+        self.assertFalse(ok)
+        self.assertEqual(details.get("error"), "INVALID_VISITED_URLS")
+        self.assertIn("visited_urls", msg)
+
+        adv_ok, next_state, _ = self.fsm.advance()
+        self.assertFalse(adv_ok)
+        self.assertEqual(next_state, CycleState.QA)
+        self.assertEqual(self.fsm.state.current_state, CycleState.QA)
+
+    def test_guard_qa_to_staging_empty_actions(self):
+        receipt = {
+            "slug": "dashboard",
+            "visited_urls": ["http://localhost:3000/dashboard"],
+            "user_actions_executed": [],
+            "persistence_verified": True,
+            "console_clean": True,
+            "screenshot_paths": [".edge/qa/screenshots/dash.png"],
+        }
+        (self.proofs_dir / "dashboard.json").write_text(json.dumps(receipt), encoding="utf-8")
+
+        ok, msg, details = self.fsm.guard_qa_to_staging()
+        self.assertFalse(ok)
+        self.assertEqual(details.get("error"), "INVALID_ACTIONS")
+        self.assertIn("user_actions_executed", msg)
+
+        adv_ok, next_state, _ = self.fsm.advance()
+        self.assertFalse(adv_ok)
+        self.assertEqual(next_state, CycleState.QA)
+        self.assertEqual(self.fsm.state.current_state, CycleState.QA)
+
+    def test_guard_qa_to_staging_persistence_false(self):
+        receipt = {
+            "slug": "dashboard",
+            "visited_urls": ["http://localhost:3000/dashboard"],
+            "user_actions_executed": ["click button#filter"],
+            "persistence_verified": False,
+            "console_clean": True,
+            "screenshot_paths": [".edge/qa/screenshots/dash.png"],
+        }
+        (self.proofs_dir / "dashboard.json").write_text(json.dumps(receipt), encoding="utf-8")
+
+        ok, msg, details = self.fsm.guard_qa_to_staging()
+        self.assertFalse(ok)
+        self.assertEqual(details.get("error"), "PERSISTENCE_NOT_VERIFIED")
+        self.assertIn("persistence_verified", msg)
+
+        adv_ok, next_state, _ = self.fsm.advance()
+        self.assertFalse(adv_ok)
+        self.assertEqual(next_state, CycleState.QA)
+        self.assertEqual(self.fsm.state.current_state, CycleState.QA)
+
+    def test_guard_qa_to_staging_console_false(self):
+        receipt = {
+            "slug": "dashboard",
+            "visited_urls": ["http://localhost:3000/dashboard"],
+            "user_actions_executed": ["click button#filter"],
+            "persistence_verified": True,
+            "console_clean": False,
+            "screenshot_paths": [".edge/qa/screenshots/dash.png"],
+        }
+        (self.proofs_dir / "dashboard.json").write_text(json.dumps(receipt), encoding="utf-8")
+
+        ok, msg, details = self.fsm.guard_qa_to_staging()
+        self.assertFalse(ok)
+        self.assertEqual(details.get("error"), "CONSOLE_NOT_CLEAN")
+        self.assertIn("console_clean", msg)
+
+        adv_ok, next_state, _ = self.fsm.advance()
+        self.assertFalse(adv_ok)
+        self.assertEqual(next_state, CycleState.QA)
+        self.assertEqual(self.fsm.state.current_state, CycleState.QA)
+
+    def test_guard_qa_to_staging_empty_screenshots(self):
+        receipt = {
+            "slug": "dashboard",
+            "visited_urls": ["http://localhost:3000/dashboard"],
+            "user_actions_executed": ["click button#filter"],
+            "persistence_verified": True,
+            "console_clean": True,
+            "screenshot_paths": [],
+        }
+        (self.proofs_dir / "dashboard.json").write_text(json.dumps(receipt), encoding="utf-8")
+
+        ok, msg, details = self.fsm.guard_qa_to_staging()
+        self.assertFalse(ok)
+        self.assertEqual(details.get("error"), "MISSING_SCREENSHOTS")
+        self.assertIn("screenshot_paths", msg)
+
+        adv_ok, next_state, _ = self.fsm.advance()
+        self.assertFalse(adv_ok)
+        self.assertEqual(next_state, CycleState.QA)
+        self.assertEqual(self.fsm.state.current_state, CycleState.QA)
+
+    def test_guard_qa_to_staging_valid_receipt_advances(self):
+        receipt = {
+            "slug": "dashboard",
+            "visited_urls": ["http://localhost:3000/dashboard"],
+            "user_actions_executed": ["click button#filter", "reload"],
+            "persistence_verified": True,
+            "console_clean": True,
+            "screenshot_paths": [".edge/qa/screenshots/dash.png"],
+        }
+        (self.proofs_dir / "dashboard.json").write_text(json.dumps(receipt), encoding="utf-8")
+
+        ok, msg, details = self.fsm.guard_qa_to_staging()
+        self.assertTrue(ok)
+        self.assertIn("QA verification passed", msg)
+        self.assertIn("proof_details", details)
+        self.assertEqual(details["proof_details"].get("slug"), "dashboard")
+        self.assertEqual(details["proof_details"].get("screenshot_count"), 1)
+
+        adv_ok, next_state, adv_msg = self.fsm.advance()
+        self.assertTrue(adv_ok)
+        self.assertEqual(next_state, CycleState.STAGING)
+        self.assertEqual(self.fsm.state.current_state, CycleState.STAGING)
+
+    def test_guard_qa_to_staging_critical_findings_priority(self):
+        receipt = {
+            "slug": "dashboard",
+            "visited_urls": ["http://localhost:3000/dashboard"],
+            "user_actions_executed": ["click button#filter", "reload"],
+            "persistence_verified": True,
+            "console_clean": True,
+            "screenshot_paths": [".edge/qa/screenshots/dash.png"],
+        }
+        (self.proofs_dir / "dashboard.json").write_text(json.dumps(receipt), encoding="utf-8")
+
+        # Add critical review finding
+        self.fsm.state.review_findings = [
+            ReviewFinding(
+                axis="qa",
+                severity="CRITICAL",
+                file_path="src/dashboard.tsx",
+                rule="TIER1-CONSOLE-ERROR",
+                description="Unhandled hydration error",
+                suggested_fix="Fix hydration",
+            )
+        ]
+
+        ok, msg, details = self.fsm.guard_qa_to_staging()
+        self.assertFalse(ok)
+        self.assertEqual(details.get("critical_count"), 1)
+        self.assertIn("critical defects", msg)
+
+        # advance() must fail and route directly to POLISH
+        adv_ok, next_state, adv_msg = self.fsm.advance()
+        self.assertFalse(adv_ok)
+        self.assertEqual(next_state, CycleState.POLISH)
+        self.assertEqual(self.fsm.state.current_state, CycleState.POLISH)
+        self.assertIn("POLISH", adv_msg)
+
+    def test_build_qa_prompt_pruning(self):
+        prompt = StationRegistry.build_qa_prompt(
+            user_scenario_en="User checks dashboard metrics",
+            target_route="http://localhost:3000/dashboard",
+            scenario_slug="dashboard",
+        )
+        self.assertIn("4-STEP BEHAVIORAL PROOF CHAIN", prompt)
+        self.assertIn('TypeName="browser"', prompt)
+        self.assertIn('Model="flash"', prompt)
+        self.assertIn(".edge/qa/proofs/", prompt)
+        self.assertNotIn(".edge/qa/replays/", prompt)
+        self.assertNotIn("chrome-devtools-axi run", prompt)
 
 if __name__ == "__main__":
     unittest.main()

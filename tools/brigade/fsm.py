@@ -365,6 +365,83 @@ class SubstepList(str):
         return super().__getitem__(idx)
 
 
+def _find_proof_file(candidates: List[Path]) -> Optional[Path]:
+    for p in candidates:
+        if p.is_file():
+            return p
+    return None
+
+
+def _is_non_empty_list(val: Any) -> bool:
+    return isinstance(val, list) and len(val) > 0
+
+
+def _check_proof_data_invariants(data: Dict[str, Any]) -> Tuple[bool, str, Dict[str, Any]]:
+    if not _is_non_empty_list(data.get("visited_urls")):
+        return False, "QA proof receipt invariant failed: 'visited_urls' must be a non-empty list.", {"error": "INVALID_VISITED_URLS"}
+
+    if not _is_non_empty_list(data.get("user_actions_executed")):
+        return False, "QA proof receipt invariant failed: 'user_actions_executed' must be a non-empty list.", {"error": "INVALID_ACTIONS"}
+
+    if data.get("persistence_verified") is not True:
+        return False, "QA proof receipt invariant failed: 'persistence_verified' must be True (DOM reload + DB cross-check required).", {"error": "PERSISTENCE_NOT_VERIFIED"}
+
+    if data.get("console_clean") is not True:
+        return False, "QA proof receipt invariant failed: 'console_clean' must be True (zero console.error, 0 unhandled exceptions).", {"error": "CONSOLE_NOT_CLEAN"}
+
+    if not _is_non_empty_list(data.get("screenshot_paths")):
+        return False, "QA proof receipt invariant failed: 'screenshot_paths' must be a non-empty list.", {"error": "MISSING_SCREENSHOTS"}
+
+    return True, "", {}
+
+
+def _validate_qa_proof_receipt(
+    repo_path: Path,
+    work_dir: Path,
+    ticket: Ticket,
+    scenario_slug: str = "qa_scenario"
+) -> Tuple[bool, str, Dict[str, Any]]:
+    slug = StationRegistry._resolve_qa_slug(scenario_slug, ticket)
+
+    candidates = [
+        work_dir / ".edge" / "qa" / "proofs" / f"{slug}.json",
+        repo_path / ".edge" / "qa" / "proofs" / f"{slug}.json",
+    ]
+    proof_file = _find_proof_file(candidates)
+
+    if not proof_file:
+        return (
+            False,
+            f"QA verification blocked: missing proof receipt at '.edge/qa/proofs/{slug}.json'. "
+            "QA_ENGINEER must delegate browser verification to the browser subagent and synthesize the receipt.",
+            {"error": "MISSING_PROOF_RECEIPT", "expected_slug": slug}
+        )
+
+    try:
+        data = json.loads(proof_file.read_text(encoding="utf-8"))
+    except Exception as e:
+        return (
+            False,
+            f"QA verification blocked: malformed JSON in proof receipt at '{proof_file}': {e}",
+            {"error": "MALFORMED_PROOF_RECEIPT", "expected_slug": slug}
+        )
+
+    inv_ok, inv_msg, inv_details = _check_proof_data_invariants(data)
+    if not inv_ok:
+        return False, inv_msg, inv_details
+
+    visited = data.get("visited_urls", [])
+    screenshots = data.get("screenshot_paths", [])
+
+    return True, f"QA proof receipt verified for '{slug}'.", {
+        "slug": slug,
+        "visited_urls": visited,
+        "screenshot_count": len(screenshots),
+        "persistence_verified": True,
+        "console_clean": True,
+    }
+
+
 class BrigadeFSM:
     def __init__(self, target_repo_path: Optional[Path] = None, target_repo: Optional[Path] = None):
         eff_path = target_repo_path or target_repo or Path.cwd()
@@ -799,8 +876,8 @@ class BrigadeFSM:
     def guard_qa_to_staging(self) -> Tuple[bool, str, Dict[str, Any]]:
         """
         Validates the QA verification stage:
-        Fails if any CRITICAL review finding exists (e.g. unhandled console errors, broken flows).
-        Non-blocking advisory or warning findings pass cleanly.
+        1. Fails if any CRITICAL review finding exists (e.g. unhandled console errors, broken flows).
+        2. Enforces deterministic Behavioral Proof Receipt Gate (.edge/qa/proofs/<slug>.json).
         """
         ticket = self.state.active_ticket
         if not ticket:
@@ -820,10 +897,20 @@ class BrigadeFSM:
                 },
             )
 
+        work_dir = Path(ticket.worktree_path) if ticket.worktree_path else self.target_repo
+        proof_ok, proof_msg, proof_details = _validate_qa_proof_receipt(
+            self.target_repo, work_dir, ticket
+        )
+        if not proof_ok:
+            return False, proof_msg, proof_details
+
         return (
             True,
-            "QA verification passed (0 critical findings). Advancing to STAGING.",
-            {"total_findings": len(self.state.review_findings)},
+            f"QA verification passed (0 critical findings, valid proof receipt for '{proof_details.get('slug')}'). Advancing to STAGING.",
+            {
+                "total_findings": len(self.state.review_findings),
+                "proof_details": proof_details,
+            },
         )
 
     def get_next_station_handoff(self, target_state: Optional[CycleState] = None) -> Dict[str, Any]:

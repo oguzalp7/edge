@@ -41,7 +41,7 @@ Instead of spawning disposable generalist agents that try to do everything and e
                                        v
        +---------------------------------------------------------------+
        |                 QA_ENGINEER (Sommelier)                       |
-       |     E2E Browser QA (chrome-devtools-axi) & frontier-axi       |
+       |  E2E Multi-Agent Browser Delegation & Behavioral Proof Gate   |
        +-------------------------------+-------------------------------+
                                        |
                                        v
@@ -76,7 +76,7 @@ Instead of spawning disposable generalist agents that try to do everything and e
    - **Constraint:** Strictly read-only. Distinguishes hard violations from judgement calls; skips deterministic checks enforced by `gate.py`.
 8. **QA_ENGINEER (`qa_engineer` / Sommelier)**:
    - **Role:** End-to-end browser verification, visual quality assurance, and user journey testing.
-   - **Protocol:** Receives translated user scenarios mapped to project ubiquitous domain vocabulary by the Orchestrator. Drives live browser interactions via `chrome-devtools-axi` (primary) or `chrome-devtools-mcp` (fallback).
+   - **Protocol:** Receives translated user scenarios mapped to project ubiquitous domain vocabulary by the Orchestrator. Acts as the QA architect and delegates physical browser interactions to the built-in `browser` subagent (`TypeName: "browser"`, `Model: "flash"`). Stages Lavish references to `<Artifact Directory>/browser_sandbox/references/`. Enforces state persistence via DOM reload and backend DB/state cross-checks (`run_command`). Synthesizes physical Behavioral Proof Receipt (`.edge/qa/proofs/<slug>.json`) to unlock advancement to STAGING.
    - **Constraint:** Strictly zero production code mutation (`src/**`, `app/**`, `lib/**`, `db/**`). Documents defects with reproduction steps, network payloads, console errors, and screenshots. Parks non-blocking UX issues to `frontier-axi`.
 
 ### Station Memory Models: Elephant vs. Goldfish

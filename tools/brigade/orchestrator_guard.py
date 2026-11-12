@@ -444,6 +444,69 @@ def sync_repo_brigade_station(repo_path: Union[Path, str], role: str, conversati
         return False
 
 
+def _is_auxiliary_tool_agent(requested_role: str) -> bool:
+    r = requested_role.strip().lower()
+    return r in ("browser", "browser subagent", "browser automation", "browser qa subagent")
+
+
+def _matches_parent_cid(parent_cid: str, info_parent: str) -> bool:
+    if not parent_cid or not info_parent:
+        return True
+    return parent_cid == info_parent
+
+
+def _is_active_station_for_role(info: Any, canonical: str, parent_cid: str) -> bool:
+    if not isinstance(info, dict):
+        return False
+    raw_role = info.get("role") or info.get("canonicalRole") or ""
+    st_role = normalize_role(raw_role) or raw_role.upper()
+    if st_role != canonical:
+        return False
+    if not _matches_parent_cid(parent_cid, info.get("parentConversationId", "")):
+        return False
+    return info.get("status", "IDLE") not in ("EXHAUSTED", "ROTATED", "TERMINATED")
+
+
+def _rotate_goldfish_instances(canonical: str, parent_cid: str, stations: Dict[str, Any], store: StationStore) -> None:
+    for cid, info in stations.items():
+        if _is_active_station_for_role(info, canonical, parent_cid):
+            store.mark_rotated(cid)
+
+
+def _is_browser_invocation(args: Dict[str, Any]) -> bool:
+    t = str(args.get("TypeName") or args.get("typeName") or "").strip().lower()
+    r = str(args.get("Role") or args.get("role") or "").strip().lower()
+    return t == "browser" or _is_auxiliary_tool_agent(r)
+
+
+def _evaluate_roles_allowed(roles: List[str], parent_cid: str) -> Optional[Dict[str, Any]]:
+    store = StationStore(ACTIVE_STATIONS_FILE)
+    brain_root = ACTIVE_STATIONS_FILE.parent / "brain"
+    scanner = TranscriptStationScanner(brain_root)
+    for req_role in roles:
+        eval_res = StationSelector.evaluate_spawn_request(
+            store=store,
+            scanner=scanner,
+            parent_cid=parent_cid,
+            requested_role=req_role
+        )
+        if eval_res.get("decision") == "deny":
+            return eval_res
+    return None
+
+
+def _handle_invoke_subagent_guard(args: Dict[str, Any], parent_cid: str) -> Dict[str, Any]:
+    if _is_browser_invocation(args):
+        return {
+            "decision": "allow",
+            "reason": "AUXILIARY_TOOL_AGENT: Browser subagent invocation permitted",
+        }
+    deny_res = _evaluate_roles_allowed(extract_requested_roles(args), parent_cid)
+    if deny_res:
+        return deny_res
+    return {"decision": "allow"}
+
+
 class StationSelector:
     @staticmethod
     def evaluate_spawn_request(
@@ -457,26 +520,19 @@ class StationSelector:
         Evaluates an invoke_subagent request against Cases A, B, and C.
         Returns {"decision": "allow"} or {"decision": "deny", "reason": "..."}.
         """
+        if _is_auxiliary_tool_agent(requested_role):
+            return {
+                "decision": "allow",
+                "reason": "AUXILIARY_TOOL_AGENT: Browser subagent invocation permitted",
+            }
+
         canonical = normalize_role(requested_role) or requested_role.strip().upper()
         envelope = store.load()
         stations = envelope.get_stations()
 
         # Ephemeral Goldfish Roles: Always allow fresh zero-context spawns and rotate previous instances
         if canonical in EPHEMERAL_GOLDFISH_ROLES:
-            for cid, info in stations.items():
-                if not isinstance(info, dict):
-                    continue
-                st_role = normalize_role(info.get("role", "") or info.get("canonicalRole", "")) or info.get("role", "").upper()
-                if st_role != canonical:
-                    continue
-                st_parent = info.get("parentConversationId", "")
-                if parent_cid and st_parent and st_parent != parent_cid:
-                    continue
-                status = info.get("status", "IDLE")
-                if status in ("EXHAUSTED", "ROTATED", "TERMINATED"):
-                    continue
-                store.mark_rotated(cid)
-
+            _rotate_goldfish_instances(canonical, parent_cid, stations, store)
             return {
                 "decision": "allow",
                 "reason": f"GOLDFISH_EPHEMERAL: Fresh zero-context {canonical} spawn permitted",
@@ -876,20 +932,7 @@ def handle_pre_tool(payload: dict) -> dict:
 
     # 1. invoke_subagent: Anti-Graveyard & Station Reuse Enforcement
     if tool_name == "invoke_subagent":
-        store = StationStore(ACTIVE_STATIONS_FILE)
-        brain_root = ACTIVE_STATIONS_FILE.parent / "brain"
-        scanner = TranscriptStationScanner(brain_root)
-        requested_roles = extract_requested_roles(args)
-        for req_role in requested_roles:
-            eval_res = StationSelector.evaluate_spawn_request(
-                store=store,
-                scanner=scanner,
-                parent_cid=parent_cid,
-                requested_role=req_role
-            )
-            if eval_res.get("decision") == "deny":
-                return eval_res
-        return {"decision": "allow"}
+        return _handle_invoke_subagent_guard(args, parent_cid)
 
     target_file = get_target_file(args)
 
@@ -1122,8 +1165,11 @@ def handle_pre_invocation(payload: dict) -> dict:
                 {
                     "ephemeralMessage": (
                         "🚨 [BRIGADE STATION ENFORCED - QA_ENGINEER]: You are the persistent Sommelier & E2E QA Engineer in Edge Brigade.\n"
-                        "- Primary Tooling: Use `chrome-dev-tools-axi` or `chrome-devtools-mcp` tools (`navigate_page`, `click`, `fill`, `evaluate_script`, `take_screenshot`, `list_console_messages`, `list_network_requests`).\n"
-                        "- Negative Invariant: You CANNOT edit production code (`src/**`). Found defects must be reported back to the Orchestrator with exact reproduction steps and screenshots."
+                        "- Multi-Agent Delegation: Delegate all browser actions to the built-in `browser` subagent (`invoke_subagent(TypeName='browser', Model='flash')`).\n"
+                        "- Lavish Parity & Staging: Stage `.lavish/*.html` to `<Artifact Directory>/browser_sandbox/references/` so the browser subagent can inspect DOM parity.\n"
+                        "- State Persistence: Verify DOM state retention after physical page reload, and execute DB/state cross-checks via WSL shell (`run_command`).\n"
+                        "- Proof Receipt Gate: Write verified results to `.edge/qa/proofs/<slug>.json` before calling `brigade advance`.\n"
+                        "- Negative Invariant: You CANNOT edit production code (`src/**`, `app/**`). Report code defects to CODER via POLISH."
                     )
                 }
             ]

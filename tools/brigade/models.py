@@ -89,7 +89,7 @@ class ReviewFinding:
 class Ticket:
     ticket_id: str
     track: str                                # "core" | "ui"
-    domain: str                               # e.g. "customers", "bookings"
+    domain: Optional[str]                     # e.g. "customers", "bookings"
     rule_id: str
     severity: str
     target_file: str
@@ -97,8 +97,8 @@ class Ticket:
     fingerprint: str
     description: str
     suggested_fix: str
-    branch_name: str
-    test_seam_command: str
+    branch_name: Optional[str] = None
+    test_seam_command: str = ""
     scaffolding_allowance: int = 0            # Deprecated/legacy: retained strictly for backward JSON schema compatibility
     target_symbol: Optional[str] = None
     negative_constraints: List[str] = field(default_factory=list)
@@ -252,4 +252,27 @@ class Checkpoint:
             raw["active_ticket"] = Ticket.from_dict(raw["active_ticket"])
         return cls(**raw)
 
+@dataclass
+class QAProofReceipt:
+    slug: str
+    visited_urls: List[str]
+    user_actions_executed: List[str]
+    persistence_verified: bool
+    console_clean: bool
+    screenshot_paths: List[str]
+    ticket_id: Optional[str] = None
+    timestamp: Optional[str] = None
+    browser_cid: Optional[str] = None
+    host_facts_verified: bool = True
+    db_crosscheck: Dict[str, Any] = field(default_factory=dict)
+    ux_defects_logged: int = 0
+    schema_version: str = "1.0.0"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "QAProofReceipt":
+        valid = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
+        return cls(**valid)
 

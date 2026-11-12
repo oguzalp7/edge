@@ -415,6 +415,89 @@ class TestBrigadeGuard(unittest.TestCase):
             res = guard.handle_pre_tool(payload_allow)
             self.assertEqual(res["decision"], "allow")
 
+    def test_qa_engineer_can_write_proof_receipt(self):
+        payload = {
+            "conversationId": "qa-1",
+            "toolCall": {
+                "name": "write_file",
+                "args": {
+                    "Path": ".edge/qa/proofs/test.json",
+                    "Content": "{}",
+                },
+            },
+        }
+        with patch.object(guard, "detect_session_role", return_value=("QA_ENGINEER", "test")):
+            res = guard.handle_pre_tool(payload)
+            self.assertEqual(res["decision"], "allow")
+
+    def test_qa_engineer_denied_from_mutating_src(self):
+        payload = {
+            "conversationId": "qa-1",
+            "toolCall": {
+                "name": "write_file",
+                "args": {
+                    "Path": "src/App.tsx",
+                    "Content": "export default function App() {}",
+                },
+            },
+        }
+        with patch.object(guard, "detect_session_role", return_value=("QA_ENGINEER", "test")):
+            res = guard.handle_pre_tool(payload)
+            self.assertEqual(res["decision"], "deny")
+            self.assertIn("QA BOUNDARY GUARD", res["reason"])
+
+    def test_invoke_subagent_browser_allowed(self):
+        payload = {
+            "conversationId": "qa-parent-1",
+            "toolCall": {
+                "name": "invoke_subagent",
+                "args": {
+                    "TypeName": "browser",
+                    "Model": "flash",
+                    "Role": "Browser Automation Subagent",
+                    "Prompt": "Navigate to http://localhost:3000 and verify",
+                },
+            },
+        }
+        res = guard.handle_pre_tool(payload)
+        self.assertEqual(res["decision"], "allow")
+        self.assertIn("AUXILIARY_TOOL_AGENT", res.get("reason", ""))
+
+    def test_browser_subagent_not_hijacked_by_antigraveyard(self):
+        # Register persistent QA_ENGINEER
+        guard.register_station(
+            conversation_id="conv-qa-123",
+            role="QA_ENGINEER",
+            parent_cid="orch-parent",
+        )
+        # Calling invoke_subagent with TypeName="browser" from QA_ENGINEER session
+        payload = {
+            "conversationId": "conv-qa-123",
+            "toolCall": {
+                "name": "invoke_subagent",
+                "args": {
+                    "TypeName": "browser",
+                    "Model": "flash",
+                    "Role": "Browser QA Subagent",
+                    "Prompt": "Navigate to http://localhost:3000",
+                },
+            },
+        }
+        with patch.object(guard, "detect_session_role", return_value=("QA_ENGINEER", "test")):
+            res = guard.handle_pre_tool(payload)
+            self.assertEqual(res["decision"], "allow")
+            self.assertIn("AUXILIARY_TOOL_AGENT", res.get("reason", ""))
+
+    def test_qa_engineer_pre_invocation_injection(self):
+        with patch.object(guard, "detect_session_role", return_value=("QA_ENGINEER", "test")):
+            res = guard.handle_pre_invocation({})
+            self.assertTrue(len(res.get("injectSteps", [])) > 0)
+            msg = res["injectSteps"][0]["ephemeralMessage"]
+            self.assertIn("browser", msg)
+            self.assertIn(".edge/qa/proofs/", msg)
+            self.assertNotIn("chrome-dev-tools-axi", msg)
+            self.assertNotIn("chrome-devtools-mcp", msg)
+
     def test_pre_invocation_injections(self):
         # Orchestrator
         with patch.object(guard, "detect_session_role", return_value=("ORCHESTRATOR", "test")):

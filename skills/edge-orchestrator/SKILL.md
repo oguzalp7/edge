@@ -63,7 +63,7 @@ suggested_skills:
      - **Feature İşi:** `SPEC_WRITER` $\rightarrow$ `SPEC_CRITIC` (`brigade critique-spec` Danışman Eleştiri) $\rightarrow$ **[TREEHOUSE WORKTREE GATE]** (`brigade start-slice --track feature` ile peşin kiralama & `RED_TEST`) $\rightarrow$ `SEAM_ARCHITECT` (Worktree'de Kırmızı Test, `brigade advance` ile doğrulama $\rightarrow$ `SURGERY`) $\rightarrow$ `CODER` (Worktree'de Yeşil Test) $\rightarrow$ `EXAMINER` $\rightarrow$ `QA_ENGINEER` $\rightarrow$ Deterministik Teslimat (`brigade finish-slice` ile birleştirme, şartname arşivleme, `/edge-drift` denetimi).
      - **Refactor İşi:** **[TREEHOUSE WORKTREE GATE]** $\rightarrow$ `SURGEON` (Worktree'de Cerrahi) $\rightarrow$ `EXAMINER` $\rightarrow$ Deterministik Teslimat (`brigade finish-slice`).
      - **Bug-Fix İşi:** `RESEARCHER` (RCA) $\rightarrow$ `SEAM_ARCHITECT` (Karakterizasyon Testi) $\rightarrow$ **[TREEHOUSE WORKTREE GATE]** $\rightarrow$ `CODER` $\rightarrow$ `EXAMINER` $\rightarrow$ `QA_ENGINEER` $\rightarrow$ Deterministik Teslimat (`brigade finish-slice`).
-     - **QA / E2E Doğrulama:** `QA_ENGINEER` (`chrome-devtools-axi` + Fast-Forward Codegen Replay + Scraper Anomaly Journaling).
+     - **QA / E2E Doğrulama:** `QA_ENGINEER` (Multi-Agent `browser` Subagent Delegasyonu + Davranışsal Kanıt Makbuzu / Proof Receipt Gate `.edge/qa/proofs/<slug>.json` + DB/State Cross-Check + Scraper Anomaly Journaling).
 
 5. **Bağlam Isısı & Güvenli Duraklatma (Context Heat Sentinel):**
    - 🟢 **YEŞİL BÖLGE (< 45k token, `GREEN_HEAT_THRESHOLD = 45,000`):** Görüşmeler ve biletlemeler normal seyreder. Fil istasyonları `send_message` ile korunur.
