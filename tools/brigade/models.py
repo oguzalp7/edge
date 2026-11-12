@@ -220,7 +220,9 @@ class Checkpoint:
     base_branch: str = "development"
     active_branch: Optional[str] = None
     worktree_path: Optional[str] = None
+    active_worktree: Optional[str] = None
     active_ticket: Optional[Ticket] = None
+    stashed_ticket: Optional[Dict[str, Any]] = None
     fsm_state: str = "IDLE"                   # State machine state prior to pause
     completed_substeps: List[str] = field(default_factory=list)
     pending_substeps: List[str] = field(default_factory=list)
@@ -236,7 +238,9 @@ class Checkpoint:
             "base_branch": self.base_branch,
             "active_branch": self.active_branch,
             "worktree_path": self.worktree_path,
+            "active_worktree": self.active_worktree,
             "active_ticket": self.active_ticket.to_dict() if self.active_ticket else None,
+            "stashed_ticket": self.stashed_ticket or (self.active_ticket.to_dict() if self.active_ticket else None),
             "fsm_state": self.fsm_state,
             "completed_substeps": list(self.completed_substeps),
             "pending_substeps": list(self.pending_substeps),
@@ -250,6 +254,10 @@ class Checkpoint:
         raw = dict(data)
         if "active_ticket" in raw and raw["active_ticket"]:
             raw["active_ticket"] = Ticket.from_dict(raw["active_ticket"])
+        elif "stashed_ticket" in raw and raw["stashed_ticket"]:
+            raw["active_ticket"] = Ticket.from_dict(raw["stashed_ticket"])
+        if "active_worktree" not in raw or raw["active_worktree"] is None:
+            raw["active_worktree"] = raw.get("worktree_path")
         return cls(**raw)
 
 @dataclass

@@ -96,6 +96,7 @@ class FlightRecorder:
         failure_reason: str = "",
         negative_constraint: str = "",
         station: str = "",
+        is_abort: bool = False,
     ) -> Dict[str, Any]:
         """Records a proven failed path / architectural trap and its resulting negative constraint."""
         eff_title = title or approach or "Unnamed dead end"
@@ -114,6 +115,8 @@ class FlightRecorder:
             "recorded_at": datetime.now(timezone.utc).isoformat(),
         }
         self.data["dead_ends"].append(entry)
+        if is_abort:
+            self.data["status"] = "ABANDONED"
         self.save()
         return entry
 
