@@ -26,6 +26,7 @@ try:
     from .worktree import get_pool_status, is_treehouse_installed
     from .flight_recorder import FlightRecorder
     from .spec_critic import run_spec_critique, PRIMARY_CRITIC_MODEL, FALLBACK_CRITIC_MODEL
+    from .tier import get_tier_status, switch_tier, format_tier_card
 except ImportError:
     from tools.brigade.models import StationRole, CycleState, ReviewFinding, Ticket
     from tools.brigade.fsm import BrigadeFSM
@@ -33,6 +34,7 @@ except ImportError:
     from tools.brigade.worktree import get_pool_status, is_treehouse_installed
     from tools.brigade.flight_recorder import FlightRecorder
     from tools.brigade.spec_critic import run_spec_critique, PRIMARY_CRITIC_MODEL, FALLBACK_CRITIC_MODEL
+    from tools.brigade.tier import get_tier_status, switch_tier, format_tier_card
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -902,6 +904,40 @@ def cmd_prototype(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_tier_status(repo_path: str, is_json: bool) -> int:
+    state = get_tier_status(repo_path)
+    if is_json:
+        print(json.dumps(state.to_dict(), indent=2))
+    else:
+        print(format_tier_card(state))
+    return 0
+
+
+def _handle_tier_switch(repo_path: str, target: Optional[str], is_json: bool) -> int:
+    if not target:
+        print("❌ Error: --target <pro|ultra> is required when --action switch is specified.")
+        return 1
+    success, msg, state = switch_tier(repo_path, target)
+    if is_json:
+        print(json.dumps({"success": success, "message": msg, "state": state.to_dict()}, indent=2))
+    else:
+        print(msg)
+    if success:
+        return 0
+    return 1
+
+
+def cmd_tier(args: argparse.Namespace) -> int:
+    repo_path = normalize_target_path(args.repo)
+    is_json = bool(getattr(args, "json", False))
+    if args.action == "status":
+        return _handle_tier_status(repo_path, is_json)
+    if args.action == "switch":
+        return _handle_tier_switch(repo_path, getattr(args, "target", None), is_json)
+    print(f"❌ Unknown tier action: {args.action}")
+    return 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="brigade",
@@ -1069,6 +1105,13 @@ def main() -> int:
     p_proto.add_argument("--file", help="Path to .lavish/*.html prototype file (relative or absolute)")
     p_proto.add_argument("--agent-reply", help="Optional reply text to show in Lavish Editor when resuming poll")
 
+    # tier
+    p_tier = subparsers.add_parser("tier", help="Edge Brigade tier management (status, switch)")
+    p_tier.add_argument("repo", nargs="?", default=".", help="Path to target repository (default: .)")
+    p_tier.add_argument("--action", required=True, choices=["status", "switch"], help="Tier action: status or switch")
+    p_tier.add_argument("--target", choices=["pro", "ultra"], help="Target tier when action is switch (pro or ultra)")
+    p_tier.add_argument("--json", action="store_true", help="Output machine-readable JSON")
+
     args = parser.parse_args()
 
     commands = {
@@ -1097,6 +1140,7 @@ def main() -> int:
         "prototype": cmd_prototype,
         "critique-spec": cmd_critique_spec,
         "prompt": cmd_prompt,
+        "tier": cmd_tier,
     }
 
     func = commands.get(args.command)
