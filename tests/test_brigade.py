@@ -3206,6 +3206,367 @@ class TestBrigadeQABrowserProofGate(unittest.TestCase):
         self.assertNotIn(".edge/qa/replays/", prompt)
         self.assertNotIn("chrome-devtools-axi run", prompt)
 
+
+class TestWorktreeAutoRebaseAndQaPreflight(unittest.TestCase):
+    """
+    Contract & hermetic unit tests for:
+    - Pre-Staging Automated Worktree Rebase & Escalation (Scenarios 1-3)
+    - Hermetic Verification DRY Helper (Scenario 4)
+    - Deterministic QA DB-Drift Preflight Gate (Scenario 5)
+    """
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.repo_path = Path(self.temp_dir)
+        (self.repo_path / ".git").mkdir(parents=True, exist_ok=True)
+
+        self.worktree_path = self.repo_path / "worktrees" / "slot-1"
+        self.worktree_path.mkdir(parents=True, exist_ok=True)
+
+        self.fsm = BrigadeFSM(self.repo_path)
+        self.ticket = Ticket(
+            ticket_id="TICK-FEAT-REBASE-SYNC",
+            track="feature",
+            domain="core",
+            rule_id="RULE-SYNC",
+            severity="NORMAL",
+            target_file="src/actions/sync.ts",
+            line_number=1,
+            fingerprint="fp-sync-1",
+            description="Rebase enforcer unit testing",
+            suggested_fix="Automate worktree rebase before fast-forward merge",
+            branch_name="feat/rebase-sync",
+            worktree_path=str(self.worktree_path),
+        )
+        self.fsm.state.active_ticket = self.ticket
+        self.fsm.state.base_branch = "development"
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    # --- Scenario 1: Clean Auto-Rebase & Verification Pass ---
+    @patch("tools.brigade.fsm.return_worktree", return_value=(True, "returned"))
+    @patch("tools.brigade.fsm.run_command")
+    def test_guard_staging_to_completed_clean_auto_rebase_and_ff_merge(
+        self, mock_run, mock_return_wt
+    ):
+        """
+        Scenario 1:
+        When base_branch has diverged (merge-base --is-ancestor exits 1):
+        1. FSM executes git rebase <base_branch> inside worktree.
+        2. Clean rebase (exit 0) triggers hermetic verification.
+        3. If verification passes, fast-forward merge executes in primary repo.
+        4. Ticket completes successfully and returns True.
+        """
+        def run_cmd_side_effect(cmd, cwd=None):
+            cmd_list = list(cmd)
+            # Status check in primary repo
+            if "status" in cmd_list and "--porcelain" in cmd_list:
+                return 0, "", ""
+            # Branch check in primary repo
+            if "branch" in cmd_list and "--show-current" in cmd_list:
+                return 0, "development\n", ""
+            # merge-base diverged
+            if "merge-base" in cmd_list:
+                return 1, "", "Diverged: base branch has advanced"
+            # In-worktree rebase succeeds
+            if "rebase" in cmd_list and "development" in cmd_list:
+                return 0, "Successfully rebased and updated refs/heads/feat/rebase-sync.\n", ""
+            # Fast-forward merge into base branch
+            if "merge" in cmd_list and "--ff-only" in cmd_list:
+                return 0, "Updating a1b2c3d..e4f5g6h\nFast-forward\n", ""
+            return 0, "", ""
+
+        mock_run.side_effect = run_cmd_side_effect
+
+        # Mock hermetic verification helper to pass
+        if hasattr(self.fsm, "_run_hermetic_verification"):
+            self.fsm._run_hermetic_verification = MagicMock(
+                return_value=(True, "Hermetic verification clean.")
+            )
+
+        passed, msg, details = self.fsm.guard_staging_to_completed()
+
+        self.assertTrue(passed, f"guard_staging_to_completed should pass after clean auto-rebase, got: {msg}")
+        self.assertIn("successfully merged", msg)
+
+        # Verify rebase was called inside worktree
+        rebase_calls = [
+            c for c in mock_run.call_args_list
+            if "rebase" in c[0][0] and "development" in c[0][0]
+        ]
+        self.assertTrue(rebase_calls, "git rebase development should be executed inside worktree")
+        self.assertEqual(
+            rebase_calls[0][1].get("cwd"),
+            self.worktree_path,
+            "Rebase must be executed inside worktree_path",
+        )
+
+        # Verify ff-only merge was called in primary repo
+        merge_calls = [
+            c for c in mock_run.call_args_list
+            if "merge" in c[0][0] and "--ff-only" in c[0][0]
+        ]
+        self.assertTrue(merge_calls, "git merge --ff-only should be executed in primary repo")
+        self.assertEqual(
+            merge_calls[0][1].get("cwd"),
+            self.repo_path,
+            "Merge must be executed in primary repo",
+        )
+
+    # --- Scenario 2: Rebase Conflict -> Abort & Escalate to PAUSED ---
+    @patch("tools.brigade.fsm.return_worktree", return_value=(True, "returned"))
+    @patch("tools.brigade.fsm.FlightRecorder")
+    @patch("tools.brigade.fsm.run_command")
+    def test_guard_staging_to_completed_rebase_conflict_aborts_and_escalates(
+        self, mock_run, mock_recorder_cls, mock_return_wt
+    ):
+        """
+        Scenario 2:
+        When git rebase fails (exit != 0) due to merge conflicts:
+        1. FSM runs git diff --name-only --diff-filter=U to inspect conflicting files.
+        2. FSM runs git rebase --abort to restore worktree to clean HEAD.
+        3. FSM invokes escalate(), pausing the FSM into CycleState.PAUSED.
+        4. Ticket status is updated to ESCALATED and returns passed=False with conflicting files.
+        """
+        def run_cmd_side_effect(cmd, cwd=None):
+            cmd_list = list(cmd)
+            if "status" in cmd_list and "--porcelain" in cmd_list:
+                return 0, "", ""
+            if "branch" in cmd_list and "--show-current" in cmd_list:
+                return 0, "development\n", ""
+            if "merge-base" in cmd_list:
+                return 1, "", "Diverged"
+            if "rebase" in cmd_list and "development" in cmd_list:
+                return 1, "", "CONFLICT (content): Merge conflict in src/actions/sync.ts"
+            if "diff" in cmd_list and "--diff-filter=U" in cmd_list:
+                return 0, "src/actions/sync.ts\n", ""
+            if "rebase" in cmd_list and "--abort" in cmd_list:
+                return 0, "", ""
+            if "rev-parse" in cmd_list:
+                return 0, "abc12345\n", ""
+            return 0, "", ""
+
+        mock_run.side_effect = run_cmd_side_effect
+
+        passed, msg, details = self.fsm.guard_staging_to_completed()
+
+        self.assertFalse(passed, "guard_staging_to_completed must fail on rebase conflict")
+        self.assertTrue(details.get("escalated"), "Details must indicate escalation")
+        self.assertIn("src/actions/sync.ts", details.get("conflicting_files", []))
+        self.assertEqual(
+            self.fsm.state.current_state,
+            CycleState.PAUSED,
+            "FSM must transition to PAUSED upon rebase conflict escalation",
+        )
+        self.assertEqual(
+            self.fsm.state.active_ticket.status,
+            "ESCALATED",
+            "Active ticket must be marked ESCALATED",
+        )
+
+        # Verify abort was called in worktree
+        abort_calls = [
+            c for c in mock_run.call_args_list
+            if "rebase" in c[0][0] and "--abort" in c[0][0]
+        ]
+        self.assertTrue(abort_calls, "git rebase --abort must be executed on conflict")
+        self.assertEqual(abort_calls[0][1].get("cwd"), self.worktree_path)
+
+    # --- Scenario 3: Clean Rebase -> Post-Rebase Verification Failure -> Escalate to PAUSED ---
+    @patch("tools.brigade.fsm.return_worktree", return_value=(True, "returned"))
+    @patch("tools.brigade.fsm.FlightRecorder")
+    @patch("tools.brigade.fsm.run_command")
+    def test_guard_staging_to_completed_semantic_test_failure_escalates(
+        self, mock_run, mock_recorder_cls, mock_return_wt
+    ):
+        """
+        Scenario 3:
+        When git rebase succeeds (exit 0) but post-rebase verification fails:
+        1. FSM executes escalate() citing verification failure.
+        2. FSM transitions to CycleState.PAUSED.
+        3. Merge into primary repo is refused.
+        """
+        def run_cmd_side_effect(cmd, cwd=None):
+            cmd_list = list(cmd)
+            if "status" in cmd_list and "--porcelain" in cmd_list:
+                return 0, "", ""
+            if "branch" in cmd_list and "--show-current" in cmd_list:
+                return 0, "development\n", ""
+            if "merge-base" in cmd_list:
+                return 1, "", "Diverged"
+            if "rebase" in cmd_list and "development" in cmd_list:
+                return 0, "Successfully rebased", ""
+            if "rev-parse" in cmd_list:
+                return 0, "abc12345\n", ""
+            return 0, "", ""
+
+        mock_run.side_effect = run_cmd_side_effect
+
+        # Mock verification to fail
+        if hasattr(self.fsm, "_run_hermetic_verification"):
+            self.fsm._run_hermetic_verification = MagicMock(
+                return_value=(False, "Broken assertion: test_sync failed post-rebase")
+            )
+
+        passed, msg, details = self.fsm.guard_staging_to_completed()
+
+        self.assertFalse(passed, "guard_staging_to_completed must fail on semantic verification failure")
+        self.assertTrue(details.get("escalated"), "Details must indicate escalation")
+        self.assertTrue(details.get("semantic_conflict"), "Details must indicate semantic conflict")
+        self.assertEqual(
+            self.fsm.state.current_state,
+            CycleState.PAUSED,
+            "FSM must transition to PAUSED upon semantic verification failure",
+        )
+        self.assertEqual(self.fsm.state.active_ticket.status, "ESCALATED")
+
+        # Verify merge was NEVER called
+        merge_calls = [
+            c for c in mock_run.call_args_list
+            if "merge" in c[0][0] and "--ff-only" in c[0][0]
+        ]
+        self.assertEqual(len(merge_calls), 0, "git merge --ff-only must NOT be called on semantic failure")
+
+    # --- Scenario 4: _run_hermetic_verification DRY Helper ---
+    def test_run_hermetic_verification_method_presence_and_dry_usage(self):
+        """
+        Scenario 4:
+        Validates _run_hermetic_verification helper exists and is used by both
+        guard_verify_to_review and guard_polish_to_gate.
+        """
+        self.assertTrue(
+            hasattr(self.fsm, "_run_hermetic_verification"),
+            "BrigadeFSM must define _run_hermetic_verification helper method",
+        )
+
+        # Test delegating failure from _run_hermetic_verification to guard_verify_to_review
+        self.fsm._run_hermetic_verification = MagicMock(
+            return_value=(False, "Hermetic test failed: 1 failure")
+        )
+        v_passed, v_msg, _ = self.fsm.guard_verify_to_review()
+        self.assertFalse(v_passed)
+        self.assertIn("Hermetic test failed: 1 failure", v_msg)
+
+        # Test delegating failure from _run_hermetic_verification to guard_polish_to_gate
+        p_passed, p_msg, _ = self.fsm.guard_polish_to_gate()
+        self.assertFalse(p_passed)
+        self.assertIn("Hermetic test failed: 1 failure", p_msg)
+
+        # Test delegating success
+        self.fsm._run_hermetic_verification = MagicMock(
+            return_value=(True, "All tests and types clean")
+        )
+        v_passed, _, _ = self.fsm.guard_verify_to_review()
+        self.assertTrue(v_passed)
+        p_passed, _, _ = self.fsm.guard_polish_to_gate()
+        self.assertTrue(p_passed)
+
+    @patch("tools.brigade.fsm.run_command")
+    def test_run_hermetic_verification_execution_logic(self, mock_run):
+        """Tests npm and tsc execution logic inside _run_hermetic_verification."""
+        self.assertTrue(
+            hasattr(self.fsm, "_run_hermetic_verification"),
+            "BrigadeFSM must define _run_hermetic_verification",
+        )
+
+        # 1. Failure when scoped test exits != 0
+        mock_run.return_value = (1, "", "FAIL src/sync.test.ts")
+        passed, msg = self.fsm._run_hermetic_verification(work_dir=self.worktree_path)
+        self.assertFalse(passed)
+        self.assertIn("failed", msg)
+
+        # 2. Failure when tsc exits != 0
+        (self.worktree_path / "tsconfig.json").write_text("{}", encoding="utf-8")
+        def run_side_effect(cmd, cwd=None):
+            if "tsc" in cmd:
+                return 1, "Type error in sync.ts", ""
+            return 0, "Tests passed", ""
+
+        mock_run.side_effect = run_side_effect
+        passed, msg = self.fsm._run_hermetic_verification(work_dir=self.worktree_path)
+        self.assertFalse(passed)
+        self.assertIn("TypeScript compiler check failed", msg)
+
+    # --- Scenario 5: Deterministic QA db:check-drift Preflight Hook ---
+    def test_qa_db_drift_preflight_method_presence(self):
+        """Scenario 5: Validates _run_qa_db_drift_preflight method exists."""
+        self.assertTrue(
+            hasattr(self.fsm, "_run_qa_db_drift_preflight"),
+            "BrigadeFSM must define _run_qa_db_drift_preflight method",
+        )
+
+    def test_qa_db_drift_preflight_zero_cost_bypass_when_script_absent(self):
+        """Scenario 5a: Missing db:check-drift script returns True immediately."""
+        self.assertTrue(hasattr(self.fsm, "_run_qa_db_drift_preflight"))
+        pkg_json = self.worktree_path / "package.json"
+        pkg_json.write_text(json.dumps({"scripts": {"test": "jest"}}), encoding="utf-8")
+
+        passed, msg = self.fsm._run_qa_db_drift_preflight(work_dir=self.worktree_path)
+        self.assertTrue(passed)
+        self.assertIn("bypass", msg.lower())
+
+    @patch("tools.brigade.fsm.run_command")
+    def test_qa_db_drift_preflight_fails_on_drift(self, mock_run):
+        """Scenario 5b: Returns False when npm run db:check-drift exits != 0."""
+        self.assertTrue(hasattr(self.fsm, "_run_qa_db_drift_preflight"))
+        pkg_json = self.worktree_path / "package.json"
+        pkg_json.write_text(
+            json.dumps({"scripts": {"db:check-drift": "prisma migrate diff"}}),
+            encoding="utf-8",
+        )
+
+        mock_run.return_value = (1, "", "Schema drift: table users has uncommitted column")
+        passed, msg = self.fsm._run_qa_db_drift_preflight(work_dir=self.worktree_path)
+        self.assertFalse(passed)
+        self.assertIn("FAILED", msg)
+
+    @patch("tools.brigade.fsm.run_command")
+    def test_advance_gate_to_qa_blocked_by_db_drift(self, mock_run):
+        """Scenario 5c: advance() halts at GATE when db:check-drift fails."""
+        self.fsm.state.current_state = CycleState.GATE
+        self.fsm.guard_gate_to_staging = MagicMock(return_value=(True, "Gate OK", {}))
+        self.fsm.should_run_qa = MagicMock(return_value=True)
+
+        pkg_json = self.worktree_path / "package.json"
+        pkg_json.write_text(
+            json.dumps({"scripts": {"db:check-drift": "prisma migrate diff"}}),
+            encoding="utf-8",
+        )
+
+        # Mock drift failure
+        mock_run.return_value = (1, "", "Migration drift detected")
+
+        adv_ok, state, adv_msg = self.fsm.advance()
+        self.assertFalse(adv_ok)
+        self.assertEqual(state, CycleState.GATE)
+        self.assertEqual(self.fsm.state.current_state, CycleState.GATE)
+        self.assertIn("QA Preflight blocked advancement", adv_msg)
+
+        # Check guard failure recorded
+        last_failure = self.fsm.state.guard_failures[-1]
+        self.assertTrue(last_failure.details.get("db_drift"))
+
+    @patch("tools.brigade.fsm.run_command")
+    def test_guard_qa_to_staging_blocked_by_db_drift(self, mock_run):
+        """Scenario 5d: guard_qa_to_staging blocks advancement on db:check-drift failure."""
+        self.fsm.state.current_state = CycleState.QA
+        self.fsm.state.review_findings = []
+
+        pkg_json = self.worktree_path / "package.json"
+        pkg_json.write_text(
+            json.dumps({"scripts": {"db:check-drift": "prisma migrate diff"}}),
+            encoding="utf-8",
+        )
+
+        # Mock proof receipt validator to pass
+        with patch("tools.brigade.fsm._validate_qa_proof_receipt", return_value=(True, "Valid receipt", {"slug": "sync"})):
+            mock_run.return_value = (1, "", "Migration drift detected")
+            passed, msg, details = self.fsm.guard_qa_to_staging()
+            self.assertFalse(passed)
+            self.assertTrue(details.get("db_drift"))
+
+
 if __name__ == "__main__":
     unittest.main()
 

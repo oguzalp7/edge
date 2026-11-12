@@ -426,5 +426,61 @@ class TestLayerLeakageGate(_HermeticGitRepoTestCase):
         self.assertTrue(passed)
 
 
+
+class TestGhostRootDirectoryGate(_HermeticGitRepoTestCase):
+    """Hermetic unit tests for Stage-0 Ghost Root Directory Sanitizer Gate."""
+
+    def test_ghost_root_dirs_constant_defined(self):
+        """Validates that GHOST_ROOT_DIRS constant exists and contains canonical truncated dirnames."""
+        self.assertTrue(
+            hasattr(EdgeVerificationGate, "GHOST_ROOT_DIRS"),
+            "EdgeVerificationGate must define GHOST_ROOT_DIRS constant",
+        )
+        self.assertEqual(
+            EdgeVerificationGate.GHOST_ROOT_DIRS,
+            ("rc", "pecs", "ests", "pp", "ib", "omponents"),
+        )
+
+    def test_check_ghost_root_directories_clean_passes(self):
+        """Validates that clean repository without ghost directories passes Stage-0."""
+        self.assertTrue(
+            hasattr(self.gate, "check_ghost_root_directories"),
+            "EdgeVerificationGate must define check_ghost_root_directories method",
+        )
+        for d in ("src", "specs", "tests", "app", "lib", "components"):
+            (self.repo_path / d).mkdir(parents=True, exist_ok=True)
+
+        result = self.gate.check_ghost_root_directories()
+        self.assertTrue(result.passed)
+        self.assertEqual(result.stage_num, 0)
+        self.assertIn("No truncated ghost root directories", result.message)
+
+    def test_check_ghost_root_directories_detects_truncated_roots(self):
+        """Validates that truncated root directories like 'rc' and 'pecs' fail Stage-0."""
+        self.assertTrue(
+            hasattr(self.gate, "check_ghost_root_directories"),
+            "EdgeVerificationGate must define check_ghost_root_directories method",
+        )
+        (self.repo_path / "rc").mkdir()
+        (self.repo_path / "pecs").mkdir()
+
+        result = self.gate.check_ghost_root_directories()
+        self.assertFalse(result.passed)
+        self.assertEqual(result.stage_num, 0)
+        self.assertTrue(any("rc" in d for d in result.details))
+        self.assertTrue(any("pecs" in d for d in result.details))
+
+    def test_run_all_fail_fast_on_ghost_root(self):
+        """Validates that run_all() fails fast at Stage 0 when ghost root directories are present."""
+        self.assertTrue(
+            hasattr(self.gate, "check_ghost_root_directories"),
+            "EdgeVerificationGate must define check_ghost_root_directories method",
+        )
+        self._write_and_commit({"README.md": "# test"}, "initial commit")
+        (self.repo_path / "rc").mkdir()
+        passed = self.gate.run_all(base_ref="HEAD", skip_verification=True)
+        self.assertFalse(passed)
+
+
 if __name__ == "__main__":
     unittest.main()
