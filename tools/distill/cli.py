@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from datetime import datetime, timezone
 """
 CLI Driver for edge-distill v2: Zero-Token Harvester, State Watermark & Cross-Project Candidate Engine.
 """
@@ -8,7 +9,7 @@ import os
 import argparse
 import json
 from pathlib import Path
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Any
 
 # Add project root to sys.path
 root_dir = Path(__file__).resolve().parent.parent.parent
@@ -63,11 +64,55 @@ def _resolve_harvest_mode(mode_arg: str, target_repo: Path) -> str:
     return "project"
 
 
+def _commit_harvest_watermark(
+    harvester: TranscriptGraphHarvester,
+    digest: Any,
+    mode: str,
+    target_repo: Path,
+    state_mgr: DistillStateManager,
+) -> None:
+    now_iso = datetime.now(timezone.utc).isoformat()
+    harvester.watermark_state.last_harvested_at = now_iso
+    target_repo_str = str(target_repo.resolve())
+
+    for sid in digest.sessions_analyzed:
+        if sid not in harvester.watermark_state.processed_sessions:
+            harvester.watermark_state.processed_sessions.append(sid)
+        if mode == "factory":
+            if sid not in harvester.watermark_state.factory_processed_sessions:
+                harvester.watermark_state.factory_processed_sessions.append(sid)
+        else:
+            p_sessions = harvester.watermark_state.project_sessions.setdefault(target_repo_str, [])
+            if sid not in p_sessions:
+                p_sessions.append(sid)
+
+    harvester.watermark_state.metrics["total_harvested"] = len(harvester.watermark_state.processed_sessions)
+    state_mgr.save_state(harvester.watermark_state)
+
+
+def _format_digest_output(digest: Any, fmt: str) -> str:
+    if fmt == "json":
+        return json.dumps(digest.to_dict(), indent=2)
+    if fmt == "toon":
+        return digest.to_toon()
+    return f"FrictionDigest for {digest.project_name}: {len(digest.sessions_analyzed)} sessions, {len(digest.tool_frictions)} frictions, {len(digest.station_escapes)} escapes"
+
+
 def cmd_harvest(args: argparse.Namespace) -> int:
     repo_raw = getattr(args, "project", None) or getattr(args, "repo", ".")
     target_repo = normalize_target_path(repo_raw)
     mode = _resolve_harvest_mode(getattr(args, "mode", "auto"), target_repo)
-    harvester = TranscriptGraphHarvester(repo_path=target_repo)
+
+    state_mgr = DistillStateManager()
+    watermark_state = state_mgr.load_state()
+
+    env_brain = os.environ.get("GEMINI_BRAIN_ROOT")
+    brain_roots = [Path(env_brain)] if env_brain else None
+    harvester = TranscriptGraphHarvester(
+        repo_path=target_repo,
+        watermark_state=watermark_state,
+        brain_roots=brain_roots,
+    )
     digest = harvester.harvest(
         project_path=target_repo,
         reprocess=getattr(args, "reprocess", False),
@@ -75,16 +120,14 @@ def cmd_harvest(args: argparse.Namespace) -> int:
         max_sessions=getattr(args, "max_sessions", 50),
         mode=mode,
     )
+
+    _commit_harvest_watermark(harvester, digest, mode, target_repo, state_mgr)
+
     if digest.harness_signals_queued > 0:
         print(f"[NOTE] Queued {digest.harness_signals_queued} harness signal(s) to edge_factory_inbox.json", file=sys.stderr)
 
     fmt = getattr(args, "format", "toon")
-    if fmt == "json":
-        output_str = json.dumps(digest.to_dict(), indent=2)
-    elif fmt == "toon":
-        output_str = digest.to_toon()
-    else:
-        output_str = f"FrictionDigest for {digest.project_name}: {len(digest.sessions_analyzed)} sessions, {len(digest.tool_frictions)} frictions, {len(digest.station_escapes)} escapes"
+    output_str = _format_digest_output(digest, fmt)
 
     out_path = getattr(args, "output", None)
     if out_path:

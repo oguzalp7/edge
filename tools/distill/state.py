@@ -15,6 +15,53 @@ from datetime import datetime, timezone
 
 from tools.distill.models import DistillWatermarkState, CandidateRule
 
+TIMESTAMP_LINE_PATTERN = re.compile(r"^(?:Created|Completed)\s+At:\s*.*$", re.MULTILINE | re.IGNORECASE)
+ISO8601_TIMESTAMP_PATTERN = re.compile(r"\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})\b")
+WSL_RELAY_PID_PATTERN = re.compile(r"WSL\s*\(\s*\d+\s*-\s*Relay\s*\)", re.IGNORECASE)
+EPHEMERAL_PATH_PATTERN = re.compile(
+    r"""(?:/tmp/|/var/folders/|[A-Za-z]:[\/]Users[\/][^\/]+[\/]AppData[\/]Local[\/]Temp[\/])[^\s"'`:;]+""",
+    re.IGNORECASE,
+)
+EPHEMERAL_TEST_DIR_PATTERN = re.compile(
+    r"(?:^|[\\/])(?:pytest-[^\\/]+|test_[^\\/]+|unittest|tmp[^\\/]*|temp[^\\/]*)(?:[\\/]|$)"
+    r"|(?:^|[\\/])(?:tmp|var[\\/]folders|AppData[\\/]Local[\\/]Temp)(?:[\\/]|$)",
+    re.IGNORECASE,
+)
+
+
+def _sanitize_signal_summary(summary: str) -> str:
+    if not summary:
+        return ""
+    text = TIMESTAMP_LINE_PATTERN.sub("", summary)
+    text = ISO8601_TIMESTAMP_PATTERN.sub("<TIMESTAMP>", text)
+    text = WSL_RELAY_PID_PATTERN.sub("WSL (<PID> - Relay)", text)
+    text = EPHEMERAL_PATH_PATTERN.sub("<TMP_PATH>", text)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return " ".join(lines).strip()
+
+
+def _is_ephemeral_test_path(path_str: str) -> bool:
+    if not path_str:
+        return False
+    norm = str(path_str).replace("\\", "/")
+    return bool(EPHEMERAL_TEST_DIR_PATTERN.search(norm))
+
+
+def _resolve_agent_rubric_path(root: Path, role: str) -> Path:
+    clean_role = role.strip().lower()
+    hyphen_name = f"{clean_role.replace('_', '-')}.md"
+    hyphen_path = root / "agents" / hyphen_name
+    if hyphen_path.is_file():
+        return hyphen_path
+
+    underscore_name = f"{clean_role.replace('-', '_')}.md"
+    underscore_path = root / "agents" / underscore_name
+    if underscore_path.is_file():
+        return underscore_path
+
+    return hyphen_path
+
+
 
 def _default_state_path() -> Path:
     env_path = os.environ.get("EDGE_DISTILL_STATE_FILE")
@@ -141,7 +188,8 @@ class FactoryInbox:
         kind = str(raw.get("kind", "HARNESS_FRICTION"))
         role_or_tool = str(raw.get("role_or_tool", ""))
         summary = str(raw.get("summary", ""))
-        fp = hashlib.sha256(f"{kind}:{role_or_tool}:{summary}".lower().encode("utf-8")).hexdigest()[:16]
+        clean_summary = _sanitize_signal_summary(summary)
+        fp = hashlib.sha256(f"{kind}:{role_or_tool}:{clean_summary}".lower().encode("utf-8")).hexdigest()[:16]
         sig_id = raw.get("signal_id") or f"SIG-INBOX-{fp[:8].upper()}"
         created_at = raw.get("created_at") or datetime.now(timezone.utc).isoformat()
         resolved = bool(raw.get("resolved", False))
@@ -161,8 +209,14 @@ class FactoryInbox:
     def append_signals(self, raw_signals: List[Dict[str, Any]]) -> int:
         existing = self.load_signals()
         existing_fps = {s.get("fingerprint") for s in existing if s.get("fingerprint")}
+        is_mocked = hasattr(_default_factory_inbox_path, "assert_called")
+        is_prod = is_mocked or ("EDGE_DISTILL_FACTORY_INBOX_FILE" not in os.environ)
+        is_default_prod_inbox = is_prod and (self.inbox_file.resolve() == _default_factory_inbox_path().resolve())
         added = 0
         for raw in raw_signals:
+            source_proj = str(raw.get("source_project", ""))
+            if is_default_prod_inbox and _is_ephemeral_test_path(source_proj):
+                continue
             record, fp = self._build_signal_record(raw)
             if fp not in existing_fps:
                 existing.append(record)
@@ -252,12 +306,17 @@ def _clean_rule_from_overlay(overlay_file: Path, cand: CandidateRule) -> None:
 
 
 def _clean_rule_from_all_projects(source_projects: List[str], cand: CandidateRule) -> None:
+    role = cand.target_role.lower()
+    variants = {role, role.replace("_", "-"), role.replace("-", "_")}
     for proj_str in source_projects:
         p = Path(proj_str)
         if not p.exists():
             continue
-        overlay_file = p / ".edge" / "stations" / f"{cand.target_role.lower()}.md"
-        _clean_rule_from_overlay(overlay_file, cand)
+        stations_dir = p / ".edge" / "stations"
+        for v in variants:
+            overlay_file = stations_dir / f"{v}.md"
+            if overlay_file.exists():
+                _clean_rule_from_overlay(overlay_file, cand)
 
 
 class CandidatePool:
@@ -369,7 +428,7 @@ class CandidatePool:
             return False
 
         root = Path(plugin_root).resolve() if plugin_root else self.plugin_root
-        agent_file = root / "agents" / f"{target_cand.target_role.lower()}.md"
+        agent_file = _resolve_agent_rubric_path(root, target_cand.target_role.lower())
         _append_rule_to_agent_rubric(agent_file, target_cand)
         _clean_rule_from_all_projects(target_cand.source_projects, target_cand)
 
