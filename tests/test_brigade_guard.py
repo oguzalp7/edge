@@ -1487,6 +1487,248 @@ class TestGoldfishStationRotation(unittest.TestCase):
         self.assertIn("lastActiveAt", envelope["stations"][cid])
 
 
+
+class TestWslCwdAnchorAndQuotingHook(unittest.TestCase):
+    """
+    Hermetic contract and unit tests for:
+    - Pre-Tool WSL Command Guard & Helper Presence (Scenario 1)
+    - Transparent Auto-Anchor via --cd Injection & CWD Translation (Scenario 2)
+    - Deterministic Deny Guard for PowerShell Variable Swallowing & Nested Quoting (Scenario 3)
+    """
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.orig_file = guard.ACTIVE_STATIONS_FILE
+        guard.ACTIVE_STATIONS_FILE = Path(self.temp_dir.name) / "edge_active_stations.json"
+
+    def tearDown(self):
+        guard.ACTIVE_STATIONS_FILE = self.orig_file
+        self.temp_dir.cleanup()
+
+    # --- 1. evaluate_wsl_command_guard & Helper Functions Presence ---
+    def test_wsl_guard_helpers_presence(self):
+        """Verifies presence of evaluate_wsl_command_guard and its canonical helper subroutines."""
+        self.assertTrue(
+            hasattr(guard, "evaluate_wsl_command_guard"),
+            "orchestrator_guard must define evaluate_wsl_command_guard",
+        )
+        self.assertTrue(
+            hasattr(guard, "_is_wsl_invocation"),
+            "orchestrator_guard must define _is_wsl_invocation",
+        )
+        self.assertTrue(
+            hasattr(guard, "_check_powershell_var_swallowing"),
+            "orchestrator_guard must define _check_powershell_var_swallowing",
+        )
+        self.assertTrue(
+            hasattr(guard, "_check_nested_quoting_collision"),
+            "orchestrator_guard must define _check_nested_quoting_collision",
+        )
+        self.assertTrue(
+            hasattr(guard, "_resolve_wsl_anchor_path"),
+            "orchestrator_guard must define _resolve_wsl_anchor_path",
+        )
+        self.assertTrue(
+            hasattr(guard, "_transform_wsl_command_anchor"),
+            "orchestrator_guard must define _transform_wsl_command_anchor",
+        )
+
+    def test_is_wsl_invocation(self):
+        """Validates _is_wsl_invocation matches case-insensitive wsl/wsl.exe with leading spaces."""
+        self.assertTrue(hasattr(guard, "_is_wsl_invocation"))
+        self.assertTrue(guard._is_wsl_invocation("wsl bash"))
+        self.assertTrue(guard._is_wsl_invocation("wsl.exe python3"))
+        self.assertTrue(guard._is_wsl_invocation("  WSL pytest"))
+        self.assertTrue(guard._is_wsl_invocation("wsl"))
+
+        self.assertFalse(guard._is_wsl_invocation("git status"))
+        self.assertFalse(guard._is_wsl_invocation("python3 -m unittest"))
+        self.assertFalse(guard._is_wsl_invocation("echo wsl"))
+        self.assertFalse(guard._is_wsl_invocation("git commit -m wsl"))
+        self.assertFalse(guard._is_wsl_invocation(""))
+        self.assertFalse(guard._is_wsl_invocation(None))
+
+    def test_non_wsl_commands_passthrough(self):
+        """Validates that non-WSL commands return None from guard and pass through handle_pre_tool."""
+        self.assertTrue(hasattr(guard, "evaluate_wsl_command_guard"))
+        self.assertIsNone(guard.evaluate_wsl_command_guard("git status"))
+        self.assertIsNone(guard.evaluate_wsl_command_guard("python3 -m unittest"))
+
+        payload = {
+            "conversationId": "coder-session-1",
+            "toolCall": {
+                "name": "run_command",
+                "args": {
+                    "CommandLine": "git status",
+                },
+            },
+        }
+        res = guard.handle_pre_tool(payload)
+        self.assertEqual(res.get("decision"), "allow")
+        self.assertNotIn("overwrite", res)
+
+    # --- 2. Transparent Auto-Anchor (--cd Injection & CWD Resolution) ---
+    def test_auto_anchor_inline_cd_extracted_and_rewritten(self):
+        """Validates extraction of inline 'cd /path' and rewriting with 'wsl --cd /path'."""
+        self.assertTrue(hasattr(guard, "evaluate_wsl_command_guard"))
+        cmd = "wsl bash -c 'cd /home/oguz/proj && npm test'"
+        res = guard.evaluate_wsl_command_guard(cmd)
+        self.assertIsNotNone(res)
+        self.assertEqual(res.get("decision"), "allow")
+        self.assertIn("overwrite", res)
+        new_cmd = res["overwrite"].get("CommandLine")
+        self.assertIsNotNone(new_cmd)
+        self.assertTrue(
+            new_cmd.startswith("wsl --cd /home/oguz/proj"),
+            f"Expected command to start with 'wsl --cd /home/oguz/proj', got: {new_cmd}",
+        )
+
+    def test_resolve_wsl_anchor_path_from_windows_and_unc_cwd(self):
+        """Validates translation of Windows UNC, drive, and mapped paths to Linux paths."""
+        self.assertTrue(hasattr(guard, "_resolve_wsl_anchor_path"))
+        # UNC wsl.localhost
+        p1 = guard._resolve_wsl_anchor_path("wsl npm test", cwd=r"\\wsl.localhost\Ubuntu-24.04\home\oguz\proj")
+        self.assertEqual(p1, "/home/oguz/proj")
+
+        # UNC wsl$
+        p2 = guard._resolve_wsl_anchor_path("wsl npm test", cwd=r"\\wsl$\Ubuntu-24.04\home\oguz\proj")
+        self.assertEqual(p2, "/home/oguz/proj")
+
+        # Mapped network drive Z:/home/...
+        p3 = guard._resolve_wsl_anchor_path("wsl npm test", cwd=r"Z:\home\oguz\proj")
+        self.assertEqual(p3, "/home/oguz/proj")
+
+        # Windows local drive C:\Users\...
+        p4 = guard._resolve_wsl_anchor_path("wsl npm test", cwd=r"C:\Users\oguz_\proj")
+        self.assertEqual(p4, "/mnt/c/Users/oguz_/proj")
+
+        # Native Linux path
+        p5 = guard._resolve_wsl_anchor_path("wsl npm test", cwd="/home/oguz/proj")
+        self.assertEqual(p5, "/home/oguz/proj")
+
+    def test_handle_pre_tool_argument_key_preservation(self):
+        """Validates that overwrite preserves whether incoming arg was 'CommandLine' or 'command'."""
+        self.assertTrue(hasattr(guard, "evaluate_wsl_command_guard"))
+        # 1. Incoming CommandLine
+        p_cl = {
+            "conversationId": "coder-1",
+            "toolCall": {
+                "name": "run_command",
+                "args": {
+                    "CommandLine": "wsl npm test",
+                    "cwd": r"\\wsl.localhost\Ubuntu-24.04\home\oguz\proj",
+                },
+            },
+        }
+        res_cl = guard.handle_pre_tool(p_cl)
+        self.assertEqual(res_cl.get("decision"), "allow")
+        self.assertIn("overwrite", res_cl)
+        self.assertIn("CommandLine", res_cl["overwrite"])
+        self.assertNotIn("command", res_cl["overwrite"])
+        self.assertEqual(res_cl["overwrite"]["CommandLine"], "wsl --cd /home/oguz/proj npm test")
+
+        # 2. Incoming command
+        p_c = {
+            "conversationId": "coder-1",
+            "toolCall": {
+                "name": "run_command",
+                "args": {
+                    "command": "wsl npm test",
+                    "cwd": r"\\wsl.localhost\Ubuntu-24.04\home\oguz\proj",
+                },
+            },
+        }
+        res_c = guard.handle_pre_tool(p_c)
+        self.assertEqual(res_c.get("decision"), "allow")
+        self.assertIn("overwrite", res_c)
+        self.assertIn("command", res_c["overwrite"])
+        self.assertNotIn("CommandLine", res_c["overwrite"])
+        self.assertEqual(res_c["overwrite"]["command"], "wsl --cd /home/oguz/proj npm test")
+
+    def test_existing_cd_or_management_flags_bypass(self):
+        """Commands with existing --cd or management flags are not modified."""
+        self.assertTrue(hasattr(guard, "evaluate_wsl_command_guard"))
+        self.assertIsNone(guard.evaluate_wsl_command_guard("wsl --cd /home/oguz/proj pytest"))
+        self.assertIsNone(guard.evaluate_wsl_command_guard("wsl --list"))
+        self.assertIsNone(guard.evaluate_wsl_command_guard("wsl -l -v"))
+        self.assertIsNone(guard.evaluate_wsl_command_guard("wsl --status"))
+        self.assertIsNone(guard.evaluate_wsl_command_guard("wsl --shutdown"))
+
+        payload = {
+            "conversationId": "coder-1",
+            "toolCall": {
+                "name": "run_command",
+                "args": {"CommandLine": "wsl --cd /home/oguz/proj pytest"},
+            },
+        }
+        res = guard.handle_pre_tool(payload)
+        self.assertEqual(res.get("decision"), "allow")
+        self.assertNotIn("overwrite", res)
+
+    def test_distro_flag_positioning(self):
+        """Validates that --cd is positioned after distribution flag (-d / --distribution)."""
+        self.assertTrue(hasattr(guard, "evaluate_wsl_command_guard"))
+        cmd = "wsl -d Ubuntu-24.04 pytest"
+        res = guard.evaluate_wsl_command_guard(cmd, cwd="/home/oguz/proj")
+        self.assertIsNotNone(res)
+        self.assertEqual(
+            res["overwrite"]["CommandLine"],
+            "wsl -d Ubuntu-24.04 --cd /home/oguz/proj pytest",
+        )
+
+    # --- 3. Deterministic Deny Guard (PowerShell Var & Nested Quoting) ---
+    def test_powershell_var_swallowing_denied_in_double_quotes(self):
+        """Unescaped $var or ${var} inside double quotes is denied to prevent local swallowing."""
+        self.assertTrue(hasattr(guard, "_check_powershell_var_swallowing"))
+        cmd1 = 'wsl bash -c "for f in a b; do echo $f; done"'
+        res1 = guard._check_powershell_var_swallowing(cmd1)
+        self.assertIsNotNone(res1)
+        self.assertEqual(res1.get("decision"), "deny")
+        self.assertIn("POWERSHELL VARIABLE SWALLOWING GUARD", res1.get("reason", ""))
+        self.assertIn("$f", res1.get("reason", ""))
+
+        cmd2 = 'wsl bash -c "echo ${TARGET_DIR}/bin"'
+        res2 = guard._check_powershell_var_swallowing(cmd2)
+        self.assertIsNotNone(res2)
+        self.assertEqual(res2.get("decision"), "deny")
+        self.assertIn("${TARGET_DIR}", res2.get("reason", ""))
+
+    def test_escaped_or_single_quoted_variables_allowed(self):
+        """Variables in single quotes or escaped with backtick/backslash are allowed."""
+        self.assertTrue(hasattr(guard, "_check_powershell_var_swallowing"))
+        # Single quotes
+        cmd_single = "wsl bash -c 'for f in a b; do echo $f; done'"
+        self.assertIsNone(guard._check_powershell_var_swallowing(cmd_single))
+
+        # Backtick escape
+        cmd_backtick = 'wsl bash -c "echo `$f"'
+        self.assertIsNone(guard._check_powershell_var_swallowing(cmd_backtick))
+
+        # Backslash escape
+        cmd_backslash = 'wsl bash -c "echo \\$f"'
+        self.assertIsNone(guard._check_powershell_var_swallowing(cmd_backslash))
+
+    def test_nested_quoting_and_metacharacter_collision_denied(self):
+        """Nested quotes with shell metacharacters in bash -c are denied."""
+        self.assertTrue(hasattr(guard, "_check_nested_quoting_collision"))
+        cmd1 = 'wsl bash -c \'frontier-axi promote x --reason "Settled: (1) auto rebase"\''
+        res1 = guard._check_nested_quoting_collision(cmd1)
+        self.assertIsNotNone(res1)
+        self.assertEqual(res1.get("decision"), "deny")
+        self.assertIn("NESTED QUOTING & METACHARACTER COLLISION GUARD", res1.get("reason", ""))
+
+        cmd2 = 'wsl bash -c "python3 -c \\"import os; (os.exit(0))\\" && ls"'
+        res2 = guard._check_nested_quoting_collision(cmd2)
+        self.assertIsNotNone(res2)
+        self.assertEqual(res2.get("decision"), "deny")
+
+    def test_clean_single_layer_bash_c_allowed(self):
+        """bash -c without conflicting nested quotes and metacharacters is allowed."""
+        self.assertTrue(hasattr(guard, "_check_nested_quoting_collision"))
+        cmd = "wsl bash -c 'echo hello'"
+        self.assertIsNone(guard._check_nested_quoting_collision(cmd))
+
+
 if __name__ == "__main__":
     unittest.main()
 
