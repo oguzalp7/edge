@@ -2850,7 +2850,6 @@ class TestDistillHarvesterSlice2Fixes(unittest.TestCase):
             "error TS2322: Type 'string' is not assignable\n"
             "Traceback (most recent call last):\n"
             "AssertionError: expected True\n"
-            "SyntaxError: invalid syntax\n"
             "ModuleNotFoundError: No module named x\n"
             "npm ERR! code ELIFECYCLE\n"
             "Command failed\n"
