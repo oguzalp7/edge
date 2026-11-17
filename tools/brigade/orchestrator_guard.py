@@ -851,18 +851,19 @@ def _detect_swarm_role(contents: List[str]) -> Tuple[str, str]:
 def _detect_transcript_role(first_lines: List[str]) -> Tuple[str, str]:
     first_obj = json.loads(first_lines[0])
     first_content = str(first_obj.get("content", ""))
-    if first_obj.get("source") == "SYSTEM" and ("[Message]" in first_content or "[swarm]" in first_content.lower()):
+    if first_obj.get("source") == "SYSTEM":
         sys_contents = _collect_initial_system_contents(first_lines, max_steps=4)
         if _is_swarm_step(sys_contents):
             return _detect_swarm_role(sys_contents)
-        body = _extract_message_body(first_content)
-        exp_role = _match_explicit_role(body)
-        if exp_role:
-            return exp_role, "transcript_subagent_explicit"
-        scanned = _scan_role_in_text(body)
-        if scanned:
-            return scanned
-        return "SUBAGENT_GENERIC", "transcript_subagent"
+        if "[Message]" in first_content:
+            body = _extract_message_body(first_content)
+            exp_role = _match_explicit_role(body)
+            if exp_role:
+                return exp_role, "transcript_subagent_explicit"
+            scanned = _scan_role_in_text(body)
+            if scanned:
+                return scanned
+            return "SUBAGENT_GENERIC", "transcript_subagent"
 
     if first_obj.get("source") == "USER_EXPLICIT" or any("edge-orchestrator" in ln for ln in first_lines):
         return "ORCHESTRATOR", "transcript_root"
@@ -1378,28 +1379,48 @@ def handle_pre_tool(payload: dict) -> dict:
     return {"decision": "allow"}
 
 
+def _extract_cid_from_str(resp: str) -> Optional[str]:
+    try:
+        parsed = json.loads(resp)
+        if isinstance(parsed, dict):
+            cid = parsed.get("conversationId") or parsed.get("conversation_id")
+            if cid:
+                return str(cid)
+    except Exception:
+        pass
+    match = _CID_FALLBACK_RE.search(resp)
+    return match.group(1) if match else None
+
+
+def _extract_cid_from_response(resp: Any) -> Optional[str]:
+    if isinstance(resp, dict):
+        cid = resp.get("conversationId") or resp.get("conversation_id")
+        return str(cid) if cid else None
+    if isinstance(resp, str):
+        return _extract_cid_from_str(resp)
+    return None
+
+
 def _extract_cid_from_payload(payload: dict) -> Optional[str]:
     for resp_key in ("toolResponse", "result", "output"):
         resp = payload.get(resp_key)
         if not resp:
             continue
-        if isinstance(resp, dict):
-            cid = resp.get("conversationId") or resp.get("conversation_id")
-            if cid:
-                return str(cid)
-        elif isinstance(resp, str):
-            try:
-                parsed = json.loads(resp)
-                if isinstance(parsed, dict):
-                    cid = parsed.get("conversationId") or parsed.get("conversation_id")
-                    if cid:
-                        return str(cid)
-            except Exception:
-                pass
-            match = _CID_FALLBACK_RE.search(resp)
-            if match:
-                return match.group(1)
+        cid = _extract_cid_from_response(resp)
+        if cid:
+            return cid
     return None
+
+
+def _is_skipped_or_empty_fallback(step_obj: Any) -> bool:
+    if not isinstance(step_obj, dict):
+        return True
+    if step_obj.get("type") in _SKIP_FALLBACK_TYPES or step_obj.get("source") in _SKIP_FALLBACK_SOURCES:
+        return True
+    low = str(step_obj.get("content", "")).lower()
+    if not low:
+        return True
+    return "active subagent(s):" in low or "active subagent:" in low
 
 
 def _is_valid_fallback_step(
@@ -1407,14 +1428,9 @@ def _is_valid_fallback_step(
     preceding_planner: Optional[Dict[str, Any]],
     expected_tool: str,
 ) -> bool:
-    if not isinstance(step_obj, dict):
-        return False
-    if step_obj.get("type") in _SKIP_FALLBACK_TYPES or step_obj.get("source") in _SKIP_FALLBACK_SOURCES:
+    if _is_skipped_or_empty_fallback(step_obj):
         return False
     content = str(step_obj.get("content", ""))
-    low = content.lower()
-    if not content or "active subagent(s):" in low or "active subagent:" in low:
-        return False
     if preceding_planner is None:
         if _CREATED_SUBAGENT_RE.search(content):
             return True
