@@ -337,9 +337,9 @@ class TranscriptStationScanner:
                                 pending_roles.append(canonical)
 
                     content = step.get("content", "")
-                    text_to_search = content if "conversationId" in content else line_str
-                    if "conversationId" in text_to_search:
-                        cids = re.findall(r'\\?["\']conversationId\\?["\']\s*:\s*\\?["\']([a-f0-9\-]+)\\?["\']', text_to_search)
+                    text_to_search = content if ("conversationId" in content or "conversation_id" in content) else line_str
+                    if "conversationId" in text_to_search or "conversation_id" in text_to_search:
+                        cids = _CID_FALLBACK_RE.findall(text_to_search)
                         for cid in cids:
                             role = pending_roles.pop(0) if pending_roles else "STATION_WORKER"
                             pairs.append((cid, role))
@@ -663,6 +663,53 @@ EPHEMERAL_GOLDFISH_ROLES = frozenset({
 })
 
 
+_CID_FALLBACK_RE = re.compile(r'\\?["\']conversation(?:Id|_id)\\?["\']\s*:\s*\\?["\']([a-f0-9\-]+)\\?["\']')
+_MESSAGE_BODY_RE = re.compile(r"\bcontent=(.*)$", re.DOTALL)
+_CREATED_SUBAGENT_RE = re.compile(r"Created the following subagents?", re.IGNORECASE)
+_SWARM_STATUS_ADDED_RE = re.compile(r'["\']status["\']\s*:\s*["\']added["\']', re.IGNORECASE)
+_SWARM_TAG_RE = re.compile(
+    r"(?:^|\s)(?:for\s+@|content=@|\[Swarm\]\s*@)([a-z0-9_-]+)|^@([a-z0-9_-]+)",
+    re.IGNORECASE | re.MULTILINE,
+)
+_EXPLICIT_ROLE_PATTERNS = (
+    re.compile(
+        r"\bYou are (?:the )?(?:persistent |ephemeral )?([A-Za-z_ -]+?) (?:station|worker|agent|subagent)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bYou are (?:the )?(SPEC_WRITER|RESEARCHER|SEAM_ARCHITECT|CODER|SURGEON|EXAMINER|QA_ENGINEER|SPEC_CRITIC)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\bPersona:\s*([A-Za-z_ -]+)\b", re.IGNORECASE),
+    re.compile(r"\bcanonical ([A-Za-z_ -]+?) station\b", re.IGNORECASE),
+    re.compile(r"\b(?:read|follow)\s+agents/([a-zA-Z0-9_-]+)\.md\b", re.IGNORECASE),
+)
+_SKIP_FALLBACK_TYPES = frozenset({"PLANNER_RESPONSE", "USER_INPUT", "SYSTEM_MESSAGE", "EPHEMERAL_MESSAGE"})
+_SKIP_FALLBACK_SOURCES = frozenset({"USER_EXPLICIT", "EPHEMERAL"})
+_PROTECTED_FALLBACK_ROLES = frozenset({"", "STATION_WORKER", "SUBAGENT_GENERIC", "UNKNOWN"})
+
+
+def _compile_role_tiers() -> Tuple[List[Tuple[str, re.Pattern[str]]], List[Tuple[str, re.Pattern[str]]]]:
+    tier1: List[Tuple[str, re.Pattern[str]]] = []
+    tier2: List[Tuple[str, re.Pattern[str]]] = []
+    for canonical, aliases in CANONICAL_ROLES.items():
+        slug = canonical.lower()
+        t1_variants = {slug, slug.replace("_", " "), slug.replace("_", "-")}
+        t1_sorted = sorted(t1_variants, key=len, reverse=True)
+        t1_union = "|".join(re.escape(v) for v in t1_sorted)
+        tier1.append((canonical, re.compile(rf"(?<![a-z0-9_])(?:{t1_union})(?![a-z0-9_])", re.IGNORECASE)))
+
+        t2_variants = [a.lower() for a in aliases if a.lower() not in t1_variants]
+        if t2_variants:
+            t2_sorted = sorted(set(t2_variants), key=len, reverse=True)
+            t2_union = "|".join(re.escape(v) for v in t2_sorted)
+            tier2.append((canonical, re.compile(rf"(?<![a-z0-9_])(?:{t2_union})(?![a-z0-9_])", re.IGNORECASE)))
+    return tier1, tier2
+
+
+_ROLE_TIER1_PATTERNS, _ROLE_TIER2_PATTERNS = _compile_role_tiers()
+
+
 def to_wsl_path(p_str: str) -> Path:
     if not p_str:
         return Path("")
@@ -673,17 +720,31 @@ def to_wsl_path(p_str: str) -> Path:
     return Path(p)
 
 
+def _find_earliest_tier_match(
+    text: str,
+    tier_patterns: List[Tuple[str, re.Pattern[str]]],
+) -> Optional[str]:
+    best_pos: Optional[int] = None
+    best_role: Optional[str] = None
+    for canonical, pat in tier_patterns:
+        m = pat.search(text)
+        if m and (best_pos is None or m.start() < best_pos):
+            best_pos = m.start()
+            best_role = canonical
+    return best_role
+
+
 def normalize_role(raw_role: str) -> Optional[str]:
     if not raw_role:
         return None
     raw_lower = raw_role.strip().lower()
-    for canonical, aliases in CANONICAL_ROLES.items():
+    for canonical in CANONICAL_ROLES:
         if canonical.lower() == raw_lower:
             return canonical
-        for alias in aliases:
-            if alias in raw_lower:
-                return canonical
-    return None
+    t1_hit = _find_earliest_tier_match(raw_lower, _ROLE_TIER1_PATTERNS)
+    if t1_hit:
+        return t1_hit
+    return _find_earliest_tier_match(raw_lower, _ROLE_TIER2_PATTERNS)
 
 
 def load_active_stations() -> StationStoreEnvelope:
@@ -720,6 +781,94 @@ def find_active_station(role: str, parent_cid: str = "") -> Optional[Tuple[str, 
     return None
 
 
+def _extract_message_body(content: str) -> str:
+    if "[Message]" in content:
+        m = _MESSAGE_BODY_RE.search(content)
+        if m:
+            return m.group(1)
+    return content
+
+
+def _match_explicit_role(text: str) -> Optional[str]:
+    for pat in _EXPLICIT_ROLE_PATTERNS:
+        m = pat.search(text)
+        if not m:
+            continue
+        captured = m.group(1).strip()
+        if "sovereign commander" in captured.lower():
+            continue
+        role = normalize_role(captured)
+        if role:
+            return role
+    return None
+
+
+def _scan_role_in_text(text: str) -> Optional[Tuple[str, str]]:
+    t1_role = _find_earliest_tier_match(text, _ROLE_TIER1_PATTERNS)
+    if t1_role:
+        return t1_role, "transcript_subagent_keyword"
+    t2_role = _find_earliest_tier_match(text, _ROLE_TIER2_PATTERNS)
+    if t2_role:
+        return t2_role, "transcript_subagent_alias"
+    return None
+
+
+def _collect_initial_system_contents(first_lines: List[str], max_steps: int = 4) -> List[str]:
+    bodies: List[str] = []
+    for line in first_lines[:max_steps]:
+        try:
+            obj = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(obj, dict) and obj.get("source") == "SYSTEM":
+            bodies.append(_extract_message_body(str(obj.get("content", ""))))
+    return bodies
+
+
+def _is_swarm_step(contents: List[str]) -> bool:
+    joined = "\n".join(contents)
+    if "[swarm]" in joined.lower():
+        return True
+    return bool(_SWARM_TAG_RE.search(joined))
+
+
+def _detect_swarm_role(contents: List[str]) -> Tuple[str, str]:
+    joined = "\n".join(contents)
+    for m in _SWARM_TAG_RE.finditer(joined):
+        tag_tok = m.group(1) or m.group(2) or ""
+        role = normalize_role(tag_tok)
+        if role:
+            return role, "transcript_swarm_keyword"
+    exp_role = _match_explicit_role(joined)
+    if exp_role:
+        return exp_role, "transcript_swarm_keyword"
+    scanned = _scan_role_in_text(joined)
+    if scanned:
+        return scanned[0], "transcript_swarm_keyword"
+    return "SUBAGENT_GENERIC", "transcript_subagent"
+
+
+def _detect_transcript_role(first_lines: List[str]) -> Tuple[str, str]:
+    first_obj = json.loads(first_lines[0])
+    first_content = str(first_obj.get("content", ""))
+    if first_obj.get("source") == "SYSTEM" and ("[Message]" in first_content or "[swarm]" in first_content.lower()):
+        sys_contents = _collect_initial_system_contents(first_lines, max_steps=4)
+        if _is_swarm_step(sys_contents):
+            return _detect_swarm_role(sys_contents)
+        body = _extract_message_body(first_content)
+        exp_role = _match_explicit_role(body)
+        if exp_role:
+            return exp_role, "transcript_subagent_explicit"
+        scanned = _scan_role_in_text(body)
+        if scanned:
+            return scanned
+        return "SUBAGENT_GENERIC", "transcript_subagent"
+
+    if first_obj.get("source") == "USER_EXPLICIT" or any("edge-orchestrator" in ln for ln in first_lines):
+        return "ORCHESTRATOR", "transcript_root"
+    return "UNKNOWN", "default"
+
+
 def detect_session_role(payload: dict) -> Tuple[str, str]:
     cid = payload.get("conversationId", "")
     active_data = load_active_stations()
@@ -731,29 +880,14 @@ def detect_session_role(payload: dict) -> Tuple[str, str]:
         tp = to_wsl_path(transcript_path)
         if tp.exists():
             try:
+                first_lines: List[str] = []
                 with open(tp, "r", encoding="utf-8", errors="ignore") as f:
-                    first_lines = []
                     for idx, line in enumerate(f):
                         if idx > 25:
                             break
                         first_lines.append(line)
-
                 if first_lines:
-                    first_obj = json.loads(first_lines[0])
-                    # If step 0 has sender, it is a subagent session!
-                    if first_obj.get("source") == "SYSTEM" and "[Message]" in first_obj.get("content", ""):
-                        msg_content = first_obj.get("content", "").lower()
-                        for canonical, aliases in CANONICAL_ROLES.items():
-                            if canonical.lower() in msg_content:
-                                return canonical, "transcript_subagent_keyword"
-                            for alias in aliases:
-                                if alias in msg_content:
-                                    return canonical, "transcript_subagent_alias"
-                        return "SUBAGENT_GENERIC", "transcript_subagent"
-
-                    # If step 0 is user input or contains edge-orchestrator
-                    if first_obj.get("source") == "USER_EXPLICIT" or any("edge-orchestrator" in l for l in first_lines):
-                        return "ORCHESTRATOR", "transcript_root"
+                    return _detect_transcript_role(first_lines)
             except Exception:
                 pass
 
@@ -1244,6 +1378,114 @@ def handle_pre_tool(payload: dict) -> dict:
     return {"decision": "allow"}
 
 
+def _extract_cid_from_payload(payload: dict) -> Optional[str]:
+    for resp_key in ("toolResponse", "result", "output"):
+        resp = payload.get(resp_key)
+        if not resp:
+            continue
+        if isinstance(resp, dict):
+            cid = resp.get("conversationId") or resp.get("conversation_id")
+            if cid:
+                return str(cid)
+        elif isinstance(resp, str):
+            try:
+                parsed = json.loads(resp)
+                if isinstance(parsed, dict):
+                    cid = parsed.get("conversationId") or parsed.get("conversation_id")
+                    if cid:
+                        return str(cid)
+            except Exception:
+                pass
+            match = _CID_FALLBACK_RE.search(resp)
+            if match:
+                return match.group(1)
+    return None
+
+
+def _is_valid_fallback_step(
+    step_obj: Dict[str, Any],
+    preceding_planner: Optional[Dict[str, Any]],
+    expected_tool: str,
+) -> bool:
+    if not isinstance(step_obj, dict):
+        return False
+    if step_obj.get("type") in _SKIP_FALLBACK_TYPES or step_obj.get("source") in _SKIP_FALLBACK_SOURCES:
+        return False
+    content = str(step_obj.get("content", ""))
+    low = content.lower()
+    if not content or "active subagent(s):" in low or "active subagent:" in low:
+        return False
+    if preceding_planner is None:
+        if _CREATED_SUBAGENT_RE.search(content):
+            return True
+        return expected_tool == "swarm" and bool(_SWARM_STATUS_ADDED_RE.search(content))
+    tool_calls = preceding_planner.get("tool_calls", [])
+    return any(isinstance(tc, dict) and tc.get("name") == expected_tool for tc in tool_calls)
+
+
+def _find_preceding_planner(tail: List[Dict[str, Any]], idx: int) -> Optional[Dict[str, Any]]:
+    for j in range(idx - 1, -1, -1):
+        if tail[j].get("type") == "PLANNER_RESPONSE":
+            return tail[j]
+    return None
+
+
+def _extract_cid_from_transcript_fallback(
+    transcript_path: str,
+    expected_tool: str = "invoke_subagent",
+) -> Optional[str]:
+    tp = to_wsl_path(transcript_path)
+    if not tp.exists():
+        return None
+    try:
+        with open(tp, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+    except Exception:
+        return None
+
+    tail: List[Dict[str, Any]] = []
+    for line in lines[-15:]:
+        try:
+            obj = json.loads(line)
+            if isinstance(obj, dict):
+                tail.append(obj)
+        except Exception:
+            continue
+
+    for idx in range(len(tail) - 1, -1, -1):
+        step_obj = tail[idx]
+        preceding = _find_preceding_planner(tail, idx)
+        if not _is_valid_fallback_step(step_obj, preceding, expected_tool):
+            continue
+        match = _CID_FALLBACK_RE.search(str(step_obj.get("content", "")))
+        if match:
+            return match.group(1)
+    return None
+
+
+def _fallback_would_overwrite(created_cid: str) -> bool:
+    active_data = load_active_stations()
+    stations = active_data.get_stations() if hasattr(active_data, "get_stations") else active_data
+    existing_info = stations.get(created_cid) if isinstance(stations, dict) else None
+    if not isinstance(existing_info, dict):
+        return False
+    existing_role = str(existing_info.get("canonicalRole") or existing_info.get("role") or "").strip().upper()
+    return existing_role not in _PROTECTED_FALLBACK_ROLES
+
+
+def _resolve_repo_candidate(payload: dict) -> Optional[Path]:
+    repo_candidate = payload.get("cwd") or payload.get("workspace")
+    if not repo_candidate:
+        try:
+            repo_candidate = os.getcwd()
+        except Exception:
+            repo_candidate = None
+    if not repo_candidate:
+        return None
+    rp = to_wsl_path(str(repo_candidate))
+    return rp if rp.exists() else None
+
+
 def handle_post_tool(payload: dict) -> dict:
     is_afk, _ = is_afk_session(payload)
     if is_afk:
@@ -1255,62 +1497,22 @@ def handle_post_tool(payload: dict) -> dict:
     parent_cid = payload.get("conversationId", "")
 
     if tool_name == "invoke_subagent":
-        created_cid = None
-        # Extract directly from toolResponse / result / output first
-        for resp_key in ("toolResponse", "result", "output"):
-            resp = payload.get(resp_key)
-            if not resp:
-                continue
-            if isinstance(resp, dict):
-                created_cid = resp.get("conversationId") or resp.get("conversation_id")
-                if created_cid:
-                    break
-            elif isinstance(resp, str):
-                try:
-                    parsed = json.loads(resp)
-                    if isinstance(parsed, dict):
-                        created_cid = parsed.get("conversationId") or parsed.get("conversation_id")
-                        if created_cid:
-                            break
-                except Exception:
-                    pass
-                match = re.search(r'\\?["\']conversationId\\?["\']\s*:\s*\\?["\']([a-f0-9\-]+)\\?["\']', resp)
-                if match:
-                    created_cid = match.group(1)
-                    break
-
-        # Fallback to transcript
+        created_cid = _extract_cid_from_payload(payload)
+        from_fallback = False
         transcript_path = payload.get("transcriptPath", "")
         if not created_cid and transcript_path:
-            tp = to_wsl_path(transcript_path)
-            if tp.exists():
-                try:
-                    with open(tp, "r", encoding="utf-8", errors="ignore") as f:
-                        lines = f.readlines()
-                    for line in reversed(lines[-15:]):
-                        match = re.search(r'\\?["\']conversationId\\?["\']\s*:\s*\\?["\']([a-f0-9\-]+)\\?["\']', line)
-                        if match:
-                            created_cid = match.group(1)
-                            break
-                except Exception:
-                    pass
+            created_cid = _extract_cid_from_transcript_fallback(transcript_path, expected_tool="invoke_subagent")
+            from_fallback = bool(created_cid)
 
         if created_cid:
+            if from_fallback and _fallback_would_overwrite(created_cid):
+                return {}
             requested_roles = extract_requested_roles(args)
             role = requested_roles[0] if requested_roles else "STATION_WORKER"
             register_station(created_cid, role, parent_cid)
-
-            # Sync with repository .edge/brigade.json if repo path can be determined
-            repo_candidate = payload.get("cwd") or payload.get("workspace")
-            if not repo_candidate:
-                try:
-                    repo_candidate = os.getcwd()
-                except Exception:
-                    repo_candidate = None
-            if repo_candidate:
-                rp = to_wsl_path(str(repo_candidate))
-                if rp.exists():
-                    sync_repo_brigade_station(rp, role, created_cid)
+            rp = _resolve_repo_candidate(payload)
+            if rp:
+                sync_repo_brigade_station(rp, role, created_cid)
 
     return {}
 

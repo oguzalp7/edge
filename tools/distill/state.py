@@ -10,9 +10,10 @@ import re
 import hashlib
 import tempfile
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Tuple
-from datetime import datetime, timezone
+from typing import List, Dict, Any, Optional, Tuple, Set
+from datetime import datetime, timezone, timedelta
 
+from tools.common.paths import to_wsl_path
 from tools.distill.models import DistillWatermarkState, CandidateRule
 
 TIMESTAMP_LINE_PATTERN = re.compile(r"^(?:Created|Completed)\s+At:\s*.*$", re.MULTILINE | re.IGNORECASE)
@@ -163,6 +164,122 @@ class DistillStateManager:
         return session_id in state.processed_sessions
 
 
+_INBOX_PRESERVATION_MARKERS = (
+    "Traceback",
+    "ERROR:",
+    "error TS",
+    "fatal:",
+    "FAILED",
+    "BLOCKED",
+    "AssertionError",
+    "SyntaxError",
+    "ModuleNotFoundError",
+    "Encountered error in tool execution",
+    "was forcefully killed",
+    "hung or required excessive polling",
+)
+_NONZERO_EXIT_RE = re.compile(r"Command exited with code\s+[1-9]\d*")
+_BENIGN_INBOX_TOOLS = frozenset({"read_file", "read_board", "edit_file", "manage_task", "invoke_subagent"})
+_BENIGN_INBOX_SNIPPETS = ("The tool's output was truncated", "Showing lines ", "Made 1 replacement")
+_PRUNE_REASONS = ("exit_zero", "benign_tool", "ephemeral", "duplicate", "resolved", "expired")
+
+
+def _compute_signal_fingerprint(kind: str, role_or_tool: str, summary: str) -> str:
+    clean_summary = _sanitize_signal_summary(summary)
+    return hashlib.sha256(f"{kind}:{role_or_tool}:{clean_summary}".lower().encode("utf-8")).hexdigest()[:16]
+
+
+def _normalize_scope_path(raw: str) -> str:
+    if not raw or not raw.strip():
+        return ""
+    return to_wsl_path(raw.strip()).replace("\\", "/").rstrip("/").lower()
+
+
+def _match_project_scope(source_project: str, target_project: str) -> bool:
+    proj = _normalize_scope_path(target_project)
+    if not proj:
+        return True
+    src = _normalize_scope_path(source_project)
+    if not src:
+        return False
+    return src == proj or src.startswith(proj + "/")
+
+
+def _is_expired_signal(created_at: str, max_age_days: int, now: datetime) -> bool:
+    if not created_at or not isinstance(created_at, str):
+        return False
+    ts_str = created_at.strip()
+    if ts_str.endswith("Z"):
+        ts_str = ts_str[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(ts_str)
+    except (ValueError, TypeError):
+        return False
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return (now - dt) > timedelta(days=max_age_days)
+
+
+def _has_preservation_marker(summary: str) -> bool:
+    if not summary:
+        return False
+    if _NONZERO_EXIT_RE.search(summary):
+        return True
+    return any(marker in summary for marker in _INBOX_PRESERVATION_MARKERS)
+
+
+def _is_benign_tool_record(kind: str, role_or_tool: str, summary: str) -> bool:
+    if kind != "HARNESS_FRICTION":
+        return False
+    if role_or_tool in _BENIGN_INBOX_TOOLS:
+        return True
+    return any(snip in summary for snip in _BENIGN_INBOX_SNIPPETS)
+
+
+def _classify_noise_reason(
+    kind: str,
+    role_or_tool: str,
+    summary: str,
+    drop_exit_zero: bool,
+    drop_benign_tools: bool,
+) -> Optional[str]:
+    if _has_preservation_marker(summary):
+        return None
+    if drop_exit_zero and kind == "HARNESS_FRICTION" and "Command exited with code 0" in summary:
+        return "exit_zero"
+    if drop_benign_tools and _is_benign_tool_record(kind, role_or_tool, summary):
+        return "benign_tool"
+    return None
+
+
+def _classify_prune_reason(
+    record: Dict[str, Any],
+    fp: str,
+    seen_fps: Set[str],
+    opts: Dict[str, Any],
+    now: datetime,
+) -> Optional[str]:
+    if opts["resolved_only"]:
+        return "resolved" if record.get("resolved", False) else None
+    source_proj = str(record.get("source_project", ""))
+    if opts["drop_ephemeral"] and _is_ephemeral_test_path(source_proj):
+        return "ephemeral"
+    kind = str(record.get("kind", "HARNESS_FRICTION"))
+    role_or_tool = str(record.get("role_or_tool", ""))
+    summary = str(record.get("summary", ""))
+    noise_reason = _classify_noise_reason(
+        kind, role_or_tool, summary, opts["drop_exit_zero"], opts["drop_benign_tools"]
+    )
+    if noise_reason:
+        return noise_reason
+    max_age = opts["max_age_days"]
+    if max_age is not None and _is_expired_signal(str(record.get("created_at", "")), max_age, now):
+        return "expired"
+    if opts["deduplicate"] and fp in seen_fps:
+        return "duplicate"
+    return None
+
+
 class FactoryInbox:
     """
     Silent inbox queueing harness signals during PROJECT_MODE runs,
@@ -188,8 +305,7 @@ class FactoryInbox:
         kind = str(raw.get("kind", "HARNESS_FRICTION"))
         role_or_tool = str(raw.get("role_or_tool", ""))
         summary = str(raw.get("summary", ""))
-        clean_summary = _sanitize_signal_summary(summary)
-        fp = hashlib.sha256(f"{kind}:{role_or_tool}:{clean_summary}".lower().encode("utf-8")).hexdigest()[:16]
+        fp = _compute_signal_fingerprint(kind, role_or_tool, summary)
         sig_id = raw.get("signal_id") or f"SIG-INBOX-{fp[:8].upper()}"
         created_at = raw.get("created_at") or datetime.now(timezone.utc).isoformat()
         resolved = bool(raw.get("resolved", False))
@@ -236,6 +352,61 @@ class FactoryInbox:
         for s in signals:
             s["resolved"] = True
         _save_json_atomic(self.inbox_file, {"signals": signals})
+
+    def prune(
+        self,
+        drop_exit_zero: bool = True,
+        drop_benign_tools: bool = True,
+        drop_ephemeral: bool = True,
+        deduplicate: bool = True,
+        project: Optional[str] = None,
+        resolved_only: bool = False,
+        max_age_days: Optional[int] = None,
+        dry_run: bool = False,
+    ) -> Dict[str, Any]:
+        records = self.load_signals()
+        counts: Dict[str, int] = {reason: 0 for reason in _PRUNE_REASONS}
+        opts: Dict[str, Any] = {
+            "drop_exit_zero": drop_exit_zero,
+            "drop_benign_tools": drop_benign_tools,
+            "drop_ephemeral": drop_ephemeral,
+            "deduplicate": deduplicate,
+            "resolved_only": resolved_only,
+            "max_age_days": max_age_days,
+        }
+        now = datetime.now(timezone.utc)
+        kept: List[Dict[str, Any]] = []
+        seen_fps: Set[str] = set()
+
+        for record in records:
+            kind = str(record.get("kind", "HARNESS_FRICTION"))
+            role_or_tool = str(record.get("role_or_tool", ""))
+            summary = str(record.get("summary", ""))
+            fp = _compute_signal_fingerprint(kind, role_or_tool, summary)
+
+            if project is not None and not _match_project_scope(str(record.get("source_project", "")), project):
+                kept.append(record)
+                seen_fps.add(fp)
+                continue
+
+            reason = _classify_prune_reason(record, fp, seen_fps, opts, now)
+            if reason:
+                counts[reason] += 1
+            else:
+                kept.append(record)
+                seen_fps.add(fp)
+
+        removed = len(records) - len(kept)
+        if not dry_run and removed > 0:
+            _save_json_atomic(self.inbox_file, {"signals": kept})
+
+        return {
+            "before": len(records),
+            "after": len(kept),
+            "removed": removed,
+            "removed_by_reason": counts,
+            "dry_run": dry_run,
+        }
 
 
 class LexicalStackGate:

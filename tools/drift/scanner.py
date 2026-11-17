@@ -348,7 +348,7 @@ NO_DRIFT
 - [ANCHOR_DRIFT] Description in <file>
 - [DOC_OUTDATED] Description in <file>
 """
-        cmd = ["agy", "-p", "--mode", "plan", "--model", model, prompt]
+        cmd = ["agy", "--mode", "plan", "--model", model, "-p", prompt]
         code, stdout, stderr = run_command(cmd, cwd=norm_repo, timeout=timeout)
 
         if code != 0:
@@ -475,7 +475,7 @@ tracked_paths:
 ## Intentional Anchors & Deferred Scope
 (Record intentional technical debt, future phase boundaries, and deliberate seams)
 """
-    cmd = ["agy", "-p", "--mode", "plan", "--model", model, prompt]
+    cmd = ["agy", "--mode", "plan", "--model", model, "-p", prompt]
     code, stdout, stderr = run_command(cmd, cwd=norm_repo, timeout=timeout)
 
     if code != 0:

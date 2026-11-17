@@ -301,6 +301,57 @@ def cmd_intents(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_inbox_list(args: argparse.Namespace, inbox: FactoryInbox) -> int:
+    pending_only = getattr(args, "pending_only", False)
+    signals = inbox.load_pending() if pending_only else inbox.load_signals()
+    fmt = getattr(args, "format", "human")
+    if fmt == "json":
+        print(json.dumps({"signals": signals}, indent=2))
+        return 0
+    if not signals:
+        print("Factory inbox is empty.")
+        return 0
+    print(f"Factory inbox ({len(signals)} signal(s)):")
+    for s in signals:
+        status = "resolved" if s.get("resolved") else "pending"
+        print(f"- [{s.get('signal_id', '')}] ({status}, {s.get('role_or_tool', '')}) {str(s.get('summary', '')).splitlines()[0][:80]}")
+    return 0
+
+
+def _cmd_inbox_prune(args: argparse.Namespace, inbox: FactoryInbox) -> int:
+    res = inbox.prune(
+        drop_exit_zero=not getattr(args, "no_drop_exit_zero", False),
+        drop_benign_tools=not getattr(args, "no_drop_benign_tools", False),
+        resolved_only=getattr(args, "resolved_only", False),
+        max_age_days=getattr(args, "max_age_days", None),
+        project=getattr(args, "project", None),
+        dry_run=getattr(args, "dry_run", False),
+    )
+    fmt = getattr(args, "format", "human")
+    if fmt == "json":
+        print(json.dumps(res, indent=2))
+    else:
+        mode_tag = "[DRY-RUN] " if res["dry_run"] else ""
+        print(f"{mode_tag}Pruned {res['removed']} signal(s) ({res['before']} -> {res['after']}): {res['removed_by_reason']}")
+    return 0
+
+
+def _cmd_inbox_clear(inbox: FactoryInbox) -> int:
+    inbox.clear()
+    print("Cleared factory inbox")
+    return 0
+
+
+def cmd_inbox(args: argparse.Namespace) -> int:
+    action = getattr(args, "action", None) or "list"
+    inbox = FactoryInbox()
+    if action == "prune":
+        return _cmd_inbox_prune(args, inbox)
+    if action == "clear":
+        return _cmd_inbox_clear(inbox)
+    return _cmd_inbox_list(args, inbox)
+
+
 DISPATCH_MAP = {
     "harvest": cmd_harvest,
     "candidates": cmd_candidates,
@@ -309,6 +360,7 @@ DISPATCH_MAP = {
     "check-budget": cmd_check_budget,
     "sessions": cmd_sessions,
     "intents": cmd_intents,
+    "inbox": cmd_inbox,
 }
 
 
@@ -374,6 +426,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_intents.add_argument("--brain-roots", nargs="+", help="Brain root paths")
     p_intents.add_argument("--format", choices=["human", "toon"], default="human", help="Output format")
     p_intents.add_argument("--output", help="Output file")
+
+    # inbox
+    p_inbox = subparsers.add_parser("inbox", help="Inspect, prune, or clear factory inbox")
+    p_inbox.add_argument("action", nargs="?", default="list", choices=["list", "prune", "clear"], help="Action")
+    p_inbox.add_argument("--pending-only", action="store_true", help="List only unresolved signals")
+    p_inbox.add_argument("--dry-run", action="store_true", help="Preview prune counts without modifying disk")
+    p_inbox.add_argument("--no-drop-exit-zero", action="store_true", help="Keep exit=0 harness signals")
+    p_inbox.add_argument("--no-drop-benign-tools", action="store_true", help="Keep benign tool signals")
+    p_inbox.add_argument("--resolved-only", action="store_true", help="Only prune already-resolved signals")
+    p_inbox.add_argument("--max-age-days", type=int, default=None, help="Drop signals older than N days")
+    p_inbox.add_argument("--project", default=None, help="Scope prune to project path")
+    p_inbox.add_argument("--format", choices=["human", "json"], default="human", help="Output format")
 
     return parser
 

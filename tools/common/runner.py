@@ -4,11 +4,18 @@ Handles transparent dispatching between Windows host and WSL Linux environment.
 """
 
 import os
+import shlex
 import subprocess
 from pathlib import Path
 from typing import List, Tuple, Optional, Union
 
 from .paths import is_wsl_path, to_wsl_path, WSL_DISTRO
+
+
+def _build_wsl_bash_command(cmd: Union[List[str], str], wsl_cwd: str) -> str:
+    """Builds a safely shlex-quoted bash command anchored to wsl_cwd."""
+    inner_cmd = shlex.join(cmd) if isinstance(cmd, list) else cmd
+    return f"cd {shlex.quote(wsl_cwd)} && {inner_cmd}"
 
 
 def run_command(
@@ -26,13 +33,7 @@ def run_command(
 
     if needs_wsl:
         wsl_cwd = to_wsl_path(work_dir)
-        if isinstance(cmd, list):
-            # Escape inner single quotes if needed
-            inner_cmd = " ".join(cmd)
-        else:
-            inner_cmd = cmd
-
-        full_bash = f"cd {wsl_cwd} && {inner_cmd}"
+        full_bash = _build_wsl_bash_command(cmd, wsl_cwd)
         exec_cmd = ["wsl", "-d", WSL_DISTRO, "bash", "-c", full_bash]
         exec_cwd = None
     else:

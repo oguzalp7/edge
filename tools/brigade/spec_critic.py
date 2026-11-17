@@ -182,11 +182,11 @@ def run_spec_critique(
     model_used = primary_model
     fallback_triggered = False
 
-    cmd = ["agy", "-p", "--mode", "plan", "--model", primary_model, prompt]
+    cmd = ["agy", "--mode", "plan", "--model", primary_model, "-p", prompt]
     code, out, err = run_command(cmd, cwd=norm_repo, timeout=timeout)
 
     if _should_fallback(code, out, err) and fallback_model and fallback_model != primary_model:
-        fallback_cmd = ["agy", "-p", "--mode", "plan", "--model", fallback_model, prompt]
+        fallback_cmd = ["agy", "--mode", "plan", "--model", fallback_model, "-p", prompt]
         code, out, err = run_command(fallback_cmd, cwd=norm_repo, timeout=timeout)
         fallback_triggered = True
         model_used = fallback_model
