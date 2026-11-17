@@ -17,7 +17,11 @@ from datetime import datetime, timezone
 import hashlib
 
 from tools.common.paths import to_wsl_path
-from tools.distill.state import FactoryInbox, collect_budget_targets
+from tools.distill.state import (
+    BENIGN_WSL_RELAY_BANNER_RE,
+    FactoryInbox,
+    collect_budget_targets,
+)
 from tools.distill.models import (
     FrictionDigest,
     StationEscapeSignal,
@@ -105,6 +109,7 @@ def _gather_subsequent_results(steps: List[Dict[str, Any]], start_idx: int) -> s
 
 
 def _has_explicit_runtime_error(text: str) -> bool:
+    cleaned_text = BENIGN_WSL_RELAY_BANNER_RE.sub("", text)
     markers = [
         "Encountered error in tool execution",
         "Traceback (most recent call last)",
@@ -112,11 +117,11 @@ def _has_explicit_runtime_error(text: str) -> bool:
         "SyntaxError",
         "ModuleNotFoundError",
     ]
-    if any(m in text for m in markers):
+    if any(m in cleaned_text for m in markers):
         return True
-    if re.search(r"\berror TS\d+\b", text, re.IGNORECASE):
+    if re.search(r"\berror TS\d+\b", cleaned_text, re.IGNORECASE):
         return True
-    return bool(re.search(r"WSL\s*\(\s*\d+\s*-\s*Relay\s*\)\s*ERROR:", text, re.IGNORECASE))
+    return bool(re.search(r"WSL\s*\(\s*\d+\s*-\s*Relay\s*\)\s*ERROR:", cleaned_text, re.IGNORECASE))
 
 
 def _detect_read_search_tool_error(result_text: str) -> Tuple[bool, Optional[int]]:

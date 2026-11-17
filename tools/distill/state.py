@@ -179,6 +179,10 @@ _INBOX_PRESERVATION_MARKERS = (
     "hung or required excessive polling",
 )
 _NONZERO_EXIT_RE = re.compile(r"Command exited with code\s+[1-9]\d*")
+BENIGN_WSL_RELAY_BANNER_RE = re.compile(
+    r"(?:<3>)?WSL[ \t]*\([ \t]*\d+[ \t]*-[ \t]*Relay[ \t]*\)[ \t]*ERROR:[ \t]*CreateProcessParseCommon[^\r\n]*",
+    re.IGNORECASE,
+)
 _BENIGN_INBOX_TOOLS = frozenset({"read_file", "read_board", "edit_file", "manage_task", "invoke_subagent"})
 _BENIGN_INBOX_SNIPPETS = ("The tool's output was truncated", "Showing lines ", "Made 1 replacement")
 _PRUNE_REASONS = ("exit_zero", "benign_tool", "ephemeral", "duplicate", "resolved", "expired")
@@ -225,7 +229,8 @@ def _has_preservation_marker(summary: str) -> bool:
         return False
     if _NONZERO_EXIT_RE.search(summary):
         return True
-    return any(marker in summary for marker in _INBOX_PRESERVATION_MARKERS)
+    cleaned = BENIGN_WSL_RELAY_BANNER_RE.sub("", summary)
+    return any(marker in cleaned for marker in _INBOX_PRESERVATION_MARKERS)
 
 
 def _is_benign_tool_record(kind: str, role_or_tool: str, summary: str) -> bool:
