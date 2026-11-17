@@ -2045,5 +2045,780 @@ class TestDistillHarvesterBackgroundHangTelemetry(unittest.TestCase):
         self.assertNotIn("SIG-2", proj_ids)
 
 
+class TestDistillNavigationModelsAndToon(unittest.TestCase):
+    """RED tests for Slice 1 Pillars 1, 2, 4 models & TOON rendering contracts."""
+
+    def test_navigation_friction_signal_roundtrip_and_toon(self):
+        from tools.distill.models import NavigationFrictionSignal
+
+        sig = NavigationFrictionSignal(
+            signal_type="EXPLORATION_BURST",
+            session_id="sess-nav-12345678",
+            role="coder",
+            step_index=9,
+            file_paths=["src/a.py", "src/b.py"],
+            count=8,
+            metric_value=8,
+            summary="8 reads before first edit",
+        )
+        d = sig.to_dict()
+        self.assertEqual(d["signal_type"], "EXPLORATION_BURST")
+        self.assertEqual(d["role"], "coder")
+        self.assertEqual(d["count"], 8)
+
+        restored = NavigationFrictionSignal.from_dict({
+            "signal_type": "REDUNDANT_READ",
+            "session_id": "sess-min-01",
+        })
+        self.assertEqual(restored.role, "unknown")
+        self.assertEqual(restored.file_paths, [])
+        self.assertEqual(restored.metric_value, 0)
+
+        toon = sig.to_toon()
+        self.assertNotIn("\n", toon)
+        self.assertIn("[NAV:EXPLORATION_BURST]", toon)
+        self.assertIn("role=coder", toon)
+        self.assertIn("step=9", toon)
+        self.assertIn("count=8", toon)
+        self.assertIn("metric=8", toon)
+
+    def test_guardrail_gap_signal_roundtrip_and_toon(self):
+        from tools.distill.models import GuardrailGapSignal
+
+        gap = GuardrailGapSignal(
+            gap_type="UNWIRED_GUARDRAIL",
+            source_file="package.json",
+            script_or_check="typecheck",
+            summary="Script 'typecheck' not wired into CI or pre-commit hooks",
+        )
+        d = gap.to_dict()
+        restored = GuardrailGapSignal.from_dict(d)
+        self.assertEqual(restored.gap_type, "UNWIRED_GUARDRAIL")
+        self.assertEqual(restored.script_or_check, "typecheck")
+        self.assertEqual(
+            gap.to_toon(),
+            "- [GUARDRAIL:UNWIRED_GUARDRAIL] package.json (typecheck): Script 'typecheck' not wired into CI or pre-commit hooks",
+        )
+
+    def test_rule_inventory_item_roundtrip_and_toon(self):
+        from tools.distill.models import RuleInventoryItem
+
+        item = RuleInventoryItem(
+            file_path=".edge/stations/coder.md",
+            line_count=22,
+            budget_limit=40,
+            citation_count=3,
+            status="OK",
+        )
+        d = item.to_dict()
+        restored = RuleInventoryItem.from_dict(d)
+        self.assertEqual(restored.file_path, ".edge/stations/coder.md")
+        self.assertEqual(restored.budget_limit, 40)
+        self.assertEqual(restored.status, "OK")
+        toon = item.to_toon()
+        self.assertIn(".edge/stations/coder.md", toon)
+        self.assertIn("22", toon)
+        self.assertIn("40", toon)
+        self.assertIn("OK", toon)
+
+    def test_friction_digest_new_fields_legacy_compat_and_fair_toon_budget(self):
+        from tools.distill.models import (
+            FrictionDigest,
+            NavigationFrictionSignal,
+            GuardrailGapSignal,
+            RuleInventoryItem,
+            ToolFrictionSignal,
+            StationEscapeSignal,
+            RepeatedEscalation,
+        )
+
+        # Legacy payload omitting new Slice 1 fields must deserialize cleanly
+        legacy_restored = FrictionDigest.from_dict({
+            "digest_id": "DIG-LEG",
+            "project_path": "/home/oguz/app",
+            "project_name": "app",
+            "generated_at": "2026-11-17T00:00:00Z",
+        })
+        self.assertEqual(legacy_restored.navigation_frictions, [])
+        self.assertEqual(legacy_restored.guardrail_gaps, [])
+        self.assertEqual(legacy_restored.rule_inventory, [])
+
+        # Massive distinct tool_frictions + station_escapes must NOT starve new sections
+        distinct_frictions = [
+            ToolFrictionSignal(
+                signal_id=f"TF-{i}",
+                tool_name="run_command",
+                command_or_args=f"npm run check-module-{i:03d} --strict",
+                error_output=f"Error TS2304 in module_{i:03d}.ts: cannot find name Foo{i}",
+                conversation_id=f"cid-{i}",
+                step_index=i,
+                timestamp="2026-11-17T00:00:00Z",
+                exit_code=1,
+            )
+            for i in range(60)
+        ]
+        distinct_escapes = [
+            StationEscapeSignal(
+                signal_id=f"ESC-{i}",
+                station_role="EXAMINER",
+                escape_type="ESCAPED_DEFECT",
+                description=f"Defect escape {i} with long diagnostic explanation " + ("detail " * 8),
+                evidence="gate failed",
+                timestamp="2026-11-17T00:00:00Z",
+                conversation_id=f"cid-esc-{i}",
+                step_index=i,
+            )
+            for i in range(30)
+        ]
+        escalations = [
+            RepeatedEscalation(
+                escalation_id="REP-1",
+                category="USER_INSTRUCTION_REPETITION",
+                pattern_key="user corrective directive for coder",
+                occurrence_count=3,
+                occurrences=[{"cid": "c1", "step_index": 1, "text": "Never modify RED tests"}],
+                rule_recommendation="Coder Invariant: Never modify RED tests",
+                target_role="coder",
+            )
+        ]
+        digest = FrictionDigest(
+            digest_id="DIG-FAIR-01",
+            project_path="/home/oguz/app",
+            project_name="app",
+            generated_at="2026-11-17T00:00:00Z",
+            sessions_analyzed=["cid-1", "cid-2"],
+            station_escapes=distinct_escapes,
+            tool_frictions=distinct_frictions,
+            repeated_escalations=escalations,
+            total_tokens_estimate=12500,
+            navigation_frictions=[
+                NavigationFrictionSignal(
+                    signal_type="EXPLORATION_BURST",
+                    session_id="cid-1",
+                    role="coder",
+                    step_index=10,
+                    file_paths=["src/a.ts"],
+                    count=9,
+                    metric_value=9,
+                    summary="9 pre-edit reads",
+                )
+            ],
+            guardrail_gaps=[
+                GuardrailGapSignal(
+                    gap_type="UNWIRED_GUARDRAIL",
+                    source_file="package.json",
+                    script_or_check="typecheck",
+                    summary="typecheck not in CI",
+                )
+            ],
+            rule_inventory=[
+                RuleInventoryItem(
+                    file_path=".edge/stations/coder.md",
+                    line_count=18,
+                    budget_limit=40,
+                    citation_count=0,
+                    status="ZERO_CITATIONS",
+                )
+            ],
+        )
+
+        roundtrip = FrictionDigest.from_dict(digest.to_dict())
+        self.assertEqual(len(roundtrip.navigation_frictions), 1)
+        self.assertEqual(len(roundtrip.guardrail_gaps), 1)
+        self.assertEqual(len(roundtrip.rule_inventory), 1)
+
+        toon = digest.to_toon(max_tokens=2000)
+        self.assertLessEqual(len(toon), 8000)
+        self.assertIn("user corrective directive for coder", toon)
+        self.assertIn("## Navigation & Tool Economy", toon)
+        self.assertIn("## Guardrail Gaps", toon)
+        self.assertIn("## Rule Inventory", toon)
+        self.assertTrue("12500" in toon or "12,500" in toon, "Expected non-zero total_tokens_estimate in TOON")
+        self.assertIn("EXPLORATION_BURST", toon)
+        self.assertIn("typecheck", toon)
+        self.assertIn(".edge/stations/coder.md", toon)
+
+    def test_repeated_escalation_to_toon_quote_snippets(self):
+        from tools.distill.models import RepeatedEscalation
+
+        long_quote = "Never\nmodify   existing\tRED tests " + ("x" * 100)
+        esc = RepeatedEscalation(
+            escalation_id="ESC-CODER-001",
+            category="USER_INSTRUCTION_REPETITION",
+            pattern_key="user corrective directive for coder",
+            occurrence_count=3,
+            occurrences=[
+                {"cid": "c1", "step_index": 1, "text": long_quote},
+                {"cid": "c2", "step_index": 2, "text": "Stop deleting assertions"},
+                {"cid": "c3", "step_index": 3, "text": "Third quote should not overflow"},
+            ],
+            rule_recommendation="Coder Invariant: Adhere to TDD boundaries",
+            target_role="coder",
+        )
+        toon = esc.to_toon()
+        self.assertIn("count=3", toon)
+        self.assertIn("target=coder", toon)
+        self.assertIn("user corrective directive for coder", toon)
+        self.assertIn("Coder Invariant: Adhere to TDD boundaries", toon)
+        self.assertIn("| quotes:", toon)
+        self.assertIn("Never modify existing RED tests", toon)
+        self.assertIn("Stop deleting assertions", toon)
+        self.assertNotIn("Third quote should not overflow", toon)
+        self.assertNotIn("x" * 81, toon)
+
+    def test_tool_friction_log_tail_last_meaningful_error_line(self):
+        from tools.distill.models import ToolFrictionSignal, _render_tool_frictions_toon
+
+        sig = ToolFrictionSignal(
+            signal_id="SIG-KILL-1",
+            tool_name="manage_task",
+            command_or_args="manage_task kill TaskId=task-42",
+            error_output=(
+                "Task task-42 was forcefully killed by agent. Log tail:\n"
+                "2026-11-17T01:00:00Z INFO Booting test worker\n"
+                "Running pytest suite...\n"
+                "\n"
+                "AssertionError: expected status 200 got 500\n"
+                "   \n"
+            ),
+            conversation_id="cid-kill-1",
+            step_index=7,
+            timestamp="2026-11-17T01:00:00Z",
+            exit_code=-9,
+            error_type="TASK_KILLED",
+        )
+        sig_toon = sig.to_toon()
+        sec_toon = _render_tool_frictions_toon([sig]) or ""
+        self.assertIn("AssertionError: expected status 200 got 500", sig_toon)
+        self.assertIn("AssertionError: expected status 200 got 500", sec_toon)
+
+    def test_render_insights_toon_dead_ends_and_guard_failures(self):
+        from tools.distill.models import _render_insights_toon
+
+        insights = [
+            {
+                "kind": "dead_end",
+                "title": "Direct SQL in action",
+                "reason": "Caused pool deadlock",
+                "prohibited_rule": "Use repository.ts",
+                "dead_end": "Direct SQL in action",
+            },
+            {
+                "dead_end": "Legacy string approach without kind",
+                "severity": "HIGH",
+            },
+            {
+                "kind": "guard_failure",
+                "state": "VERIFY",
+                "message": "pytest failed with exit 1",
+                "details": {"failed": 2, "file": "tests/test_app.py"},
+            },
+        ]
+        rendered = _render_insights_toon(insights) or ""
+        self.assertNotIn("- [INSIGHT] \n", rendered)
+        self.assertFalse(rendered.rstrip().endswith("- [INSIGHT]"))
+        self.assertIn("[DEAD_END]", rendered)
+        self.assertIn("Direct SQL in action", rendered)
+        self.assertIn("Caused pool deadlock", rendered)
+        self.assertIn("Use repository.ts", rendered)
+        self.assertIn("Legacy string approach without kind", rendered)
+        self.assertIn("[GUARD_FAIL]", rendered)
+        self.assertIn("VERIFY", rendered)
+        self.assertIn("pytest failed with exit 1", rendered)
+
+
+class TestDistillNavigationTelemetryHarvesters(unittest.TestCase):
+    """RED tests for Slice 1 Pillar 1 deterministic navigation & token harvesters."""
+
+    def test_exploration_burst_pre_edit_threshold_8_vs_7(self):
+        from tools.distill.harvester import _extract_navigation_frictions_from_steps
+
+        def _make_reads(n: int) -> List[Dict[str, Any]]:
+            return [
+                {"step_index": i, "tool_calls": [{"name": "read_file", "args": {"Path": f"src/file_{i}.py"}}]}
+                for i in range(n)
+            ]
+
+        steps_7 = _make_reads(7) + [
+            {"step_index": 7, "tool_calls": [{"name": "edit_file", "args": {"Path": "src/file_0.py"}}]}
+        ]
+        bursts_7 = [s for s in _extract_navigation_frictions_from_steps("cid-7", steps_7, role="coder") if s.signal_type == "EXPLORATION_BURST"]
+        self.assertEqual(bursts_7, [])
+
+        steps_8 = _make_reads(8) + [
+            {"step_index": 8, "tool_calls": [{"name": "edit_file", "args": {"Path": "src/file_0.py"}}]}
+        ]
+        bursts_8 = [s for s in _extract_navigation_frictions_from_steps("cid-8", steps_8, role="coder") if s.signal_type == "EXPLORATION_BURST"]
+        self.assertEqual(len(bursts_8), 1)
+        self.assertEqual(bursts_8[0].count, 8)
+        self.assertEqual(bursts_8[0].metric_value, 8)
+        self.assertEqual(bursts_8[0].step_index, 8)
+        self.assertEqual(bursts_8[0].role, "coder")
+        self.assertLessEqual(len(bursts_8[0].file_paths), 5)
+
+    def test_exploration_burst_zero_edit_threshold_10_vs_9(self):
+        from tools.distill.harvester import _extract_navigation_frictions_from_steps
+
+        steps_9 = [
+            {"step_index": i, "tool_calls": [{"name": "view_file", "args": {"AbsolutePath": f"src/m{i}.py"}}]}
+            for i in range(9)
+        ]
+        bursts_9 = [s for s in _extract_navigation_frictions_from_steps("cid-z9", steps_9) if s.signal_type == "EXPLORATION_BURST"]
+        self.assertEqual(bursts_9, [])
+
+        steps_10 = [
+            {"step_index": i, "tool_calls": [{"name": "view_file", "args": {"AbsolutePath": f"src/m{i}.py"}}]}
+            for i in range(10)
+        ]
+        bursts_10 = [s for s in _extract_navigation_frictions_from_steps("cid-z10", steps_10, role="researcher") if s.signal_type == "EXPLORATION_BURST"]
+        self.assertEqual(len(bursts_10), 1)
+        self.assertEqual(bursts_10[0].count, 10)
+        self.assertEqual(bursts_10[0].metric_value, 10)
+        self.assertEqual(bursts_10[0].step_index, 9)
+        self.assertEqual(bursts_10[0].role, "researcher")
+
+    def test_exploration_burst_run_command_anchored_vs_flag_argument_negative(self):
+        from tools.distill.harvester import _extract_navigation_frictions_from_steps
+
+        # 6 real reads + 3 non-search commands whose arguments contain 'grep'/'find' -> total 6 (< 8)
+        steps_neg = [
+            {"step_index": i, "tool_calls": [{"name": "read_file", "args": {"Path": f"src/f{i}.py"}}]}
+            for i in range(6)
+        ] + [
+            {"step_index": 6, "tool_calls": [{"name": "run_command", "args": {"CommandLine": "pytest -k grep"}}]},
+            {"step_index": 7, "tool_calls": [{"name": "run_command", "args": {"CommandLine": 'git commit -m "find bug"'}}]},
+            {"step_index": 8, "tool_calls": [{"name": "run_command", "args": {"CommandLine": "uv run pytest -q tests/test_find.py"}}]},
+            {"step_index": 9, "tool_calls": [{"name": "edit_file", "args": {"Path": "src/f0.py"}}]},
+        ]
+        bursts_neg = [s for s in _extract_navigation_frictions_from_steps("cid-cmd-neg", steps_neg) if s.signal_type == "EXPLORATION_BURST"]
+        self.assertEqual(bursts_neg, [], "pytest -k grep and commit messages must NOT count as search calls")
+
+        # 5 reads + 3 anchored WSL/chained search commands -> 8 (>= 8)
+        steps_pos = [
+            {"step_index": i, "tool_calls": [{"name": "read_file", "args": {"Path": f"src/f{i}.py"}}]}
+            for i in range(5)
+        ] + [
+            {"step_index": 5, "tool_calls": [{"name": "run_command", "args": {"CommandLine": "wsl --cd /home/oguz/app rg foo src/"}}]},
+            {"step_index": 6, "tool_calls": [{"name": "run_command", "args": {"CommandLine": "cd /home/oguz/app && git grep bar"}}]},
+            {"step_index": 7, "tool_calls": [{"name": "run_command", "args": {"CommandLine": "wsl bash -c 'find src -name *.py'"}}]},
+            {"step_index": 8, "tool_calls": [{"name": "write_file", "args": {"Path": "src/new.py"}}]},
+        ]
+        bursts_pos = [s for s in _extract_navigation_frictions_from_steps("cid-cmd-pos", steps_pos) if s.signal_type == "EXPLORATION_BURST"]
+        self.assertEqual(len(bursts_pos), 1)
+        self.assertEqual(bursts_pos[0].count, 8)
+
+    def test_redundant_read_same_tuple_vs_chunked_ranges_and_post_edit_reset(self):
+        from tools.distill.harvester import _extract_navigation_frictions_from_steps
+
+        # 1. Chunked reads of distinct line ranges MUST NOT emit REDUNDANT_READ
+        chunked_steps = [
+            {"step_index": 0, "tool_calls": [{"name": "read_file", "args": {"Path": "src/big.py", "StartLine": 1, "EndLine": 100}}]},
+            {"step_index": 1, "tool_calls": [{"name": "read_file", "args": {"Path": "src/big.py", "StartLine": 101, "EndLine": 200}}]},
+            {"step_index": 2, "tool_calls": [{"name": "read_file", "args": {"Path": "src/big.py", "StartLine": 201, "EndLine": 300}}]},
+        ]
+        self.assertEqual(
+            [s for s in _extract_navigation_frictions_from_steps("cid-chunk", chunked_steps) if s.signal_type == "REDUNDANT_READ"],
+            [],
+        )
+
+        # 2. Read -> edit_file -> single post-edit read resets streak -> MUST NOT emit REDUNDANT_READ
+        post_edit_steps = [
+            {"step_index": 0, "tool_calls": [{"name": "read_file", "args": {"Path": "src/target.py", "StartLine": 1, "EndLine": 50}}]},
+            {"step_index": 1, "tool_calls": [{"name": "edit_file", "args": {"Path": "src/target.py", "Target": "a", "Replacement": "b"}}]},
+            {"step_index": 2, "tool_calls": [{"name": "read_file", "args": {"Path": "src/target.py", "StartLine": 1, "EndLine": 50}}]},
+        ]
+        self.assertEqual(
+            [s for s in _extract_navigation_frictions_from_steps("cid-post-edit", post_edit_steps) if s.signal_type == "REDUNDANT_READ"],
+            [],
+        )
+
+        # 3. Same (norm_path, start, end) read >= 2 without edit emits REDUNDANT_READ
+        redundant_steps = [
+            {"step_index": 0, "tool_calls": [{"name": "read_file", "args": {"Path": "src\\dup.py", "StartLine": 10, "EndLine": 40}}]},
+            {"step_index": 3, "tool_calls": [{"name": "read_file", "args": {"Path": "src/dup.py", "StartLine": 10, "EndLine": 40}}]},
+        ]
+        red_sigs = [s for s in _extract_navigation_frictions_from_steps("cid-dup", redundant_steps) if s.signal_type == "REDUNDANT_READ"]
+        self.assertEqual(len(red_sigs), 1)
+        self.assertEqual(red_sigs[0].count, 2)
+        self.assertEqual(red_sigs[0].metric_value, 2)
+        self.assertEqual(red_sigs[0].file_paths, ["src/dup.py"])
+        self.assertEqual(red_sigs[0].step_index, 3)
+
+    def test_empty_search_chain_consecutive_turns_vs_single_and_mixed(self):
+        from tools.distill.harvester import _extract_navigation_frictions_from_steps
+
+        # 1. Single empty search turn followed by matching turn -> NO signal
+        single_empty = [
+            {"step_index": 0, "type": "PLANNER_RESPONSE", "tool_calls": [{"name": "grep_search", "args": {"Query": "foo"}}]},
+            {"step_index": 1, "type": "GENERIC", "content": "Created At: 2026-11-17T00:00:00Z\nNo results found\n"},
+            {"step_index": 2, "type": "PLANNER_RESPONSE", "tool_calls": [{"name": "grep_search", "args": {"Query": "bar"}}]},
+            {"step_index": 3, "type": "GENERIC", "content": "src/bar.py:12: def bar():\n"},
+        ]
+        self.assertEqual(
+            [s for s in _extract_navigation_frictions_from_steps("cid-es-1", single_empty) if s.signal_type == "EMPTY_SEARCH_CHAIN"],
+            [],
+        )
+
+        # 2. Mixed parallel turn (1 empty + 1 matching) resets streak -> NO signal
+        mixed_parallel = [
+            {"step_index": 0, "type": "PLANNER_RESPONSE", "tool_calls": [
+                {"name": "grep_search", "args": {"Query": "nope"}},
+                {"name": "grep_search", "args": {"Query": "found"}},
+            ]},
+            {"step_index": 1, "type": "TOOL_RESULT", "content": "0 matches"},
+            {"step_index": 2, "type": "TOOL_RESULT", "content": "src/found.py:5: found = True"},
+            {"step_index": 3, "type": "PLANNER_RESPONSE", "tool_calls": [{"name": "find_by_name", "args": {"Pattern": "*missing*"}}]},
+            {"step_index": 4, "type": "TOOL_RESULT", "content": "0 files"},
+        ]
+        self.assertEqual(
+            [s for s in _extract_navigation_frictions_from_steps("cid-es-mix", mixed_parallel) if s.signal_type == "EMPTY_SEARCH_CHAIN"],
+            [],
+        )
+
+        # 3. 3 consecutive empty search turns -> emits 1 EMPTY_SEARCH_CHAIN
+        chain_steps = [
+            {"step_index": 0, "type": "PLANNER_RESPONSE", "tool_calls": [{"name": "grep_search", "args": {"Query": "alpha"}}]},
+            {"step_index": 1, "type": "GENERIC", "content": "Created At: 2026-11-17T00:00:00Z\nNo matches found\n"},
+            {"step_index": 2, "type": "PLANNER_RESPONSE", "tool_calls": [{"name": "run_command", "args": {"CommandLine": "rg beta src/"}}]},
+            {"step_index": 3, "type": "GENERIC", "content": "Command exited with code 1.\n"},
+            {"step_index": 4, "type": "PLANNER_RESPONSE", "tool_calls": [{"name": "find_by_name", "args": {"Pattern": "*gamma*"}}]},
+            {"step_index": 5, "type": "GENERIC", "content": "0 files"},
+        ]
+        chains = [s for s in _extract_navigation_frictions_from_steps("cid-es-3", chain_steps) if s.signal_type == "EMPTY_SEARCH_CHAIN"]
+        self.assertEqual(len(chains), 1)
+        self.assertEqual(chains[0].count, 3)
+        self.assertEqual(chains[0].metric_value, 3)
+        self.assertEqual(chains[0].step_index, 0)
+
+    def test_token_bloat_single_step_and_total_tokens_estimate(self):
+        from tools.distill.harvester import _extract_navigation_frictions_from_steps, _estimate_sessions_tokens
+
+        huge_output = "A" * 12000
+        under_threshold = "B" * 11999
+        steps = [
+            {
+                "step_index": 0,
+                "type": "PLANNER_RESPONSE",
+                "content": "reading two files",
+                "tool_calls": [
+                    {"name": "read_file", "args": {"Path": "src/a.py"}},
+                    {"name": "read_file", "args": {"Path": "src/b.py"}},
+                ],
+            },
+            {"step_index": 1, "type": "TOOL_RESULT", "content": huge_output},
+            {"step_index": 2, "type": "TOOL_RESULT", "content": under_threshold},
+        ]
+        bloats = [s for s in _extract_navigation_frictions_from_steps("cid-bloat", steps) if s.signal_type == "TOKEN_BLOAT"]
+        self.assertEqual(len(bloats), 1, "Must emit single TOKEN_BLOAT per oversized result step, not per parallel call")
+        self.assertEqual(bloats[0].count, 1)
+        self.assertEqual(bloats[0].metric_value, 12000)
+
+        expected_chars = sum(
+            len(str(st.get("content", "")))
+            + sum(len(json.dumps(tc.get("args", {}), default=str)) + len(str(tc.get("name", ""))) for tc in st.get("tool_calls", []))
+            for st in steps
+        )
+        est = _estimate_sessions_tokens(["cid-bloat"], {"cid-bloat": steps})
+        self.assertEqual(est, expected_chars // 4)
+        self.assertGreater(est, 0)
+
+    def test_zero_exit_run_command_backward_compatibility(self):
+        from tools.distill.harvester import _extract_tool_frictions_from_steps
+
+        steps = [
+            {"step_index": 0, "type": "PLANNER_RESPONSE", "tool_calls": [{"name": "run_command", "args": {"CommandLine": "rg missing src/"}}]},
+            {"step_index": 1, "type": "GENERIC", "content": "Command exited with code 0.\n0 matches"},
+        ]
+        self.assertEqual(_extract_tool_frictions_from_steps("cid-z0", steps), [])
+
+
+class TestDistillGuardrailAndRuleInventory(unittest.TestCase):
+    """RED tests for Slice 1 Pillars 2 & 4.3 deterministic scanners."""
+
+    def setUp(self):
+        self.temp_dir = Path(tempfile.mkdtemp(prefix="test_guardrails_"))
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_extract_guardrail_gaps_unwired_vs_wired_package_json(self):
+        from tools.distill.harvester import _extract_guardrail_gaps
+
+        (self.temp_dir / "package.json").write_text(
+            json.dumps({"scripts": {"lint": "eslint .", "typecheck": "tsc --noEmit"}}),
+            encoding="utf-8",
+        )
+        wf_dir = self.temp_dir / ".github" / "workflows"
+        wf_dir.mkdir(parents=True)
+        (wf_dir / "ci.yml").write_text("jobs:\n  test:\n    steps:\n      - run: npm run lint\n", encoding="utf-8")
+
+        gaps = _extract_guardrail_gaps(self.temp_dir)
+        unwired = [g for g in gaps if g.gap_type == "UNWIRED_GUARDRAIL"]
+        missing = [g for g in gaps if g.gap_type == "MISSING_GUARDRAIL"]
+        self.assertEqual(missing, [])
+        self.assertEqual([g.script_or_check for g in unwired], ["typecheck"])
+        self.assertEqual(unwired[0].source_file, "package.json")
+
+    def test_extract_guardrail_gaps_pyproject_and_husky_hooks(self):
+        from tools.distill.harvester import _extract_guardrail_gaps
+
+        (self.temp_dir / "pyproject.toml").write_text(
+            "[tool.pytest.ini_options]\ntestpaths = ['tests']\n\n[tool.ruff]\nline-length = 100\n\n[tool.mypy]\nstrict = true\n",
+            encoding="utf-8",
+        )
+        husky_internal = self.temp_dir / ".husky" / "_"
+        husky_internal.mkdir(parents=True)
+        (husky_internal / "husky.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+        (self.temp_dir / ".husky" / "pre-commit").write_text("ruff check .\npytest -q\n", encoding="utf-8")
+
+        gaps = _extract_guardrail_gaps(self.temp_dir)
+        self.assertEqual([g.gap_type for g in gaps], ["UNWIRED_GUARDRAIL"])
+        self.assertEqual(gaps[0].script_or_check, "mypy")
+        self.assertEqual(gaps[0].source_file, "pyproject.toml")
+
+    def test_extract_guardrail_gaps_missing_ci_and_precommit(self):
+        from tools.distill.harvester import _extract_guardrail_gaps
+
+        (self.temp_dir / "package.json").write_text(json.dumps({"scripts": {"test": "vitest"}}), encoding="utf-8")
+        hooks_dir = self.temp_dir / ".git" / "hooks"
+        hooks_dir.mkdir(parents=True)
+        (hooks_dir / "pre-commit.sample").write_text("#!/bin/sh\n", encoding="utf-8")
+
+        gaps = _extract_guardrail_gaps(self.temp_dir)
+        missing = [g for g in gaps if g.gap_type == "MISSING_GUARDRAIL"]
+        self.assertEqual(len(missing), 1)
+        self.assertEqual(missing[0].source_file, ".github/workflows")
+        self.assertEqual(missing[0].script_or_check, "ci_and_precommit")
+
+    def test_extract_guardrail_gaps_nonexistent_and_malformed_json_safe(self):
+        from tools.distill.harvester import _extract_guardrail_gaps
+
+        self.assertEqual(_extract_guardrail_gaps(self.temp_dir / "does-not-exist"), [])
+
+        (self.temp_dir / "package.json").write_text("{broken json", encoding="utf-8")
+        edge_dir = self.temp_dir / ".edge"
+        edge_dir.mkdir(parents=True)
+        (edge_dir / "brigade.json").write_text("{broken brigade", encoding="utf-8")
+
+        gaps = _extract_guardrail_gaps(self.temp_dir)
+        self.assertIsInstance(gaps, list)
+
+    def test_extract_rule_inventory_project_vs_factory_mode_and_citations(self):
+        from tools.distill.harvester import _extract_rule_inventory
+
+        # 1. PROJECT_MODE: no agents/ dir -> scans .edge/stations/*.md + coding_standards.md
+        proj_dir = self.temp_dir / "app_repo"
+        stations_dir = proj_dir / ".edge" / "stations"
+        stations_dir.mkdir(parents=True)
+        (stations_dir / "coder.md").write_text("\n".join([f"rule {i}" for i in range(10)]), encoding="utf-8")
+        (stations_dir / "surgeon.md").write_text("\n".join([f"rule {i}" for i in range(45)]), encoding="utf-8")
+        (proj_dir / "coding_standards.md").write_text("\n".join([f"std {i}" for i in range(15)]), encoding="utf-8")
+
+        sessions_steps = {
+            "s1": [
+                {"step_index": 0, "content": "Read .edge/stations/coder.md", "tool_calls": [
+                    {"name": "read_file", "args": {"Path": str(stations_dir / "coder.md")}}
+                ]},
+            ]
+        }
+        items = _extract_rule_inventory(proj_dir, ["s1"], sessions_steps, mode="project")
+        by_path = {it.file_path.replace("\\", "/"): it for it in items}
+        self.assertFalse(any("agents/" in p for p in by_path), "PROJECT_MODE repo without agents/ must not include plugin agents/*.md")
+        self.assertEqual(by_path[".edge/stations/coder.md"].line_count, 10)
+        self.assertEqual(by_path[".edge/stations/coder.md"].budget_limit, 40)
+        self.assertGreaterEqual(by_path[".edge/stations/coder.md"].citation_count, 1)
+        self.assertEqual(by_path[".edge/stations/coder.md"].status, "OK")
+        self.assertEqual(by_path[".edge/stations/surgeon.md"].line_count, 45)
+        self.assertEqual(by_path[".edge/stations/surgeon.md"].status, "OVER_BUDGET")
+        self.assertIsNone(by_path["coding_standards.md"].budget_limit)
+        self.assertEqual(by_path["coding_standards.md"].citation_count, 0)
+        self.assertEqual(by_path["coding_standards.md"].status, "ZERO_CITATIONS")
+
+        # 2. FACTORY_MODE: agents/ dir exists -> scans agents/*.md (budget=60) + CAND-<id> citations
+        fac_dir = self.temp_dir / "plugin_repo"
+        (fac_dir / "agents").mkdir(parents=True)
+        (fac_dir / "agents" / "coder.md").write_text("\n".join([f"line {i}" for i in range(65)]), encoding="utf-8")
+        (fac_dir / "agents" / "examiner.md").write_text("CAND-1234abcd\nline 2\n", encoding="utf-8")
+        fac_sessions = {
+            "s2": [{"step_index": 0, "content": "Enforcing CAND-1234abcd during review"}]
+        }
+        fac_items = _extract_rule_inventory(fac_dir, ["s2"], fac_sessions, mode="factory")
+        fac_by_path = {it.file_path.replace("\\", "/"): it for it in fac_items}
+        self.assertEqual(fac_by_path["agents/coder.md"].budget_limit, 60)
+        self.assertEqual(fac_by_path["agents/coder.md"].status, "OVER_BUDGET")
+        self.assertEqual(fac_by_path["agents/examiner.md"].budget_limit, 60)
+        self.assertGreaterEqual(fac_by_path["agents/examiner.md"].citation_count, 1)
+        self.assertEqual(fac_by_path["agents/examiner.md"].status, "OK")
+
+
+class TestDistillSwarmLinkingAndWorktreeMatching(unittest.TestCase):
+    """RED tests for Slice 1 Pillar 3 & Pillar 4.1 harvester integration."""
+
+    def setUp(self):
+        self.temp_dir = Path(tempfile.mkdtemp(prefix="test_swarm_"))
+        self.brain_root = self.temp_dir / "brain"
+        self.brain_root.mkdir(parents=True)
+        self.repo_dir = self.temp_dir / "target-project"
+        self.repo_dir.mkdir(parents=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _create_session(self, conv_id: str, steps: List[Dict[str, Any]]) -> Path:
+        logs_dir = self.brain_root / conv_id / ".system_generated" / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        with open(logs_dir / "transcript.jsonl", "w", encoding="utf-8") as f:
+            for st in steps:
+                f.write(json.dumps(st) + "\n")
+        return self.brain_root / conv_id
+
+    def test_inspect_step_relations_snake_case_multi_spawn_and_dedup(self):
+        from tools.distill.harvester import TranscriptGraphHarvester
+
+        h = TranscriptGraphHarvester(brain_roots=[self.brain_root], repo_path=self.repo_dir)
+        c2p: Dict[str, str] = {}
+        p2c: Dict[str, List[str]] = {}
+        steps = [
+            {
+                "step_index": 1,
+                "content": (
+                    'Spawned {"conversation_id": "child-1111"} and {"conversation_id": "child-2222"} '
+                    'and self {"conversation_id": "parent-0000"}'
+                ),
+            },
+            {
+                "step_index": 2,
+                "content": 'Repeated {"conversation_id": "child-1111"} and camel {"conversationId": "child-3333"}',
+            },
+        ]
+        h._inspect_step_relations(steps, "parent-0000", c2p, p2c)
+        self.assertEqual(c2p.get("child-1111"), "parent-0000")
+        self.assertEqual(c2p.get("child-2222"), "parent-0000")
+        self.assertEqual(c2p.get("child-3333"), "parent-0000")
+        self.assertNotIn("parent-0000", c2p)
+        self.assertEqual(p2c.get("parent-0000"), ["child-1111", "child-2222", "child-3333"])
+
+    def test_inspect_step_relations_swarm_two_step_role_and_uuid_vs_coordinator(self):
+        from tools.distill.harvester import TranscriptGraphHarvester
+
+        parent_uuid = "11111111-2222-3333-4444-555555555555"
+        worker_cid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        coord_worker_cid = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
+
+        h = TranscriptGraphHarvester(brain_roots=[self.brain_root], repo_path=self.repo_dir)
+        c2p: Dict[str, str] = {}
+        p2c: Dict[str, List[str]] = {}
+
+        worker_steps = [
+            {"step_index": 0, "content": "[swarm] new board message"},
+            {"step_index": 1, "content": f"Message for **@coder**: implement slice\nsender={parent_uuid}"},
+        ]
+        h._inspect_step_relations(worker_steps, worker_cid, c2p, p2c)
+        self.assertEqual(c2p.get(worker_cid), parent_uuid)
+        self.assertIn(worker_cid, p2c.get(parent_uuid, []))
+        self.assertEqual(getattr(h, "_session_roles", {}).get(worker_cid), "coder")
+
+        coord_steps = [
+            {"step_index": 0, "content": "[swarm] new board message"},
+            {"step_index": 1, "content": "Message for @examiner: review slice\nsender=coordinator"},
+        ]
+        h._inspect_step_relations(coord_steps, coord_worker_cid, c2p, p2c)
+        self.assertNotIn(coord_worker_cid, c2p, "Generic sender=coordinator must NOT merge unrelated swarms")
+        self.assertEqual(getattr(h, "_session_roles", {}).get(coord_worker_cid), "examiner")
+
+    def test_session_matches_project_brigade_active_worktree_and_none_guard(self):
+        from tools.distill.harvester import TranscriptGraphHarvester, _collect_worktree_aliases
+
+        edge_dir = self.repo_dir / ".edge"
+        edge_dir.mkdir(parents=True)
+
+        # None active_worktree must not raise
+        (edge_dir / "brigade.json").write_text(
+            json.dumps({"active_worktree": None, "active_ticket": {"worktree_path": ""}}),
+            encoding="utf-8",
+        )
+        self.assertEqual(_collect_worktree_aliases(self.repo_dir), [])
+
+        # Windows UNC active_worktree matches WSL workspaceUri session
+        wt_wsl = "/home/oguz/.treehouse/edge-10a21d/4/my-custom-wt"
+        wt_unc = r"\\wsl.localhost\Ubuntu-24.04\home\oguz\.treehouse\edge-10a21d\4\my-custom-wt"
+        (edge_dir / "brigade.json").write_text(
+            json.dumps({"active_worktree": wt_unc}),
+            encoding="utf-8",
+        )
+        aliases = _collect_worktree_aliases(self.repo_dir)
+        self.assertIn(wt_wsl.lower(), aliases)
+
+        self._create_session("sess-wt-match", [{"step_index": 0, "workspaceUris": [f"file://{wt_wsl}"]}])
+        self._create_session("sess-wt-foreign", [{"step_index": 0, "workspaceUris": ["file:///home/oguz/other-project"]}])
+
+        h = TranscriptGraphHarvester(brain_roots=[self.brain_root], repo_path=self.repo_dir)
+        transcripts = h._discover_transcripts()
+        sessions_steps, c2p, p2c = h._load_transcripts(transcripts)
+        matched = h._find_matched_sessions(sessions_steps, self.repo_dir, p2c, c2p)
+        self.assertIn("sess-wt-match", matched)
+        self.assertNotIn("sess-wt-foreign", matched)
+
+    def test_session_matches_project_symmetric_unc_and_treehouse_slot(self):
+        from tools.distill.harvester import _session_matches_project, _matches_treehouse_slot
+
+        target_path = Path("/home/oguz/target-project")
+
+        self.assertTrue(_matches_treehouse_slot("/home/oguz/.treehouse/pool/slot-4/target-project", "target-project"))
+        self.assertFalse(_matches_treehouse_slot("/home/oguz/.treehouse/pool/slot-4/other-project", "target-project"))
+        self.assertFalse(_matches_treehouse_slot("/home/oguz/.treehouse/pool/slot-4/target-project-v2", "target-project"))
+
+        # Symmetric UNC workspaceUri matching
+        steps_unc = [{"step_index": 0, "workspaceUris": ["file://wsl.localhost/Ubuntu-24.04/home/oguz/target-project"]}]
+        self.assertTrue(_session_matches_project(steps_unc, target_path))
+
+        # Treehouse pool slot matching
+        steps_slot = [{"step_index": 0, "workspaceUris": ["file:///home/oguz/.treehouse/pool/slot-2/target-project"]}]
+        self.assertTrue(_session_matches_project(steps_slot, target_path))
+
+        # Foreign Treehouse pool slot rejected
+        steps_foreign_slot = [{"step_index": 0, "workspaceUris": ["file:///home/oguz/.treehouse/pool/slot-2/other-project"]}]
+        self.assertFalse(_session_matches_project(steps_foreign_slot, target_path))
+
+    def test_extract_flight_recorder_and_end_to_end_harvest_integration(self):
+        from tools.distill.harvester import TranscriptGraphHarvester
+        from tools.distill.models import _render_insights_toon
+
+        fr_dir = self.repo_dir / ".edge" / "flight-recorder"
+        fr_dir.mkdir(parents=True)
+        (fr_dir / "TICK-42.json").write_text(
+            json.dumps({
+                "dead_ends": [
+                    {"title": "Mutate primary repo", "reason": "Violates zero-touch", "prohibited_rule": "Use treehouse"}
+                ],
+                "guard_failures": [
+                    {"state": "RED_TEST", "message": "collection error exit 2", "details": {"file": "tests/test_distill.py"}}
+                ],
+            }),
+            encoding="utf-8",
+        )
+        (self.repo_dir / "package.json").write_text(json.dumps({"scripts": {"lint": "eslint ."}}), encoding="utf-8")
+
+        steps = [
+            {"step_index": 0, "workspaceUris": [f"file://{self.repo_dir.as_posix()}"]},
+            {"step_index": 1, "tool_calls": [{"name": "read_file", "args": {"Path": "src/a.ts"}}]},
+            {"step_index": 2, "tool_calls": [{"name": "read_file", "args": {"Path": "src/a.ts"}}]},
+        ]
+        self._create_session("sess-e2e-1", steps)
+
+        h = TranscriptGraphHarvester(brain_roots=[self.brain_root], repo_path=self.repo_dir)
+        digest = h.harvest(project_path=self.repo_dir)
+
+        self.assertGreater(digest.total_tokens_estimate, 0)
+        self.assertTrue(any(n.signal_type == "REDUNDANT_READ" for n in digest.navigation_frictions))
+        self.assertTrue(any(g.gap_type == "MISSING_GUARDRAIL" for g in digest.guardrail_gaps))
+        insights_toon = _render_insights_toon(digest.flight_recorder_insights) or ""
+        self.assertIn("[DEAD_END]", insights_toon)
+        self.assertIn("Mutate primary repo", insights_toon)
+        self.assertIn("[GUARD_FAIL]", insights_toon)
+        self.assertIn("RED_TEST", insights_toon)
+        self.assertIn("collection error exit 2", insights_toon)
+
+
 if __name__ == "__main__":
     unittest.main()

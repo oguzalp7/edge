@@ -151,6 +151,20 @@ class TestEdgeDistillSkillV2(unittest.TestCase):
         self.assertIn("frontier-axi add", text)
         self.assertIn("parking lot", text.lower())
 
+    def test_navigation_lens_and_telemetry_sections_in_skill(self):
+        """
+        Slice 1 Pillar 5:
+        SKILL.md must integrate navigation-lens.md, the new TOON digest sections
+        (Navigation & Tool Economy, Guardrail Gaps, Rule Inventory), and
+        docs/domains/<domain>.md Context Pointer output.
+        """
+        text = self.skill_path.read_text(encoding="utf-8")
+        self.assertIn("navigation-lens.md", text)
+        self.assertIn("Navigation & Tool Economy", text)
+        self.assertIn("Guardrail Gaps", text)
+        self.assertIn("Rule Inventory", text)
+        self.assertIn("docs/domains/<domain>.md", text)
+
 
 class TestDistillReferenceRubrics(unittest.TestCase):
     @classmethod
@@ -162,6 +176,7 @@ class TestDistillReferenceRubrics(unittest.TestCase):
             "judgment-lens.md",
             "tooling-lens.md",
             "divergent-lens.md",
+            "navigation-lens.md",
         ]
 
     def test_all_reference_files_exist_and_budget(self):
@@ -205,29 +220,58 @@ class TestDistillReferenceRubrics(unittest.TestCase):
         self.assertIn("CODER", j_text)
         self.assertIn("escapes", j_text.lower())
 
-        # 2. tooling-lens.md covers tool friction / meat-proxy & tasks-axi
+        # 2. tooling-lens.md covers tool friction / meat-proxy, guardrail gaps & TOKEN_BLOAT
         t_path = self.refs_dir / "tooling-lens.md"
         self.assertTrue(t_path.is_file(), f"Missing reference file: {t_path}")
         t_text = t_path.read_text(encoding="utf-8")
         self.assertIn("meat-proxy", t_text.lower())
         self.assertIn("tasks-axi", t_text)
         self.assertIn("friction", t_text.lower())
+        self.assertIn("Guardrail Gaps", t_text)
+        self.assertIn("UNWIRED_GUARDRAIL", t_text)
+        self.assertIn("MISSING_GUARDRAIL", t_text)
+        self.assertIn("TOKEN_BLOAT", t_text)
+        self.assertIn("frontier-axi", t_text)
 
-        # 3. divergent-lens.md covers No-Op pruning / bloat compaction
+        # 3. divergent-lens.md covers No-Op pruning / bloat compaction & Rule Inventory
         d_path = self.refs_dir / "divergent-lens.md"
         self.assertTrue(d_path.is_file(), f"Missing reference file: {d_path}")
         d_text = d_path.read_text(encoding="utf-8")
         self.assertIn("no-op", d_text.lower())
         self.assertIn("budget", d_text.lower())
         self.assertIn("prun", d_text.lower())
+        self.assertIn("Rule Inventory", d_text)
+        self.assertIn("citation_count", d_text)
+        self.assertIn("package.json", d_text)
 
-        # 4. synthesizer.md covers all 3 axes
+        # 4. synthesizer.md covers Judgment, Tooling, and Navigation & Context-Pointer axes
         s_path = self.refs_dir / "synthesizer.md"
         self.assertTrue(s_path.is_file(), f"Missing reference file: {s_path}")
         s_text = s_path.read_text(encoding="utf-8")
         self.assertIn("Judgment", s_text)
         self.assertIn("Tooling", s_text)
         self.assertIn("tasks-axi", s_text)
+        self.assertIn("Navigation & Tool Economy", s_text)
+        self.assertIn("Guardrail Gaps", s_text)
+        self.assertIn("Rule Inventory", s_text)
+        self.assertIn("docs/domains/<domain>.md", s_text)
+        self.assertIn("1-command", s_text.lower())
+
+        # 5. navigation-lens.md covers Context Pointers, 1-command anti-cache, and 3-way routing
+        n_path = self.refs_dir / "navigation-lens.md"
+        self.assertTrue(n_path.is_file(), f"Missing reference file: {n_path}")
+        n_text = n_path.read_text(encoding="utf-8")
+        self.assertIn("docs/domains/<domain>.md", n_text)
+        self.assertIn("1-command", n_text.lower())
+        self.assertIn("package.json", n_text)
+        self.assertIn("EXPLORATION_BURST", n_text)
+        self.assertIn("REDUNDANT_READ", n_text)
+        self.assertIn("EMPTY_SEARCH_CHAIN", n_text)
+        self.assertIn("UNWIRED_GUARDRAIL", n_text)
+        self.assertIn("MISSING_GUARDRAIL", n_text)
+        self.assertIn("frontier-axi", n_text)
+        self.assertIn("tasks-axi", n_text)
+        self.assertIn(".edge/stations/", n_text)
 
 
 class TestDistillDocsSync(unittest.TestCase):
