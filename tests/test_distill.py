@@ -3557,6 +3557,90 @@ class TestDistillHarnessAndInboxPruneFixes(unittest.TestCase):
         self.assertEqual(res_c["removed_by_reason"]["expired"], 2)
         self.assertEqual({s["signal_id"] for s in inbox_c.load_signals()}, {"c-malformed", "c-fresh"})
 
+    def test_wsl_relay_create_process_parse_common_banner_ignored_in_harvester(self):
+        from tools.distill.harvester import (
+            _has_explicit_runtime_error,
+            _detect_error_and_exit_code,
+            _extract_tool_frictions_from_steps,
+        )
+
+        banner_prefix = (
+            r"<3>WSL (93955 - Relay) ERROR: CreateProcessParseCommon:863: "
+            r"Failed to translate Z:\home\oguz\MS-Randevu-monolith"
+        )
+        benign_lf = f"{banner_prefix}\nCommand exited with code 0."
+        benign_crlf = f"{banner_prefix}\r\nCommand exited with code 0."
+
+        self.assertFalse(_has_explicit_runtime_error(benign_lf))
+        self.assertFalse(_has_explicit_runtime_error(benign_crlf))
+        self.assertEqual(_detect_error_and_exit_code(benign_lf), (False, None))
+        self.assertEqual(_detect_error_and_exit_code(benign_crlf), (False, None))
+
+        steps_crlf = [
+            {"step_index": 0, "type": "PLANNER_RESPONSE", "tool_calls": [{"name": "run_command", "args": {"CommandLine": "wsl pytest -q"}}]},
+            {"step_index": 1, "type": "GENERIC", "content": benign_crlf},
+        ]
+        self.assertEqual(_extract_tool_frictions_from_steps("cid-relay-banner", steps_crlf), [])
+
+        exit1_crlf = f"{banner_prefix}\r\nCommand exited with code 1."
+        self.assertEqual(_detect_error_and_exit_code(exit1_crlf), (True, 1))
+
+        real_execvpe = "WSL (12345 - Relay) ERROR: Execvpe failed\nCommand exited with code 0."
+        self.assertTrue(_has_explicit_runtime_error(real_execvpe))
+        self.assertEqual(_detect_error_and_exit_code(real_execvpe), (True, None))
+
+        banner_trailing_tb = (
+            f"{banner_prefix}\r\n"
+            "Traceback (most recent call last):\n"
+            "AssertionError: boom\n"
+            "Command exited with code 0."
+        )
+        self.assertTrue(_has_explicit_runtime_error(banner_trailing_tb))
+        self.assertEqual(_detect_error_and_exit_code(banner_trailing_tb), (True, None))
+
+    def test_factory_inbox_prune_drops_wsl_create_process_parse_common_exit_zero(self):
+        from datetime import datetime, timezone
+        from tools.distill import state
+        from tools.distill.state import FactoryInbox
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        banner_prefix = (
+            r"<3>WSL (93955 - Relay) ERROR: CreateProcessParseCommon:863: "
+            r"Failed to translate Z:\home\oguz\MS-Randevu-monolith"
+        )
+
+        def _rec(sid: str, summary: str) -> Dict[str, Any]:
+            return {
+                "signal_id": sid,
+                "fingerprint": state._compute_signal_fingerprint("HARNESS_FRICTION", "run_command", summary),
+                "kind": "HARNESS_FRICTION",
+                "source_project": "/home/oguz/MS-Randevu-monolith",
+                "role_or_tool": "run_command",
+                "summary": summary,
+                "created_at": now_iso,
+                "resolved": False,
+            }
+
+        records = [
+            _rec("drop-banner-lf", f"{banner_prefix}\nCommand exited with code 0."),
+            _rec("drop-banner-crlf", f"{banner_prefix}\r\nCommand exited with code 0."),
+            _rec("keep-banner-exit1", f"{banner_prefix}\r\nCommand exited with code 1."),
+            _rec("keep-banner-trailing-err", f"{banner_prefix}\r\nERROR: fatal database failure\nCommand exited with code 0."),
+            _rec("keep-banner-trailing-tb", f"{banner_prefix}\r\nTraceback (most recent call last): crash\nCommand exited with code 0."),
+        ]
+        self.inbox_file.write_text(json.dumps({"signals": records}, indent=2), encoding="utf-8")
+
+        inbox = FactoryInbox(inbox_file_override=self.inbox_file)
+        res = inbox.prune(drop_exit_zero=True, dry_run=False)
+        self.assertEqual(res["before"], 5)
+        self.assertEqual(res["removed"], 2)
+        self.assertEqual(res["after"], 3)
+        self.assertEqual(res["removed_by_reason"]["exit_zero"], 2)
+        self.assertEqual(
+            {s["signal_id"] for s in inbox.load_signals()},
+            {"keep-banner-exit1", "keep-banner-trailing-err", "keep-banner-trailing-tb"},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
