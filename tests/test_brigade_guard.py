@@ -2042,6 +2042,19 @@ class TestGuardRoleDetectionAndPostToolHardening(unittest.TestCase):
         stations_after = self.store.load().get_stations()
         self.assertEqual(stations_after[placeholder_cid]["canonicalRole"], "SURGEON")
 
+    def test_detect_session_role_bare_at_role_swarm_step0_without_markers(self):
+        tp_bare = self._write_transcript("bare_at_swarm_step0.jsonl", [{
+            "step_index": 0,
+            "source": "SYSTEM",
+            "content": "@seam_architect Author contract suite for foo",
+        }])
+        role, src = guard.detect_session_role({
+            "conversationId": "unreg-bare-swarm",
+            "transcriptPath": str(tp_bare),
+        })
+        self.assertEqual(role, "SEAM_ARCHITECT")
+        self.assertEqual(src, "transcript_swarm_keyword")
+
 
 if __name__ == "__main__":
     unittest.main()
