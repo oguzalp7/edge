@@ -15,8 +15,10 @@ if str(root_dir) not in sys.path:
 
 try:
     from .models import Station, StationRole, Ticket, ReviewFinding, BrigadeState
+    from .navigation import build_navigation_context
 except ImportError:
     from tools.brigade.models import Station, StationRole, Ticket, ReviewFinding, BrigadeState
+    from tools.brigade.navigation import build_navigation_context
 
 
 def _resolve_target_label(ticket: Ticket) -> str:
@@ -174,6 +176,48 @@ class StationRegistry:
     # =========================================================================
 
     @staticmethod
+    def _collect_nav_paths(ticket: Ticket, extra_paths: Optional[List[str]] = None) -> List[str]:
+        raw_paths: List[str] = []
+        candidates = [
+            ticket.target_file,
+            *(getattr(ticket, "expected_files", None) or []),
+            *(extra_paths or []),
+        ]
+        for p in candidates:
+            if p and p not in raw_paths:
+                raw_paths.append(p)
+        return raw_paths
+
+    @staticmethod
+    def _inject_nav_block(prompt: str, nav: str) -> str:
+        if "\n---\n\n# " in prompt:
+            head, tail = prompt.rsplit("\n---\n\n# ", 1)
+            return f"{head}\n\n{nav}\n\n---\n\n# {tail}"
+        if "\n---\n\n" in prompt:
+            head, tail = prompt.rsplit("\n---\n\n", 1)
+            return f"{head}\n\n{nav}\n\n---\n\n{tail}"
+        return f"{prompt.rstrip()}\n\n{nav}\n"
+
+    @staticmethod
+    def _with_navigation_context(
+        prompt: str,
+        repo_path: Optional[Path],
+        ticket: Ticket,
+        extra_paths: Optional[List[str]] = None,
+    ) -> str:
+        """Injects deterministic navigation context before the trailing rubric separator."""
+        raw_paths = StationRegistry._collect_nav_paths(ticket, extra_paths)
+        nav = build_navigation_context(
+            repo_path,
+            target_paths=raw_paths,
+            domain=ticket.domain or "",
+            spec_path=getattr(ticket, "spec_path", None) or "",
+        )
+        if not nav:
+            return prompt
+        return StationRegistry._inject_nav_block(prompt, nav)
+
+    @staticmethod
     def build_surgeon_prompt(ticket: Ticket, base_branch: str, repo_path: Optional[Path] = None) -> str:
         """Constructs a hermetic surgery ticket for the SURGEON station."""
         is_ui = getattr(ticket, "track", "core") == "ui"
@@ -229,7 +273,7 @@ WORKTREE WORKING DIRECTORY (CRITICAL ZERO-TOUCH INVARIANT):
 Before mutating production code, ensure a Treehouse worktree is leased to preserve zero-touch primary isolation.
 """
 
-        return f"""You are the SURGEON station worker in Edge Brigade operating in `{base_branch}`.
+        prompt = f"""You are the SURGEON station worker in Edge Brigade operating in `{base_branch}`.
 {wt_block}
 MISSION:
 Execute the bounded refactor ticket `{ticket.ticket_id}` targeting `{ticket.rule_id}` in '{target_label}' (line {ticket.line_number}).
@@ -257,13 +301,14 @@ EXECUTION PROTOCOL:
 
 {rubric}
 """
+        return StationRegistry._with_navigation_context(prompt, repo_path, ticket)
 
     @staticmethod
     def build_spec_writer_prompt(ticket: Ticket, user_story: str, repo_path: Optional[Path] = None) -> str:
         """Constructs a prompt for the SPEC_WRITER station."""
         rubric = StationRegistry.load_station_rubric("spec-writer", repo_path=repo_path)
         q3 = chr(34) * 3
-        return f"""You are the SPEC_WRITER station worker in Edge Brigade.
+        prompt = f"""You are the SPEC_WRITER station worker in Edge Brigade.
 
 MISSION:
 Take the raw user story / requirements and author an INVEST-compliant vertical slice specification.
@@ -294,12 +339,13 @@ STATION DIRECTIVES:
 
 {rubric}
 """
+        return StationRegistry._with_navigation_context(prompt, repo_path, ticket)
 
     @staticmethod
     def build_researcher_prompt(ticket: Ticket, research_topic: str, repo_path: Optional[Path] = None) -> str:
         """Constructs a prompt for the RESEARCHER station."""
         rubric = StationRegistry.load_station_rubric("researcher", repo_path=repo_path)
-        return f"""You are the RESEARCHER station worker in Edge Brigade.
+        prompt = f"""You are the RESEARCHER station worker in Edge Brigade.
 
 MISSION:
 Investigate and resolve the technical ambiguity or root cause for ticket `{ticket.ticket_id}`.
@@ -317,13 +363,14 @@ DIRECTIVES:
 
 {rubric}
 """
+        return StationRegistry._with_navigation_context(prompt, repo_path, ticket)
 
     @staticmethod
     def build_seam_architect_prompt(ticket: Ticket, spec_summary: str, repo_path: Optional[Path] = None) -> str:
         """Constructs a prompt for the SEAM_ARCHITECT station."""
         rubric = StationRegistry.load_station_rubric("seam-architect", repo_path=repo_path)
         target_label = _resolve_target_label(ticket)
-        return f"""You are the SEAM_ARCHITECT station worker in Edge Brigade.
+        prompt = f"""You are the SEAM_ARCHITECT station worker in Edge Brigade.
 
 MISSION:
 Architect the Michael Feathers seams, declare interface contracts, and write RED unit/contract tests for ticket `{ticket.ticket_id}`.
@@ -344,6 +391,7 @@ DIRECTIVES:
 
 {rubric}
 """
+        return StationRegistry._with_navigation_context(prompt, repo_path, ticket)
 
     @staticmethod
     def build_seam_prompt(ticket: Ticket, spec_summary: str, repo_path: Optional[Path] = None) -> str:
@@ -368,7 +416,7 @@ WORKTREE WORKING DIRECTORY (CRITICAL ZERO-TOUCH INVARIANT):
 Before mutating production code, ensure a Treehouse worktree is leased to preserve zero-touch primary isolation.
 """
 
-        return f"""You are the CODER station worker in Edge Brigade on branch `{ticket.branch_name}`.
+        prompt = f"""You are the CODER station worker in Edge Brigade on branch `{ticket.branch_name}`.
 {wt_block}
 MISSION:
 Implement the minimal, robust production code to turn all RED tests GREEN for ticket `{ticket.ticket_id}`.
@@ -385,6 +433,7 @@ CONSTRAINTS (STRICT):
 
 {rubric}
 """
+        return StationRegistry._with_navigation_context(prompt, repo_path, ticket)
 
     @staticmethod
     def build_examiner_prompt(ticket: Ticket, base_branch: str, repo_path: Optional[Path] = None) -> str:
@@ -396,7 +445,7 @@ CONSTRAINTS (STRICT):
             if getattr(ticket, "expected_files", None)
             else ""
         )
-        return f"""You are the EXAMINER station worker in Edge Brigade.
+        prompt = f"""You are the EXAMINER station worker in Edge Brigade.
 
 DIFF INSPECTION:
 Target Diff: `git diff {base_branch}..HEAD`
@@ -432,6 +481,7 @@ If clean, state: 'EXAMINER REVIEW: PASS'.
 
 {rubric}
 """
+        return StationRegistry._with_navigation_context(prompt, repo_path, ticket)
 
     @staticmethod
     def build_polish_prompt(ticket: Ticket, findings: List[ReviewFinding], repo_path: Optional[Path] = None) -> str:
@@ -442,7 +492,7 @@ If clean, state: 'EXAMINER REVIEW: PASS'.
             for f in findings
         ])
 
-        return f"""You are the SURGEON station worker in Edge Brigade.
+        prompt = f"""You are the SURGEON station worker in Edge Brigade.
 
 MISSION:
 Execute Polish Remediation on branch `{ticket.branch_name}` for ticket `{ticket.ticket_id}`.
@@ -462,6 +512,7 @@ INSTRUCTIONS:
 
 {rubric}
 """
+        return StationRegistry._with_navigation_context(prompt, repo_path, ticket, extra_paths=[f.file_path for f in findings])
 
     @staticmethod
     def build_coder_polish_prompt(ticket: Ticket, findings: List[ReviewFinding], repo_path: Optional[Path] = None) -> str:
@@ -486,7 +537,7 @@ WORKTREE WORKING DIRECTORY (CRITICAL ZERO-TOUCH INVARIANT):
 Before mutating production code, ensure a Treehouse worktree is leased to preserve zero-touch primary isolation.
 """
 
-        return f"""You are the CODER station worker in Edge Brigade on branch `{ticket.branch_name}`.
+        prompt = f"""You are the CODER station worker in Edge Brigade on branch `{ticket.branch_name}`.
 {wt_block}
 MISSION:
 Execute Polish Remediation on branch `{ticket.branch_name}` for feature ticket `{ticket.ticket_id}`.
@@ -508,6 +559,7 @@ CONSTRAINTS & INSTRUCTIONS (STRICT):
 
 {rubric}
 """
+        return StationRegistry._with_navigation_context(prompt, repo_path, ticket, extra_paths=[f.file_path for f in findings])
 
     @staticmethod
     def _resolve_qa_scenario(user_scenario_en: str, ticket: Optional[Ticket]) -> str:

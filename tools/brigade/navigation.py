@@ -1,0 +1,441 @@
+"""
+Isolated Navigation & Domain Context Resolver for Edge Brigade.
+Slices repository navigation docs (specs/INDEX.md, CONTEXT.md, docs/domains/*.md)
+and git co-change history into a bounded <=15-line context block with [STALE] link checking.
+"""
+
+import re
+import subprocess
+import sys
+from collections import Counter
+from pathlib import Path
+from typing import Dict, List, Optional, Set, Tuple
+
+_ROOT_DIR = Path(__file__).resolve().parents[2]
+if str(_ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(_ROOT_DIR))
+
+try:
+    from tools.common.paths import to_wsl_path
+except ImportError:  # pragma: no cover - standalone fallback
+    def to_wsl_path(path: object) -> str:
+        return str(path).replace("\\", "/")
+
+try:
+    from tools.drift.models import matches_tracked_paths, parse_domain_frontmatter
+except ImportError:  # pragma: no cover - lightweight stdlib fallback
+    def parse_domain_frontmatter(markdown_text: str, fallback_domain: str = "") -> Tuple[str, List[str], str]:
+        if not markdown_text.startswith("---"):
+            return fallback_domain, [], markdown_text
+        parts = markdown_text.split("---", 2)
+        if len(parts) < 3:
+            return fallback_domain, [], markdown_text
+        return fallback_domain, [], parts[2].lstrip("\r\n")
+
+    def matches_tracked_paths(changed_files: List[str], tracked_paths: List[str]) -> List[str]:
+        return []
+
+
+NAV_HEADER = "### 🧭 NAVIGATION & DOMAIN CONTEXT"
+_INDEX_CANDIDATES = ("specs/INDEX.md", ".edge/INDEX.md", "INDEX.md")
+_GLOSSARY_CANDIDATES = ("CONTEXT.md", "GLOSSARY.md")
+_LOCKFILES = {
+    "package-lock.json",
+    "uv.lock",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "Cargo.lock",
+    "poetry.lock",
+}
+_DRIVE_PATH_RE = re.compile(r"^[A-Za-z]:")
+_MD_SEP_RE = re.compile(r"^\|[\s:\-|]+\|$")
+_LINK_TITLE_RE = re.compile(r'\s+(?:"[^"]*"|\'[^\']*\')\s*$')
+
+
+def _normalize_repo_rel_path(raw: str, repo_root: Path) -> str:
+    """Converts Windows/WSL/absolute paths into a clean repo-relative POSIX path."""
+    if not raw:
+        return ""
+    wsl = to_wsl_path(raw).replace("\\", "/").strip()
+    repo_wsl = to_wsl_path(repo_root.resolve()).replace("\\", "/").rstrip("/")
+    if wsl.lower().startswith(repo_wsl.lower() + "/"):
+        wsl = wsl[len(repo_wsl) + 1 :]
+    elif wsl.lower() == repo_wsl.lower():
+        return ""
+    while wsl.startswith("./"):
+        wsl = wsl[2:]
+    return wsl.rstrip("/")
+
+
+def _collect_target_tokens(
+    repo_root: Path,
+    target_paths: Optional[List[str]],
+    domain: str,
+    spec_path: str,
+) -> Tuple[List[str], Set[str], str]:
+    """Derives normalized repo-relative paths and lowercase matching tokens."""
+    rel_paths: List[str] = []
+    tokens: Set[str] = set()
+    raw_items = list(target_paths or [])
+    if spec_path:
+        raw_items.append(spec_path)
+
+    for raw in raw_items:
+        rel = _normalize_repo_rel_path(str(raw), repo_root)
+        if not rel:
+            continue
+        if rel not in rel_paths:
+            rel_paths.append(rel)
+        p = Path(rel)
+        tokens.add(rel.lower())
+        if p.name:
+            tokens.add(p.name.lower())
+        if p.stem:
+            tokens.add(p.stem.lower())
+
+    dom_clean = domain.strip().lower()
+    if dom_clean:
+        tokens.add(dom_clean)
+    return rel_paths, tokens, dom_clean
+
+
+def _strip_paired_backticks(line: str) -> str:
+    """Removes paired `...` code spans while handling unclosed trailing backticks gracefully."""
+    out: List[str] = []
+    idx = 0
+    n = len(line)
+    while idx < n:
+        if line[idx] == "`":
+            end = line.find("`", idx + 1)
+            if end != -1:
+                idx = end + 1
+                continue
+            idx += 1
+            continue
+        out.append(line[idx])
+        idx += 1
+    return "".join(out)
+
+
+def _scan_balanced_paren_target(text: str, start_idx: int) -> Tuple[str, int]:
+    """Scans balanced parentheses starting immediately after ']('."""
+    depth = 1
+    idx = start_idx
+    n = len(text)
+    while idx < n and depth > 0:
+        ch = text[idx]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        if depth > 0:
+            idx += 1
+    if depth != 0:
+        return "", start_idx
+    return text[start_idx:idx].strip(), idx + 1
+
+
+def _clean_link_target(raw_target: str) -> str:
+    cleaned = _LINK_TITLE_RE.sub("", raw_target.strip()).strip()
+    if cleaned.startswith("<") and cleaned.endswith(">"):
+        cleaned = cleaned[1:-1].strip()
+    return cleaned
+
+
+def _extract_markdown_link_targets(line: str) -> List[str]:
+    """Extracts Markdown link destinations with balanced-parenthesis support."""
+    sanitized = _strip_paired_backticks(line)
+    targets: List[str] = []
+    pos = 0
+    while True:
+        marker = sanitized.find("](", pos)
+        if marker == -1:
+            break
+        raw_target, next_pos = _scan_balanced_paren_target(sanitized, marker + 2)
+        if raw_target:
+            cleaned = _clean_link_target(raw_target)
+            if cleaned:
+                targets.append(cleaned)
+        pos = next_pos if next_pos > marker + 2 else marker + 2
+    return targets
+
+
+def _is_target_stale(target: str, containing_dir: Path, repo_root: Path) -> bool:
+    if not target or target.startswith(("http://", "https://", "mailto:", "#")):
+        return False
+    clean = target.split("#", 1)[0].strip()
+    if not clean:
+        return False
+    if clean.startswith("/") or _DRIVE_PATH_RE.match(clean):
+        return True
+    try:
+        repo_resolved = repo_root.resolve()
+        resolved = (containing_dir / clean).resolve()
+        return not resolved.is_relative_to(repo_resolved) or not resolved.exists()
+    except Exception:
+        return True
+
+
+def _annotate_stale_links(line: str, containing_dir: Path, repo_root: Path) -> str:
+    clean_line = line.rstrip()
+    for target in _extract_markdown_link_targets(clean_line):
+        if _is_target_stale(target, containing_dir, repo_root):
+            return f"{clean_line} [STALE]" if not clean_line.endswith("[STALE]") else clean_line
+    return clean_line
+
+
+def _find_first_existing(repo_root: Path, candidates: Tuple[str, ...]) -> Optional[Path]:
+    for rel in candidates:
+        p = repo_root / rel
+        if p.is_file():
+            return p
+    return None
+
+
+def _line_matches_tokens(stripped: str, tokens: Set[str]) -> bool:
+    if not tokens:
+        return False
+    lowered = stripped.lower()
+    return any(tok in lowered for tok in tokens)
+
+
+def _is_table_header_row(lines: List[str], idx: int, stripped: str) -> bool:
+    if not stripped.startswith("|") or idx + 1 >= len(lines):
+        return False
+    return bool(_MD_SEP_RE.match(lines[idx + 1].strip()))
+
+
+def _is_skippable_doc_line(stripped: str) -> bool:
+    if not stripped or stripped.startswith("#"):
+        return True
+    return bool(_MD_SEP_RE.match(stripped))
+
+
+def _is_index_candidate(lines: List[str], idx: int, stripped: str, tokens: Set[str]) -> bool:
+    if _is_skippable_doc_line(stripped) or _is_table_header_row(lines, idx, stripped):
+        return False
+    if not stripped.startswith(("|", "- ", "* ")):
+        return False
+    return _line_matches_tokens(stripped, tokens)
+
+
+def _extract_index_rows(repo_root: Path, tokens: Set[str], limit: int = 5) -> List[str]:
+    index_file = _find_first_existing(repo_root, _INDEX_CANDIDATES)
+    if not index_file or not tokens:
+        return []
+    lines = index_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    matched: List[str] = []
+    table_count = 0
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if not _is_index_candidate(lines, idx, stripped, tokens):
+            continue
+        if stripped.startswith("|"):
+            if table_count >= limit:
+                continue
+            table_count += 1
+        matched.append(_annotate_stale_links(stripped, index_file.parent, repo_root))
+        if len(matched) >= 8:
+            break
+    return matched
+
+
+def _is_glossary_row(stripped: str) -> bool:
+    if stripped.startswith(("|", "- ", "* ")):
+        return True
+    return ":" in stripped
+
+
+def _extract_glossary_rows(repo_root: Path, tokens: Set[str], limit: int = 4) -> List[str]:
+    glossary_file = _find_first_existing(repo_root, _GLOSSARY_CANDIDATES)
+    if not glossary_file or not tokens:
+        return []
+    lines = glossary_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    matched: List[str] = []
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if _is_skippable_doc_line(stripped) or _is_table_header_row(lines, idx, stripped):
+            continue
+        if _is_glossary_row(stripped) and _line_matches_tokens(stripped, tokens):
+            matched.append(_annotate_stale_links(stripped, repo_root, repo_root))
+            if len(matched) >= limit:
+                break
+    return matched
+
+
+def _deed_matches(
+    deed_file: Path,
+    deed_domain: str,
+    tracked_paths: List[str],
+    rel_paths: List[str],
+    dom_clean: str,
+) -> bool:
+    if dom_clean and (deed_domain.lower() == dom_clean or deed_file.stem.lower() == dom_clean):
+        return True
+    return bool(matches_tracked_paths(rel_paths, tracked_paths))
+
+
+def _extract_deed_body_lines(body: str, domains_dir: Path, repo_root: Path, cap: int) -> List[str]:
+    bullets: List[str] = []
+    prose: List[str] = []
+    for raw in body.splitlines():
+        s = raw.strip()
+        if not s or s.startswith("#") or s == "---":
+            continue
+        annotated = _annotate_stale_links(s, domains_dir, repo_root)
+        if s.startswith(("- ", "* ")):
+            bullets.append(annotated)
+        else:
+            prose.append(annotated)
+    return (bullets + prose)[:cap]
+
+
+def _extract_domain_deed_rows(
+    repo_root: Path,
+    rel_paths: List[str],
+    dom_clean: str,
+    limit: int = 3,
+) -> List[str]:
+    domains_dir = repo_root / "docs" / "domains"
+    if not domains_dir.is_dir():
+        return []
+    collected: List[str] = []
+    for deed_file in sorted(domains_dir.glob("*.md")):
+        if len(collected) >= limit:
+            break
+        try:
+            text = deed_file.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        deed_domain, tracked_paths, body = parse_domain_frontmatter(text, fallback_domain=deed_file.stem)
+        if _deed_matches(deed_file, deed_domain, tracked_paths, rel_paths, dom_clean):
+            remaining = limit - len(collected)
+            collected.extend(_extract_deed_body_lines(body, domains_dir, repo_root, remaining))
+    return collected[:limit]
+
+
+def _inventory_nav_docs(repo_root: Path) -> List[str]:
+    docs: List[str] = []
+    for rel in ("AGENTS.md", *_INDEX_CANDIDATES, *_GLOSSARY_CANDIDATES):
+        if (repo_root / rel).is_file():
+            docs.append(rel)
+    domains_dir = repo_root / "docs" / "domains"
+    if domains_dir.is_dir() and any(domains_dir.glob("*.md")):
+        docs.append("docs/domains/")
+    return docs
+
+
+def _select_git_anchors(repo_root: Path, rel_paths: List[str]) -> List[str]:
+    repo_resolved = repo_root.resolve()
+    anchors: List[str] = []
+    for rel in rel_paths:
+        if not rel or rel.startswith("-") or rel.startswith("/"):
+            continue
+        try:
+            candidate = (repo_root / rel).resolve()
+        except Exception:
+            continue
+        if candidate.is_relative_to(repo_resolved) and candidate.exists():
+            if rel not in anchors:
+                anchors.append(rel)
+                if len(anchors) >= 3:
+                    break
+    return anchors
+
+
+def _is_excluded_cochange_path(path_str: str, anchor_set: Set[str]) -> bool:
+    norm = path_str.replace("\\", "/").strip()
+    if not norm or norm in anchor_set:
+        return True
+    if norm.startswith(".edge/") or norm == ".edge":
+        return True
+    if norm.startswith("node_modules/") or "/node_modules/" in norm:
+        return True
+    return Path(norm).name in _LOCKFILES
+
+
+def _run_git_lines(repo_root: Path, args: List[str]) -> List[str]:
+    try:
+        res = subprocess.run(
+            ["git", *args],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+    if res.returncode != 0 or not res.stdout.strip():
+        return []
+    return res.stdout.splitlines()
+
+
+def _extract_git_cochanges(repo_root: Path, rel_paths: List[str], limit: int = 5) -> List[str]:
+    if not (repo_root / ".git").exists():
+        return []
+    anchors = _select_git_anchors(repo_root, rel_paths)
+    if not anchors:
+        return []
+    shas = [s.strip() for s in _run_git_lines(repo_root, ["log", "-n", "20", "--pretty=format:%H", "--", *anchors]) if s.strip()]
+    if not shas:
+        return []
+
+    changed_lines = _run_git_lines(repo_root, ["show", "--name-only", "--pretty=format:", *shas])
+    anchor_set = set(anchors)
+    counts: Counter[str] = Counter()
+    for line in changed_lines:
+        norm = line.replace("\\", "/").strip()
+        if not _is_excluded_cochange_path(norm, anchor_set):
+            counts[norm] += 1
+    ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    return [f"- {path} (co-changed {cnt}x)" for path, cnt in ranked[:limit]]
+
+
+def _assemble_prioritized_lines(
+    index_or_pointer: List[str],
+    deed_rows: List[str],
+    cochange_rows: List[str],
+    glossary_rows: List[str],
+    max_lines: int = 15,
+) -> str:
+    body_buckets = (index_or_pointer, deed_rows, cochange_rows, glossary_rows)
+    if not any(body_buckets):
+        return ""
+    lines: List[str] = [NAV_HEADER]
+    for bucket in body_buckets:
+        room = max_lines - len(lines)
+        if room <= 0:
+            break
+        lines.extend(bucket[:room])
+    return "\n".join(lines)
+
+
+def build_navigation_context(
+    repo_path: Optional[Path],
+    target_paths: Optional[List[str]] = None,
+    domain: str = "",
+    spec_path: str = "",
+) -> str:
+    """
+    Builds a bounded <=15-line navigation and domain context block from repository docs
+    and git co-change history. Returns '' when repo is invalid or no signals exist.
+    """
+    if repo_path is None:
+        return ""
+    root = Path(repo_path)
+    if not root.exists() or not root.is_dir():
+        return ""
+
+    rel_paths, tokens, dom_clean = _collect_target_tokens(root, target_paths, domain, spec_path)
+    index_rows = _extract_index_rows(root, tokens, limit=5)
+    deed_rows = _extract_domain_deed_rows(root, rel_paths, dom_clean, limit=3)
+    glossary_rows = _extract_glossary_rows(root, tokens, limit=4)
+    cochange_rows = _extract_git_cochanges(root, rel_paths, limit=5)
+
+    index_or_pointer = list(index_rows)
+    if not index_rows and not deed_rows and not glossary_rows:
+        available = _inventory_nav_docs(root)
+        if available:
+            index_or_pointer = [f"Navigation docs available: {', '.join(available)}"]
+
+    return _assemble_prioritized_lines(index_or_pointer, deed_rows, cochange_rows, glossary_rows)

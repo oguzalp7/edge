@@ -12,7 +12,7 @@ The Spec Writer transforms raw user stories into INVEST-compliant engineering sp
 ---
 
 ## 📜 Core Directives
-1. **Ubiquitous Language:** Establish consistent domain vocabulary and eliminate ambiguous terms.
+1. **Ubiquitous Language:** Inspect `specs/INDEX.md`, `CONTEXT.md`, `AGENTS.md`, and `docs/domains/` (when present) for domain vocabulary and ownership seams before falling back to `git grep`.
 2. **Plain English Summary:** Summarize feature scope into 3-4 crisp sentences.
 3. **Vertical Slice Invariant:** Ensure every specification spans database, core logic, API endpoints, and user touchpoints without dangling tiers.
 4. **Visual Approval Gate (`lavish-axi`):**

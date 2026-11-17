@@ -81,16 +81,27 @@ def _matches_project(steps: List[Dict[str, Any]], project_path: Path) -> bool:
     return False
 
 
-def _gather_subsequent_results(steps: List[Dict[str, Any]], start_idx: int) -> str:
-    result_text = ""
+READ_SEARCH_TOOLS = {"read_file", "view_file", "find_by_name", "grep_search", "list_dir"}
+SEARCH_ONLY_TOOLS = {"grep_search", "find_by_name"}
+READ_ONLY_TOOLS = {"read_file", "view_file"}
+MUTATION_TOOLS = {"edit_file", "write_file", "replace_file_content", "multi_replace_file_content"}
+
+
+def _gather_subsequent_result_list(steps: List[Dict[str, Any]], start_idx: int) -> List[str]:
+    results: List[str] = []
     for next_step in steps[start_idx + 1:]:
         stype = next_step.get("type")
         source = next_step.get("source")
         if stype in ("PLANNER_RESPONSE", "USER_INPUT") or source == "USER_EXPLICIT":
             break
         if stype in ("TOOL_RESULT", "GENERIC") or source == "GENERIC":
-            result_text += " " + str(next_step.get("content", ""))
-    return result_text
+            results.append(str(next_step.get("content", "")))
+    return results
+
+
+def _gather_subsequent_results(steps: List[Dict[str, Any]], start_idx: int) -> str:
+    results = _gather_subsequent_result_list(steps, start_idx)
+    return (" " + " ".join(results)) if results else ""
 
 
 def _has_explicit_runtime_error(text: str) -> bool:
@@ -106,6 +117,21 @@ def _has_explicit_runtime_error(text: str) -> bool:
     if re.search(r"\berror TS\d+\b", text, re.IGNORECASE):
         return True
     return "WSL (" in text
+
+
+def _detect_read_search_tool_error(result_text: str) -> Tuple[bool, Optional[int]]:
+    is_zero_exit = bool(re.search(r"(?:Command exited with code\s+0\b|exit(?: code|=)\s*0\b)", result_text))
+    if is_zero_exit and "Encountered error in tool execution" not in result_text:
+        return False, None
+
+    m_code = re.search(r"Command exited with code\s+([1-9]\d*)\b", result_text)
+    if m_code:
+        return True, int(m_code.group(1))
+
+    if "Encountered error in tool execution" in result_text:
+        return True, None
+
+    return False, None
 
 
 def _detect_error_and_exit_code(result_text: str) -> Tuple[bool, Optional[int]]:
@@ -128,6 +154,18 @@ def _detect_error_and_exit_code(result_text: str) -> Tuple[bool, Optional[int]]:
         return True, 1
 
     return False, None
+
+
+def _evaluate_tool_call_friction(
+    tc: Dict[str, Any],
+    tc_text: str,
+    multi_unaligned: bool,
+) -> Tuple[bool, Optional[int]]:
+    if tc.get("name", "") in READ_SEARCH_TOOLS:
+        if multi_unaligned:
+            return ("Encountered error in tool execution" in tc_text), None
+        return _detect_read_search_tool_error(tc_text)
+    return _detect_error_and_exit_code(tc_text)
 
 
 def _build_tool_friction_signal(
@@ -161,23 +199,53 @@ def _extract_tool_frictions_from_steps(cid: str, steps: List[Dict[str, Any]]) ->
         if not tool_calls:
             continue
 
-        result_text = _gather_subsequent_results(steps, idx)
-        has_error, exit_code = _detect_error_and_exit_code(result_text)
-        if not has_error:
-            continue
+        results_list = _gather_subsequent_result_list(steps, idx)
+        aligned = len(results_list) == len(tool_calls)
+        multi_unaligned = (not aligned) and len(tool_calls) > 1
+        joined_text = (" " + " ".join(results_list)) if not aligned else ""
 
-        for tc in tool_calls:
-            signals.append(_build_tool_friction_signal(cid, step, idx, tc, result_text, exit_code))
+        for i, tc in enumerate(tool_calls):
+            tc_text = results_list[i] if aligned else joined_text
+            has_error, exit_code = _evaluate_tool_call_friction(tc, tc_text, multi_unaligned)
+            if has_error:
+                signals.append(_build_tool_friction_signal(cid, step, idx, tc, tc_text, exit_code))
     return signals
+
+
+def _is_examiner_pass_step(step: Dict[str, Any]) -> bool:
+    source = step.get("source")
+    stype = step.get("type")
+    if source in ("SYSTEM", "USER_EXPLICIT", "GENERIC"):
+        return False
+    if stype in ("USER_INPUT", "SYSTEM_MESSAGE", "TOOL_RESULT", "GENERIC"):
+        return False
+    if source != "MODEL" and stype != "PLANNER_RESPONSE":
+        return False
+    content = str(step.get("content", ""))
+    return "EXAMINER" in content and ("PASS" in content or "PASSED" in content)
+
+
+def _is_read_search_only_result(next_step: Dict[str, Any], last_tool_names: List[str]) -> bool:
+    stype = next_step.get("type")
+    source = next_step.get("source")
+    is_res = stype in ("TOOL_RESULT", "GENERIC") or source == "GENERIC"
+    if not is_res or not last_tool_names:
+        return False
+    return all(tn in READ_SEARCH_TOOLS for tn in last_tool_names)
 
 
 def _check_examiner_escape(steps: List[Dict[str, Any]], idx: int, cid: str) -> Optional[StationEscapeSignal]:
     step = steps[idx]
-    content = str(step.get("content", ""))
-    if "EXAMINER" not in content or ("PASS" not in content and "PASSED" not in content):
+    if not _is_examiner_pass_step(step):
         return None
 
-    for next_step in steps[idx + 1: idx + 4]:
+    last_tool_names = [tc.get("name", "") for tc in step.get("tool_calls", [])]
+    for next_step in steps[idx + 1 : idx + 4]:
+        if next_step.get("tool_calls"):
+            last_tool_names = [tc.get("name", "") for tc in next_step.get("tool_calls", [])]
+            continue
+        if _is_read_search_only_result(next_step, last_tool_names):
+            continue
         nxt_content = str(next_step.get("content", ""))
         if "FAILED" in nxt_content or "exit code 1" in nxt_content or "FAIL" in nxt_content:
             return StationEscapeSignal(
@@ -412,10 +480,6 @@ def _matches_project(steps: List[Dict[str, Any]], project_path: Path) -> bool:
     return _session_matches_project(steps, project_path)
 
 
-READ_SEARCH_TOOLS = {"read_file", "view_file", "find_by_name", "grep_search", "list_dir"}
-SEARCH_ONLY_TOOLS = {"grep_search", "find_by_name"}
-READ_ONLY_TOOLS = {"read_file", "view_file"}
-MUTATION_TOOLS = {"edit_file", "write_file", "replace_file_content", "multi_replace_file_content"}
 READ_SEARCH_CMDS = {"rg", "grep", "find", "git grep", "ls", "tree"}
 SEARCH_ONLY_CMDS = {"rg", "grep", "find", "git grep"}
 _WSL_VALUE_FLAGS = {"--cd", "-d", "--distribution", "-u", "--user"}
@@ -609,18 +673,6 @@ def _extract_redundant_reads(cid: str, steps: List[Dict[str, Any]], role: str) -
                 _reset_path_read_streaks(streaks, fpath)
 
     return _build_redundant_read_signals(cid, role, max_streaks, second_step)
-
-
-def _gather_subsequent_result_list(steps: List[Dict[str, Any]], start_idx: int) -> List[str]:
-    results: List[str] = []
-    for next_step in steps[start_idx + 1 :]:
-        stype = next_step.get("type")
-        source = next_step.get("source")
-        if stype in ("PLANNER_RESPONSE", "USER_INPUT") or source == "USER_EXPLICIT":
-            break
-        if stype in ("TOOL_RESULT", "GENERIC") or source == "GENERIC":
-            results.append(str(next_step.get("content", "")))
-    return results
 
 
 def _is_empty_search_output(text: str) -> bool:
@@ -1208,6 +1260,51 @@ def _parse_guard_failure_entry(gfail: Any) -> Dict[str, Any]:
     }
 
 
+_CANONICAL_STATION_ROLES = (
+    "spec_writer",
+    "seam_architect",
+    "spec_critic",
+    "qa_engineer",
+    "researcher",
+    "coder",
+    "surgeon",
+    "examiner",
+)
+_CID_RE = re.compile(r'"conversation(?:Id|_id)":\s*"([^"]+)"')
+
+
+def _normalize_station_role(raw_role: str) -> str:
+    raw = raw_role.strip()
+    if not raw:
+        return "unknown"
+    lowered_space = raw.lower()
+    lowered_under = lowered_space.replace("-", "_").replace(" ", "_")
+    for canon in _CANONICAL_STATION_ROLES:
+        if canon in lowered_under or canon.replace("_", " ") in lowered_space:
+            return canon
+    slug = re.sub(r"[^a-z0-9]+", "_", lowered_space).strip("_")
+    return slug or "unknown"
+
+
+def _extract_step0_role_cue(steps: List[Dict[str, Any]]) -> Optional[str]:
+    step_by_idx = {s.get("step_index"): str(s.get("content", "")) for s in steps}
+    for s_idx in (0, 1):
+        text = step_by_idx.get(s_idx, "")
+        if not text:
+            continue
+        for pat in (
+            r"agents/([a-zA-Z0-9_-]+)\.md",
+            r"You are the ([A-Z_]+)",
+            r"Persona:\s*([A-Za-z_ ]+)",
+        ):
+            m = re.search(pat, text)
+            if m:
+                norm = _normalize_station_role(m.group(1))
+                if norm != "unknown":
+                    return norm
+    return None
+
+
 class TranscriptGraphHarvester:
     """
     Deterministic Harvester that extracts zero-token friction and signals from Antigravity session transcripts.
@@ -1227,6 +1324,14 @@ class TranscriptGraphHarvester:
         self.since_hours = since_hours
         self._session_dirs: Dict[str, Path] = {}
         self._session_roles: Dict[str, str] = {}
+        self._session_role_priority: Dict[str, int] = {}
+
+    def _set_session_role(self, cid: str, role: str, priority: int) -> None:
+        if not cid or not role or role == "unknown":
+            return
+        if priority >= self._session_role_priority.get(cid, 0):
+            self._session_roles[cid] = role
+            self._session_role_priority[cid] = priority
 
     def _default_brain_roots(self) -> List[Path]:
         roots = []
@@ -1253,8 +1358,8 @@ class TranscriptGraphHarvester:
                     if parent_cid:
                         stations_map[child_cid] = parent_cid
                     role = info.get("role")
-                    if role and child_cid not in self._session_roles:
-                        self._session_roles[child_cid] = str(role).lower()
+                    if role:
+                        self._set_session_role(child_cid, _normalize_station_role(str(role)), priority=4)
             except Exception:
                 pass
         return stations_map
@@ -1281,6 +1386,68 @@ class TranscriptGraphHarvester:
                 self._session_dirs[sess_dir.name] = sess_dir
         return session_transcripts
 
+    def _link_invoke_subagent_pairs(
+        self,
+        invoke_calls: List[Dict[str, Any]],
+        res_texts: List[str],
+        cid: str,
+        child_to_parent: Dict[str, str],
+        parent_to_children: Dict[str, List[str]],
+    ) -> None:
+        for tc, res_text in zip(invoke_calls, res_texts):
+            m = _CID_RE.search(res_text)
+            if not m:
+                continue
+            child_cid = m.group(1)
+            if not child_cid or child_cid == cid:
+                continue
+            child_to_parent[child_cid] = cid
+            _append_unique_child(parent_to_children, cid, child_cid)
+            raw_role = str(tc.get("args", {}).get("Role", ""))
+            if raw_role:
+                self._set_session_role(child_cid, _normalize_station_role(raw_role), priority=3)
+
+    def _link_step_invoke_roles(
+        self,
+        steps: List[Dict[str, Any]],
+        idx: int,
+        cid: str,
+        child_to_parent: Dict[str, str],
+        parent_to_children: Dict[str, List[str]],
+    ) -> None:
+        step = steps[idx]
+        tool_calls = step.get("tool_calls", [])
+        invoke_calls = [tc for tc in tool_calls if tc.get("name") == "invoke_subagent"]
+        if not invoke_calls:
+            return
+        results_list = _gather_subsequent_result_list(steps, idx)
+        if len(results_list) == len(tool_calls):
+            aligned_pairs = [
+                (tc, res)
+                for tc, res in zip(tool_calls, results_list)
+                if tc.get("name") == "invoke_subagent"
+            ]
+            self._link_invoke_subagent_pairs(
+                [p[0] for p in aligned_pairs],
+                [p[1] for p in aligned_pairs],
+                cid,
+                child_to_parent,
+                parent_to_children,
+            )
+            return
+        if len(results_list) == len(invoke_calls):
+            self._link_invoke_subagent_pairs(invoke_calls, results_list, cid, child_to_parent, parent_to_children)
+            return
+        joined = "\n".join(results_list) + "\n" + str(step.get("content", ""))
+        found_cids = [m.group(1) for m in _CID_RE.finditer(joined)]
+        for tc, child_cid in zip(invoke_calls, found_cids):
+            if child_cid and child_cid != cid:
+                child_to_parent[child_cid] = cid
+                _append_unique_child(parent_to_children, cid, child_cid)
+                raw_role = str(tc.get("args", {}).get("Role", ""))
+                if raw_role:
+                    self._set_session_role(child_cid, _normalize_station_role(raw_role), priority=3)
+
     def _link_spawned_children(
         self,
         steps: List[Dict[str, Any]],
@@ -1288,9 +1455,10 @@ class TranscriptGraphHarvester:
         child_to_parent: Dict[str, str],
         parent_to_children: Dict[str, List[str]],
     ) -> None:
-        for step in steps:
+        for idx, step in enumerate(steps):
+            self._link_step_invoke_roles(steps, idx, cid, child_to_parent, parent_to_children)
             content = str(step.get("content", ""))
-            for m in re.finditer(r'"conversation(?:Id|_id)":\s*"([^"]+)"', content):
+            for m in _CID_RE.finditer(content):
                 child_cid = m.group(1)
                 if child_cid and child_cid != cid:
                     child_to_parent[child_cid] = cid
@@ -1312,7 +1480,11 @@ class TranscriptGraphHarvester:
         if is_swarm and s1:
             m_role = re.search(r'for\s+(?:\*\*|\[)?@([a-zA-Z0-9_\-]+)(?:\*\*|\])?\s*:', s1)
             if m_role:
-                self._session_roles[cid] = m_role.group(1).lower()
+                self._set_session_role(cid, _normalize_station_role(m_role.group(1)), priority=2)
+
+        cue_role = _extract_step0_role_cue(steps)
+        if cue_role:
+            self._set_session_role(cid, cue_role, priority=1)
 
         search_text = f"{s0}\n{s1}" if is_swarm else s0
         m_snd = re.search(r"sender=([a-zA-Z0-9_\-]+)", search_text)
@@ -1337,6 +1509,8 @@ class TranscriptGraphHarvester:
         sessions_steps: Dict[str, List[Dict[str, Any]]] = {}
         child_to_parent: Dict[str, str] = dict(self._load_active_stations_map())
         parent_to_children: Dict[str, List[str]] = {}
+        for child_cid, parent_cid in child_to_parent.items():
+            _append_unique_child(parent_to_children, parent_cid, child_cid)
         discovered = set(session_transcripts.keys())
 
         for cid, tpath in session_transcripts.items():
