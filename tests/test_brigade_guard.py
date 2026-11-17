@@ -506,7 +506,10 @@ class TestBrigadeGuard(unittest.TestCase):
             msg = res["injectSteps"][0]["ephemeralMessage"]
             self.assertIn("Sovereign Commander", msg)
             self.assertIn("Canonical Brigade Stations", msg)
-            self.assertIn("Anti-Graveyard Protocol", msg)
+            if hasattr(guard, "_handle_swarm_guard") or "ULTRA SWARM MODE" in msg:
+                self.assertIn("Ultra Swarm-Native Station Dispatch Protocol", msg)
+            else:
+                self.assertIn("Anti-Graveyard Protocol", msg)
 
         # Examiner station worker
         with patch.object(guard, "detect_session_role", return_value=("EXAMINER", "test")):
@@ -1727,6 +1730,317 @@ class TestWslCwdAnchorAndQuotingHook(unittest.TestCase):
         self.assertTrue(hasattr(guard, "_check_nested_quoting_collision"))
         cmd = "wsl bash -c 'echo hello'"
         self.assertIsNone(guard._check_nested_quoting_collision(cmd))
+
+
+class TestGuardRoleDetectionAndPostToolHardening(unittest.TestCase):
+    """RED tests for Slice 3 Pillar 1: role detection precedence and post-tool CID hardening."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.temp_path = Path(self.temp_dir.name)
+        self.temp_stations_file = self.temp_path / "edge_active_stations.json"
+        self.orig_file = guard.ACTIVE_STATIONS_FILE
+        guard.ACTIVE_STATIONS_FILE = self.temp_stations_file
+        self.store = guard.StationStore(self.temp_stations_file)
+
+    def tearDown(self):
+        guard.ACTIVE_STATIONS_FILE = self.orig_file
+        self.temp_dir.cleanup()
+
+    def _write_transcript(self, filename: str, steps: list) -> Path:
+        tp = self.temp_path / filename
+        with open(tp, "w", encoding="utf-8") as f:
+            for step in steps:
+                f.write(json.dumps(step) + "\n")
+        return tp
+
+    def test_normalize_role_word_boundaries_and_preserved_aliases(self):
+        # Preserved valid aliases
+        self.assertEqual(guard.normalize_role("QA/E2E test agent"), "QA_ENGINEER")
+        self.assertEqual(guard.normalize_role("Ecosystem & Recon Specialist"), "RESEARCHER")
+        self.assertEqual(guard.normalize_role("Standards Examiner"), "EXAMINER")
+        self.assertEqual(guard.normalize_role("Seam Architect"), "SEAM_ARCHITECT")
+        self.assertEqual(guard.normalize_role("Goldfish Critic"), "SPEC_CRITIC")
+
+        # Substring traps must NOT match canonical roles
+        for non_role in ("recorder", "decoder", "forecast", "subcontract", "qatar", "coworker"):
+            self.assertIsNone(
+                guard.normalize_role(non_role),
+                f"Word-boundary normalize_role must reject substring trap '{non_role}'",
+            )
+
+    def test_detect_session_role_explicit_first_and_tier_precedence(self):
+        # 1. Explicit CODER prompt mentioning SEAM_ARCHITECT, red test, contract, tdd, Sovereign Commander
+        tp_coder = self._write_transcript("coder_step0.jsonl", [{
+            "step_index": 0,
+            "source": "SYSTEM",
+            "type": "SYSTEM_MESSAGE",
+            "content": (
+                "[Message] timestamp=2026-11-17T22:00:00Z sender=orch-1 priority=MESSAGE_PRIORITY_HIGH "
+                "content=You are the CODER station worker. Turn the SEAM_ARCHITECT red test and contract "
+                "green under TDD without modifying tests. Report back to Sovereign Commander."
+            ),
+        }])
+        role_c, src_c = guard.detect_session_role({"conversationId": "unreg-coder", "transcriptPath": str(tp_coder)})
+        self.assertEqual(role_c, "CODER")
+        self.assertEqual(src_c, "transcript_subagent_explicit")
+
+        # 2. Explicit SPEC_CRITIC / EXAMINER mentioning SPEC_WRITER and CODER
+        tp_critic = self._write_transcript("critic_step0.jsonl", [{
+            "step_index": 0,
+            "source": "SYSTEM",
+            "content": "[Message] content=You are the SPEC_CRITIC station worker. Audit SPEC_WRITER draft before CODER starts.",
+        }])
+        role_cr, src_cr = guard.detect_session_role({"conversationId": "unreg-critic", "transcriptPath": str(tp_critic)})
+        self.assertEqual(role_cr, "SPEC_CRITIC")
+        self.assertEqual(src_cr, "transcript_subagent_explicit")
+
+        tp_examiner = self._write_transcript("examiner_step0.jsonl", [{
+            "step_index": 0,
+            "source": "SYSTEM",
+            "content": "[Message] content=Follow agents/examiner.md and review SPEC_WRITER and CODER work.",
+        }])
+        role_ex, src_ex = guard.detect_session_role({"conversationId": "unreg-exam", "transcriptPath": str(tp_examiner)})
+        self.assertEqual(role_ex, "EXAMINER")
+        self.assertEqual(src_ex, "transcript_subagent_explicit")
+
+        # 3. Non-worker "You are the Sovereign Commander's assistant" ignored -> falls to agents/researcher.md
+        tp_res = self._write_transcript("researcher_step0.jsonl", [{
+            "step_index": 0,
+            "source": "SYSTEM",
+            "content": "[Message] content=You are the Sovereign Commander's helper. Read agents/researcher.md first.",
+        }])
+        role_res, _ = guard.detect_session_role({"conversationId": "unreg-res", "transcriptPath": str(tp_res)})
+        self.assertEqual(role_res, "RESEARCHER")
+
+        # 4. Tier 1 canonical token beats earlier Tier 2 alias
+        tp_tier = self._write_transcript("tier_precedence.jsonl", [{
+            "step_index": 0,
+            "source": "SYSTEM",
+            "content": "[Message] content=Verify the red test, contract, and tdd criteria for the CODER pipeline.",
+        }])
+        role_t1, src_t1 = guard.detect_session_role({"conversationId": "unreg-t1", "transcriptPath": str(tp_tier)})
+        self.assertEqual(role_t1, "CODER")
+        self.assertEqual(src_t1, "transcript_subagent_keyword")
+
+        # 5. Earliest Tier 1 position wins (EXAMINER before SPEC_WRITER/CODER)
+        tp_early_t1 = self._write_transcript("early_tier1.jsonl", [{
+            "step_index": 0,
+            "source": "SYSTEM",
+            "content": "[Message] content=EXAMINER task: audit the SPEC_WRITER spec and CODER diff.",
+        }])
+        role_et1, _ = guard.detect_session_role({"conversationId": "unreg-et1", "transcriptPath": str(tp_early_t1)})
+        self.assertEqual(role_et1, "EXAMINER")
+
+        # 6. Earliest Tier 2 position wins when Tier 1 absent (refactor/SURGEON before contract/SEAM_ARCHITECT)
+        tp_early_t2 = self._write_transcript("early_tier2.jsonl", [{
+            "step_index": 0,
+            "source": "SYSTEM",
+            "content": "[Message] content=Please refactor the module to honor the contract.",
+        }])
+        role_et2, _ = guard.detect_session_role({"conversationId": "unreg-et2", "transcriptPath": str(tp_early_t2)})
+        self.assertEqual(role_et2, "SURGEON")
+
+        # 7. Header metadata isolated + word boundaries block substring traps
+        tp_isolated = self._write_transcript("body_isolation.jsonl", [{
+            "step_index": 0,
+            "source": "SYSTEM",
+            "content": "[Message] timestamp=2026-11-17T22:00:00Z sender=seam_architect-1 content=Inspect the recorder and forecast payload.",
+        }])
+        role_iso, _ = guard.detect_session_role({"conversationId": "unreg-iso", "transcriptPath": str(tp_isolated)})
+        self.assertEqual(role_iso, "SUBAGENT_GENERIC")
+
+        # 8. Multi-step Ultra Swarm parity returns transcript_swarm_keyword
+        tp_swarm = self._write_transcript("swarm_two_step.jsonl", [
+            {"step_index": 0, "source": "SYSTEM", "content": "[Message] content=[swarm] new board message #9"},
+            {"step_index": 1, "source": "SYSTEM", "content": "[Message] content=For @coder: turn SEAM_ARCHITECT red test green"},
+        ])
+        role_sw, src_sw = guard.detect_session_role({"conversationId": "unreg-sw", "transcriptPath": str(tp_swarm)})
+        self.assertEqual(role_sw, "CODER")
+        self.assertEqual(src_sw, "transcript_swarm_keyword")
+
+    def test_handle_post_tool_ignores_noise_steps_in_transcript_tail(self):
+        existing_cid = "11111111-2222-3333-4444-555555555555"
+        repo_dir = self.temp_path / "repo_noise"
+        (repo_dir / ".edge").mkdir(parents=True, exist_ok=True)
+        self.store.register(existing_cid, "SPEC_WRITER", "orch-parent")
+        guard.sync_repo_brigade_station(repo_dir, "SPEC_WRITER", existing_cid)
+
+        tp = self._write_transcript("noise_tail.jsonl", [
+            {
+                "step_index": 10,
+                "source": "MODEL",
+                "type": "PLANNER_RESPONSE",
+                "tool_calls": [{"name": "manage_subagents", "args": {"Action": "list"}}],
+            },
+            {
+                "step_index": 11,
+                "source": "MODEL",
+                "type": "GENERIC",
+                "content": f'Active subagent(s):\n- {existing_cid} ("conversationId": "{existing_cid}")',
+            },
+            {
+                "step_index": 12,
+                "source": "EPHEMERAL",
+                "type": "EPHEMERAL_MESSAGE",
+                "content": '{"conversationId": "22222222-2222-3333-4444-555555555555"}',
+            },
+            {
+                "step_index": 13,
+                "source": "MODEL",
+                "type": "PLANNER_RESPONSE",
+                "tool_calls": [{"name": "send_message", "args": {"Recipient": "33333333-2222-3333-4444-555555555555"}}],
+            },
+            {
+                "step_index": 14,
+                "source": "MODEL",
+                "type": "TOOL_RESULT",
+                "content": '{"conversationId": "44444444-2222-3333-4444-555555555555"}',
+            },
+        ])
+
+        payload = {
+            "conversationId": "orch-parent",
+            "transcriptPath": str(tp),
+            "cwd": str(repo_dir),
+            "toolCall": {
+                "name": "invoke_subagent",
+                "args": {"Role": "SPEC_CRITIC", "Prompt": "Critique spec"},
+            },
+        }
+        res = guard.handle_post_tool(payload)
+        self.assertEqual(res, {})
+
+        stations = self.store.load().get_stations()
+        self.assertEqual(stations[existing_cid]["canonicalRole"], "SPEC_WRITER")
+        for bogus_cid in (
+            "22222222-2222-3333-4444-555555555555",
+            "33333333-2222-3333-4444-555555555555",
+            "44444444-2222-3333-4444-555555555555",
+        ):
+            self.assertNotIn(bogus_cid, stations)
+
+        brigade_data = json.loads((repo_dir / ".edge" / "brigade.json").read_text(encoding="utf-8"))
+        self.assertEqual(brigade_data["stations"]["SPEC_WRITER"]["conversation_id"], existing_cid)
+        self.assertNotIn("SPEC_CRITIC", brigade_data["stations"])
+
+    def test_handle_post_tool_window_edge_and_snake_case_cids(self):
+        # 1. Window edge (preceding_planner is None) WITHOUT "Created the following subagent" -> rejected
+        tp_reject = self._write_transcript("edge_reject.jsonl", [{
+            "step_index": 50,
+            "source": "MODEL",
+            "type": "GENERIC",
+            "content": '{"conversation_id": "55555555-2222-3333-4444-555555555555", "status": "ok"}',
+        }])
+        guard.handle_post_tool({
+            "conversationId": "orch-parent",
+            "transcriptPath": str(tp_reject),
+            "toolCall": {"name": "invoke_subagent", "args": {"Role": "CODER"}},
+        })
+        self.assertNotIn("55555555-2222-3333-4444-555555555555", self.store.load().get_stations())
+
+        # 2. Window edge WITH singular "Created the following subagent" + snake_case conversation_id -> accepted
+        cid_singular = "66666666-2222-3333-4444-555555555555"
+        tp_singular = self._write_transcript("edge_singular.jsonl", [{
+            "step_index": 51,
+            "source": "MODEL",
+            "type": "GENERIC",
+            "content": f'Created the following subagent:\n{{"conversation_id": "{cid_singular}"}}',
+        }])
+        guard.handle_post_tool({
+            "conversationId": "orch-parent",
+            "transcriptPath": str(tp_singular),
+            "toolCall": {"name": "invoke_subagent", "args": {"Role": "CODER"}},
+        })
+        stations = self.store.load().get_stations()
+        self.assertIn(cid_singular, stations)
+        self.assertEqual(stations[cid_singular]["canonicalRole"], "CODER")
+
+        # 3. Preceding PLANNER_RESPONSE with invoke_subagent allows TOOL_RESULT snake_case conversation_id
+        cid_paired = "77777777-2222-3333-4444-555555555555"
+        tp_paired = self._write_transcript("paired_snake.jsonl", [
+            {
+                "step_index": 52,
+                "source": "MODEL",
+                "type": "PLANNER_RESPONSE",
+                "tool_calls": [{"name": "invoke_subagent", "args": {"Role": "EXAMINER"}}],
+            },
+            {
+                "step_index": 53,
+                "source": "MODEL",
+                "type": "TOOL_RESULT",
+                "content": f'{{"conversation_id": "{cid_paired}"}}',
+            },
+        ])
+        guard.handle_post_tool({
+            "conversationId": "orch-parent",
+            "transcriptPath": str(tp_paired),
+            "toolCall": {"name": "invoke_subagent", "args": {"Role": "EXAMINER"}},
+        })
+        stations = self.store.load().get_stations()
+        self.assertIn(cid_paired, stations)
+        self.assertEqual(stations[cid_paired]["canonicalRole"], "EXAMINER")
+
+        # 4. Primary extraction supports snake_case conversation_id in escaped output string
+        cid_primary = "88888888-2222-3333-4444-555555555555"
+        guard.handle_post_tool({
+            "conversationId": "orch-parent",
+            "toolCall": {"name": "invoke_subagent", "args": {"Role": "RESEARCHER"}},
+            "output": f'\\"conversation_id\\": \\"{cid_primary}\\"',
+        })
+        # Also JSON string in result
+        cid_result = "88888888-aaaa-3333-4444-555555555555"
+        guard.handle_post_tool({
+            "conversationId": "orch-parent",
+            "toolCall": {"name": "invoke_subagent", "args": {"Role": "RESEARCHER"}},
+            "result": f'{{"conversation_id": "{cid_result}"}}',
+        })
+        stations = self.store.load().get_stations()
+        self.assertEqual(stations[cid_primary]["canonicalRole"], "RESEARCHER")
+        self.assertEqual(stations[cid_result]["canonicalRole"], "RESEARCHER")
+
+    def test_handle_post_tool_fallback_anti_overwrite_guard(self):
+        existing_cid = "99999999-2222-3333-4444-555555555555"
+        repo_dir = self.temp_path / "repo_anti_overwrite"
+        (repo_dir / ".edge").mkdir(parents=True, exist_ok=True)
+        self.store.register(existing_cid, "SPEC_WRITER", "orch-parent")
+        guard.sync_repo_brigade_station(repo_dir, "SPEC_WRITER", existing_cid)
+
+        tp = self._write_transcript("anti_overwrite.jsonl", [{
+            "step_index": 60,
+            "source": "MODEL",
+            "type": "GENERIC",
+            "content": f'Created the following subagents:\n{{"conversationId": "{existing_cid}"}}',
+        }])
+        res = guard.handle_post_tool({
+            "conversationId": "orch-parent",
+            "transcriptPath": str(tp),
+            "cwd": str(repo_dir),
+            "toolCall": {"name": "invoke_subagent", "args": {"Role": "SPEC_CRITIC"}},
+        })
+        self.assertEqual(res, {})
+        stations = self.store.load().get_stations()
+        self.assertEqual(stations[existing_cid]["canonicalRole"], "SPEC_WRITER")
+        brigade_data = json.loads((repo_dir / ".edge" / "brigade.json").read_text(encoding="utf-8"))
+        self.assertNotIn("SPEC_CRITIC", brigade_data["stations"])
+
+        # Placeholder STATION_WORKER record IS allowed to be upgraded via fallback
+        placeholder_cid = "aaaaaaaa-2222-3333-4444-555555555555"
+        self.store.register(placeholder_cid, "STATION_WORKER", "orch-parent")
+        tp_upgrade = self._write_transcript("upgrade_placeholder.jsonl", [{
+            "step_index": 61,
+            "source": "MODEL",
+            "type": "GENERIC",
+            "content": f'Created the following subagent:\n{{"conversation_id": "{placeholder_cid}"}}',
+        }])
+        guard.handle_post_tool({
+            "conversationId": "orch-parent",
+            "transcriptPath": str(tp_upgrade),
+            "cwd": str(repo_dir),
+            "toolCall": {"name": "invoke_subagent", "args": {"Role": "SURGEON"}},
+        })
+        stations_after = self.store.load().get_stations()
+        self.assertEqual(stations_after[placeholder_cid]["canonicalRole"], "SURGEON")
 
 
 if __name__ == "__main__":

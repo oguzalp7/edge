@@ -1213,6 +1213,133 @@ class TestDistillCLICommands(unittest.TestCase):
         ])
         self.assertEqual(proc_factory_mode.returncode, 0, f"mark-processed --mode factory failed: {proc_factory_mode.stderr}")
 
+    def test_cli_inbox_list_prune_and_clear_hermetic(self):
+        """
+        Spec Section 3.4.2:
+        distill inbox {list,prune,clear} CLI subcommands run hermetically against
+        EDGE_DISTILL_FACTORY_INBOX_FILE and never touch host ~/.gemini/antigravity.
+        """
+        from datetime import datetime, timedelta, timezone
+
+        host_inbox = Path.home() / ".gemini" / "antigravity" / "edge_factory_inbox.json"
+        host_existed = host_inbox.exists()
+        host_mtime_before = host_inbox.stat().st_mtime_ns if host_existed else None
+
+        now = datetime.now(timezone.utc)
+        fresh_ts = (now - timedelta(days=1)).isoformat()
+        old_ts = (now - timedelta(days=30)).isoformat()
+        proj_str = "/home/oguz/projects/demo-app"
+        seeded = {
+            "signals": [
+                {
+                    "signal_id": "SIG-KEEP-REAL",
+                    "fingerprint": "fp-keep-real-1111",
+                    "kind": "HARNESS_FRICTION",
+                    "source_project": proj_str,
+                    "role_or_tool": "run_command",
+                    "summary": "ERROR: pytest assertion failure\nCommand exited with code 1",
+                    "created_at": fresh_ts,
+                    "resolved": False,
+                },
+                {
+                    "signal_id": "SIG-OLD-RESOLVED",
+                    "fingerprint": "fp-old-res-2222",
+                    "kind": "HARNESS_FRICTION",
+                    "source_project": proj_str,
+                    "role_or_tool": "run_command",
+                    "summary": "Traceback (most recent call last): boom",
+                    "created_at": old_ts,
+                    "resolved": True,
+                },
+                {
+                    "signal_id": "SIG-NOISE-EXIT0",
+                    "fingerprint": "fp-noise-exit0-33",
+                    "kind": "HARNESS_FRICTION",
+                    "source_project": proj_str,
+                    "role_or_tool": "run_command",
+                    "summary": "Command exited with code 0.\n12 passed",
+                    "created_at": fresh_ts,
+                    "resolved": False,
+                },
+                {
+                    "signal_id": "SIG-NOISE-READ",
+                    "fingerprint": "fp-noise-read-444",
+                    "kind": "HARNESS_FRICTION",
+                    "source_project": proj_str,
+                    "role_or_tool": "read_file",
+                    "summary": "Showing lines 1-40 of 40",
+                    "created_at": fresh_ts,
+                    "resolved": False,
+                },
+            ]
+        }
+        self.factory_inbox_file.write_text(json.dumps(seeded, indent=2), encoding="utf-8")
+
+        # 1. Default `inbox` and `inbox list --format json` / `--pending-only` / `human`
+        proc_default = self._run_cli(["inbox"])
+        self.assertEqual(proc_default.returncode, 0, f"inbox default failed: {proc_default.stderr}")
+
+        proc_list = self._run_cli(["inbox", "list", "--format", "json"])
+        self.assertEqual(proc_list.returncode, 0, f"inbox list --format json failed: {proc_list.stderr}")
+        parsed_all = json.loads(proc_list.stdout)
+        items_all = parsed_all["signals"] if isinstance(parsed_all, dict) else parsed_all
+        self.assertEqual(len(items_all), 4)
+
+        proc_pending = self._run_cli(["inbox", "list", "--pending-only", "--format", "json"])
+        self.assertEqual(proc_pending.returncode, 0, f"inbox list --pending-only failed: {proc_pending.stderr}")
+        parsed_pending = json.loads(proc_pending.stdout)
+        items_pending = parsed_pending["signals"] if isinstance(parsed_pending, dict) else parsed_pending
+        self.assertEqual({s["signal_id"] for s in items_pending}, {"SIG-KEEP-REAL", "SIG-NOISE-EXIT0", "SIG-NOISE-READ"})
+
+        proc_human = self._run_cli(["inbox", "list", "--format", "human"])
+        self.assertEqual(proc_human.returncode, 0)
+        self.assertTrue(bool(proc_human.stdout.strip()))
+
+        # 2. `inbox prune --dry-run --format json` leaves disk untouched
+        proc_dry = self._run_cli(["inbox", "prune", "--dry-run", "--format", "json"])
+        self.assertEqual(proc_dry.returncode, 0, f"inbox prune --dry-run failed: {proc_dry.stderr}")
+        dry_res = json.loads(proc_dry.stdout)
+        self.assertTrue(dry_res["dry_run"])
+        self.assertEqual(dry_res["before"], 4)
+        self.assertEqual(dry_res["removed"], 2)
+        self.assertEqual(dry_res["after"], 2)
+        self.assertEqual(dry_res["removed_by_reason"]["exit_zero"], 1)
+        self.assertEqual(dry_res["removed_by_reason"]["benign_tool"], 1)
+        self.assertEqual(len(json.loads(self.factory_inbox_file.read_text(encoding="utf-8"))["signals"]), 4)
+
+        # 3. `inbox prune --no-drop-exit-zero --no-drop-benign-tools --resolved-only --format json`
+        proc_resolved = self._run_cli([
+            "inbox", "prune", "--no-drop-exit-zero", "--no-drop-benign-tools", "--resolved-only", "--format", "json"
+        ])
+        self.assertEqual(proc_resolved.returncode, 0, f"inbox prune --resolved-only failed: {proc_resolved.stderr}")
+        res_resolved = json.loads(proc_resolved.stdout)
+        self.assertEqual(res_resolved["removed"], 1)
+        self.assertEqual(res_resolved["removed_by_reason"]["resolved"], 1)
+        self.assertEqual(res_resolved["after"], 3)
+
+        # 4. `inbox prune --project <repo> --max-age-days 7 --format json`
+        proc_apply = self._run_cli([
+            "inbox", "prune", "--project", proj_str, "--max-age-days", "7", "--format", "json"
+        ])
+        self.assertEqual(proc_apply.returncode, 0, f"inbox prune apply failed: {proc_apply.stderr}")
+        res_apply = json.loads(proc_apply.stdout)
+        self.assertFalse(res_apply["dry_run"])
+        self.assertEqual(res_apply["removed"], 2)
+        self.assertEqual(res_apply["after"], 1)
+        remaining = json.loads(self.factory_inbox_file.read_text(encoding="utf-8"))["signals"]
+        self.assertEqual([s["signal_id"] for s in remaining], ["SIG-KEEP-REAL"])
+
+        # 5. `inbox clear`
+        proc_clear = self._run_cli(["inbox", "clear"])
+        self.assertEqual(proc_clear.returncode, 0, f"inbox clear failed: {proc_clear.stderr}")
+        cleared = json.loads(self.factory_inbox_file.read_text(encoding="utf-8"))["signals"]
+        self.assertEqual(cleared, [])
+
+        # Host inbox never touched
+        self.assertEqual(host_inbox.exists(), host_existed)
+        if host_existed:
+            self.assertEqual(host_inbox.stat().st_mtime_ns, host_mtime_before)
+
 
 class TestSessionMiner(unittest.TestCase):
     def setUp(self):
@@ -3015,6 +3142,420 @@ class TestDistillHarvesterSlice2Fixes(unittest.TestCase):
         d2 = h2.harvest(project_path=self.repo_dir)
         roles_by_cid2 = {sig.session_id: sig.role for sig in d2.navigation_frictions}
         self.assertEqual(roles_by_cid2.get("child-file-1"), "examiner")
+
+
+class TestDistillHarnessAndInboxPruneFixes(unittest.TestCase):
+    """RED tests for Slice 3 Pillars 3 & 4: Step-0 orchestrator role cue, WSL Relay zero-exit noise, and FactoryInbox.prune()."""
+
+    def setUp(self):
+        self.temp_dir = Path(tempfile.mkdtemp(prefix="test_distill_s3_"))
+        self.inbox_file = self.temp_dir / "edge_factory_inbox.json"
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_extract_step0_role_cue_and_normalize_orchestrator(self):
+        from tools.distill.harvester import _extract_step0_role_cue, _normalize_station_role
+
+        self.assertEqual(_normalize_station_role("orchestrator"), "orchestrator")
+        self.assertEqual(_normalize_station_role("Sovereign Commander"), "orchestrator")
+        self.assertEqual(_normalize_station_role("Sovereign Commander (Orchestrator)"), "orchestrator")
+
+        # Explicit orchestrator cues resolve to "orchestrator", never "s"
+        self.assertEqual(
+            _extract_step0_role_cue([{"step_index": 0, "content": "You are the Sovereign Commander (Orchestrator) in the Green Zone."}]),
+            "orchestrator",
+        )
+        self.assertEqual(
+            _extract_step0_role_cue([{"step_index": 0, "content": "[EDGE ORCHESTRATOR ENFORCED]: Lead the Brigade."}]),
+            "orchestrator",
+        )
+        self.assertEqual(
+            _extract_step0_role_cue([{"step_index": 1, "content": "Persona: Sovereign Commander"}]),
+            "orchestrator",
+        )
+
+        # Negative phrases must NEVER capture "not"
+        self.assertIsNone(
+            _extract_step0_role_cue([{"step_index": 0, "content": "You are NOT allowed to edit production code directly."}])
+        )
+
+        # Worker prompts mentioning Sovereign Commander / EDGE ORCHESTRATOR stay worker role
+        self.assertEqual(
+            _extract_step0_role_cue([
+                {"step_index": 0, "content": "You are the SEAM_ARCHITECT station worker. Report to Sovereign Commander and never imitate EDGE ORCHESTRATOR."}
+            ]),
+            "seam_architect",
+        )
+        self.assertEqual(
+            _extract_step0_role_cue([
+                {"step_index": 0, "content": "Read agents/coder.md first. Note: Sovereign Commander is in the Green Zone."}
+            ]),
+            "coder",
+        )
+        self.assertEqual(
+            _extract_step0_role_cue([
+                {"step_index": 0, "content": "You are the persistent EXAMINER worker. Do not impersonate Sovereign Commander."}
+            ]),
+            "examiner",
+        )
+        self.assertEqual(
+            _extract_step0_role_cue([
+                {"step_index": 0, "content": "You are the ephemeral SPEC_CRITIC station worker."}
+            ]),
+            "spec_critic",
+        )
+        self.assertEqual(
+            _extract_step0_role_cue([{"step_index": 0, "content": "You are the CODER"}]),
+            "coder",
+        )
+
+        # Bare mentions without explicit orchestrator declaration return None
+        self.assertIsNone(
+            _extract_step0_role_cue([{"step_index": 0, "content": "Report completion back to the Sovereign Commander."}])
+        )
+        self.assertIsNone(
+            _extract_step0_role_cue([{"step_index": 0, "content": "Do not claim to be EDGE ORCHESTRATOR."}])
+        )
+
+    def test_has_explicit_runtime_error_ignores_benign_wsl_relay_zero_exit(self):
+        from tools.distill.harvester import (
+            _has_explicit_runtime_error,
+            _detect_error_and_exit_code,
+            _extract_tool_frictions_from_steps,
+        )
+
+        benign_wsl = "WSL (123 - Relay) Notice: starting session\nCommand exited with code 0.\n10 passed"
+        self.assertFalse(_has_explicit_runtime_error(benign_wsl))
+        self.assertFalse(_has_explicit_runtime_error('return "WSL (" in text'))
+        self.assertEqual(_detect_error_and_exit_code(benign_wsl), (False, None))
+
+        explicit_wsl_err = "WSL (12345 - Relay) ERROR: CreateProcessCommon failed"
+        self.assertTrue(_has_explicit_runtime_error(explicit_wsl_err))
+        self.assertEqual(_detect_error_and_exit_code(explicit_wsl_err), (True, None))
+        self.assertEqual(
+            _detect_error_and_exit_code(f"{explicit_wsl_err}\nCommand exited with code 1"),
+            (True, 1),
+        )
+        self.assertTrue(_has_explicit_runtime_error("wsl (99 - relay) error: socket timeout"))
+
+        # End-to-end step extraction with benign WSL Relay vs explicit ERROR:
+        steps_ok = [
+            {"step_index": 0, "type": "PLANNER_RESPONSE", "tool_calls": [{"name": "run_command", "args": {"CommandLine": "wsl pytest -q"}}]},
+            {"step_index": 1, "type": "GENERIC", "content": benign_wsl},
+        ]
+        self.assertEqual(_extract_tool_frictions_from_steps("cid-wsl-benign", steps_ok), [])
+
+        steps_fail = [
+            {"step_index": 0, "type": "PLANNER_RESPONSE", "tool_calls": [{"name": "run_command", "args": {"CommandLine": "wsl pytest -q"}}]},
+            {"step_index": 1, "type": "GENERIC", "content": explicit_wsl_err},
+        ]
+        self.assertEqual(len(_extract_tool_frictions_from_steps("cid-wsl-err", steps_fail)), 1)
+
+    def test_factory_inbox_prune_filters_preservation_markers_and_dry_run(self):
+        from datetime import datetime, timezone
+        from tools.distill import state
+        from tools.distill.state import FactoryInbox
+
+        self.assertTrue(hasattr(state, "_compute_signal_fingerprint"))
+        inbox = FactoryInbox(inbox_file_override=self.inbox_file)
+        sample_rec, sample_fp = inbox._build_signal_record({
+            "kind": "HARNESS_FRICTION",
+            "role_or_tool": "run_command",
+            "summary": "Created At: 2026-11-17T00:00:00Z\nWSL (101 - Relay) ERROR: boom",
+        })
+        self.assertEqual(
+            state._compute_signal_fingerprint(
+                "HARNESS_FRICTION",
+                "run_command",
+                "Created At: 2026-11-17T00:00:00Z\nWSL (101 - Relay) ERROR: boom",
+            ),
+            sample_fp,
+        )
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        syn_tok = "Syntax" + "Error"
+
+        def _rec(sid: str, kind: str, tool: str, summary: str, proj: str = "/home/oguz/app") -> Dict[str, Any]:
+            return {
+                "signal_id": sid,
+                "fingerprint": state._compute_signal_fingerprint(kind, tool, summary),
+                "kind": kind,
+                "source_project": proj,
+                "role_or_tool": tool,
+                "summary": summary,
+                "created_at": now_iso,
+                "resolved": False,
+            }
+
+        records = [
+            # Dropped records (10 total: 1 exit_zero, 8 benign_tool, 1 ephemeral)
+            _rec("drop-exit0", "HARNESS_FRICTION", "run_command", "Command exited with code 0.\n15 passed"),
+            _rec("drop-read", "HARNESS_FRICTION", "read_file", "Read src/app.ts cleanly"),
+            _rec("drop-board", "HARNESS_FRICTION", "read_board", "Board messages fetched"),
+            _rec("drop-edit", "HARNESS_FRICTION", "edit_file", "File updated"),
+            _rec("drop-task", "HARNESS_FRICTION", "manage_task", "Status checked"),
+            _rec("drop-sub", "HARNESS_FRICTION", "invoke_subagent", "Subagent started"),
+            _rec("drop-trunc", "HARNESS_FRICTION", "grep_search", "The tool's output was truncated"),
+            _rec("drop-lines", "HARNESS_FRICTION", "find_by_name", "Showing lines 1-20 of 50"),
+            _rec("drop-repl", "HARNESS_FRICTION", "replace_file_content", "Made 1 replacement in src/a.ts"),
+            _rec("drop-ephem", "HARNESS_FRICTION", "run_command", "Real failure", proj="/tmp/pytest-of-oguz/pytest-99/repo"),
+            # Preserved genuine signals (9 total)
+            _rec("keep-killed", "HARNESS_FRICTION", "manage_task", "Background command was forcefully killed"),
+            _rec("keep-hang", "HARNESS_FRICTION", "manage_task", "Task hung or required excessive polling"),
+            _rec("keep-exec", "HARNESS_FRICTION", "read_file", "Encountered error in tool execution: EACCES"),
+            _rec("keep-ts", "HARNESS_FRICTION", "run_command", "Command exited with code 0\nerror TS2322: bad type"),
+            _rec("keep-fatal", "HARNESS_FRICTION", "edit_file", "fatal: index locked"),
+            _rec("keep-exit2", "HARNESS_FRICTION", "read_file", "Command exited with code 2"),
+            _rec("keep-tb", "HARNESS_FRICTION", "invoke_subagent", "Traceback (most recent call last): crash"),
+            _rec("keep-syn", "HARNESS_FRICTION", "run_command", f"Command exited with code 0\n{syn_tok}: bad token"),
+            _rec("keep-escape", "STATION_ESCAPE", "examiner", "Command exited with code 0"),
+        ]
+        self.inbox_file.write_text(json.dumps({"signals": records}, indent=2), encoding="utf-8")
+        before_text = self.inbox_file.read_text(encoding="utf-8")
+
+        # 1. dry_run=True computes summary without touching disk
+        res_dry = inbox.prune(dry_run=True)
+        self.assertTrue(res_dry["dry_run"])
+        self.assertEqual(res_dry["before"], 19)
+        self.assertEqual(res_dry["after"], 9)
+        self.assertEqual(res_dry["removed"], 10)
+        self.assertEqual(
+            set(res_dry["removed_by_reason"].keys()),
+            {"exit_zero", "benign_tool", "ephemeral", "duplicate", "resolved", "expired"},
+        )
+        self.assertEqual(res_dry["removed_by_reason"]["exit_zero"], 1)
+        self.assertEqual(res_dry["removed_by_reason"]["benign_tool"], 8)
+        self.assertEqual(res_dry["removed_by_reason"]["ephemeral"], 1)
+        self.assertEqual(self.inbox_file.read_text(encoding="utf-8"), before_text)
+
+        # 2. dry_run=False persists kept records
+        res_apply = inbox.prune(dry_run=False)
+        self.assertFalse(res_apply["dry_run"])
+        self.assertEqual(res_apply["removed"], 10)
+        kept_ids = {s["signal_id"] for s in inbox.load_signals()}
+        self.assertEqual(
+            kept_ids,
+            {
+                "keep-killed",
+                "keep-hang",
+                "keep-exec",
+                "keep-ts",
+                "keep-fatal",
+                "keep-exit2",
+                "keep-tb",
+                "keep-syn",
+                "keep-escape",
+            },
+        )
+
+        # 3. Second prune when removed == 0 does not rewrite file
+        mtime_before_noop = self.inbox_file.stat().st_mtime_ns
+        res_noop = inbox.prune(dry_run=False)
+        self.assertEqual(res_noop["removed"], 0)
+        self.assertEqual(self.inbox_file.stat().st_mtime_ns, mtime_before_noop)
+
+        # 4. Flags drop_exit_zero=False, drop_benign_tools=False, drop_ephemeral=False preserve items
+        noise_inbox_file = self.temp_dir / "noise_flags_inbox.json"
+        noise_inbox = FactoryInbox(inbox_file_override=noise_inbox_file)
+        noise_inbox_file.write_text(json.dumps({"signals": records[:10]}, indent=2), encoding="utf-8")
+        res_keep_all = noise_inbox.prune(
+            drop_exit_zero=False,
+            drop_benign_tools=False,
+            drop_ephemeral=False,
+            deduplicate=False,
+            dry_run=True,
+        )
+        self.assertEqual(res_keep_all["removed"], 0)
+        self.assertEqual(res_keep_all["after"], 10)
+
+    def test_factory_inbox_prune_project_scope_dedup_resolved_and_max_age(self):
+        from datetime import datetime, timedelta, timezone
+        from tools.distill import state
+        from tools.distill.state import FactoryInbox
+
+        now = datetime.now(timezone.utc)
+        fresh_iso = (now - timedelta(hours=6)).isoformat()
+
+        # A. Project scoping (to_wsl_path + segment boundary) + cross-scope seen_fps dedup
+        inbox_a_file = self.temp_dir / "scope_dedup.json"
+        inbox_a = FactoryInbox(inbox_file_override=inbox_a_file)
+        seeded_a = [
+            {
+                "signal_id": "out-other",
+                "fingerprint": "stale-fp-1",
+                "kind": "HARNESS_FRICTION",
+                "source_project": "/home/oguz/other-app",
+                "role_or_tool": "run_command",
+                "summary": "Created At: 2026-11-10T00:00:00Z\nWSL (11 - Relay) ERROR: boom\nCommand exited with code 1",
+                "created_at": fresh_iso,
+                "resolved": False,
+            },
+            {
+                "signal_id": "in-unc-dup",
+                "fingerprint": "stale-fp-2",
+                "kind": "HARNESS_FRICTION",
+                "source_project": r"\\wsl.localhost\Ubuntu-24.04\home\oguz\app",
+                "role_or_tool": "run_command",
+                "summary": "Created At: 2026-11-11T00:00:00Z\nWSL (22 - Relay) ERROR: boom\nCommand exited with code 1",
+                "created_at": fresh_iso,
+                "resolved": False,
+            },
+            {
+                "signal_id": "in-slash-dup",
+                "fingerprint": "stale-fp-3",
+                "kind": "HARNESS_FRICTION",
+                "source_project": "/home/oguz/app/",
+                "role_or_tool": "run_command",
+                "summary": "Created At: 2026-11-12T00:00:00Z\nWSL (33 - Relay) ERROR: boom\nCommand exited with code 1",
+                "created_at": fresh_iso,
+                "resolved": False,
+            },
+            {
+                "signal_id": "out-prefix-trap",
+                "fingerprint": state._compute_signal_fingerprint("HARNESS_FRICTION", "run_command", "Command exited with code 0"),
+                "kind": "HARNESS_FRICTION",
+                "source_project": "/home/oguz/app-v2",
+                "role_or_tool": "run_command",
+                "summary": "Command exited with code 0",
+                "created_at": fresh_iso,
+                "resolved": False,
+            },
+            {
+                "signal_id": "out-win-drive",
+                "fingerprint": state._compute_signal_fingerprint("HARNESS_FRICTION", "run_command", "Command exited with code 0"),
+                "kind": "HARNESS_FRICTION",
+                "source_project": "/mnt/c/users/oguz_/winapp",
+                "role_or_tool": "run_command",
+                "summary": "Command exited with code 0",
+                "created_at": fresh_iso,
+                "resolved": False,
+            },
+            {
+                "signal_id": "in-unique-1",
+                "fingerprint": "stale-fp-4",
+                "kind": "HARNESS_FRICTION",
+                "source_project": "/home/oguz/app",
+                "role_or_tool": "run_command",
+                "summary": "ERROR: unique failure alpha",
+                "created_at": fresh_iso,
+                "resolved": False,
+            },
+            {
+                "signal_id": "in-unique-dup",
+                "fingerprint": "stale-fp-5",
+                "kind": "HARNESS_FRICTION",
+                "source_project": "/home/oguz/app",
+                "role_or_tool": "run_command",
+                "summary": "ERROR: unique failure alpha",
+                "created_at": fresh_iso,
+                "resolved": False,
+            },
+        ]
+        inbox_a_file.write_text(json.dumps({"signals": seeded_a}, indent=2), encoding="utf-8")
+
+        # deduplicate=False keeps all in-scope duplicates
+        res_nodedup = inbox_a.prune(project="/home/oguz/app", deduplicate=False, dry_run=True)
+        self.assertEqual(res_nodedup["removed"], 0)
+
+        # deduplicate=True drops in-scope duplicates (including those matching out-other's seen_fps)
+        # while leaving /home/oguz/app-v2 and /mnt/c/users/oguz_/winapp untouched
+        res_scoped = inbox_a.prune(project="/home/oguz/app", deduplicate=True, dry_run=False)
+        self.assertEqual(res_scoped["removed"], 3)
+        self.assertEqual(res_scoped["removed_by_reason"]["duplicate"], 3)
+        kept_a_ids = {s["signal_id"] for s in inbox_a.load_signals()}
+        self.assertEqual(kept_a_ids, {"out-other", "out-prefix-trap", "out-win-drive", "in-unique-1"})
+
+        # Windows drive case-insensitive equivalence via to_wsl_path
+        res_win = inbox_a.prune(project=r"C:\Users\Oguz_\winapp", dry_run=False)
+        self.assertEqual(res_win["removed"], 1)
+        self.assertEqual(res_win["removed_by_reason"]["exit_zero"], 1)
+        self.assertNotIn("out-win-drive", {s["signal_id"] for s in inbox_a.load_signals()})
+
+        # B. resolved_only=True only drops resolved=True records and skips unresolved noise
+        inbox_b_file = self.temp_dir / "resolved_only.json"
+        inbox_b = FactoryInbox(inbox_file_override=inbox_b_file)
+        seeded_b = [
+            {
+                "signal_id": "b-res",
+                "fingerprint": "fp-b-1",
+                "kind": "HARNESS_FRICTION",
+                "source_project": "/home/oguz/app",
+                "role_or_tool": "run_command",
+                "summary": "ERROR: fixed bug",
+                "created_at": fresh_iso,
+                "resolved": True,
+            },
+            {
+                "signal_id": "b-unres-noise",
+                "fingerprint": "fp-b-2",
+                "kind": "HARNESS_FRICTION",
+                "source_project": "/home/oguz/app",
+                "role_or_tool": "run_command",
+                "summary": "Command exited with code 0",
+                "created_at": fresh_iso,
+                "resolved": False,
+            },
+        ]
+        inbox_b_file.write_text(json.dumps({"signals": seeded_b}, indent=2), encoding="utf-8")
+        res_b = inbox_b.prune(resolved_only=True, dry_run=False)
+        self.assertEqual(res_b["removed"], 1)
+        self.assertEqual(res_b["removed_by_reason"]["resolved"], 1)
+        self.assertEqual(res_b["removed_by_reason"]["exit_zero"], 0)
+        self.assertEqual([s["signal_id"] for s in inbox_b.load_signals()], ["b-unres-noise"])
+
+        # C. max_age_days handles naive UTC timestamps, Z timestamps, and malformed timestamps safely
+        inbox_c_file = self.temp_dir / "max_age.json"
+        inbox_c = FactoryInbox(inbox_file_override=inbox_c_file)
+        old_naive = (now - timedelta(days=10)).replace(tzinfo=None).isoformat()
+        old_z = (now - timedelta(days=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        seeded_c = [
+            {
+                "signal_id": "c-old-naive",
+                "fingerprint": "fp-c-1",
+                "kind": "HARNESS_FRICTION",
+                "source_project": "/home/oguz/app",
+                "role_or_tool": "run_command",
+                "summary": "ERROR: old naive",
+                "created_at": old_naive,
+                "resolved": False,
+            },
+            {
+                "signal_id": "c-old-z",
+                "fingerprint": "fp-c-2",
+                "kind": "HARNESS_FRICTION",
+                "source_project": "/home/oguz/app",
+                "role_or_tool": "run_command",
+                "summary": "ERROR: old z",
+                "created_at": old_z,
+                "resolved": False,
+            },
+            {
+                "signal_id": "c-malformed",
+                "fingerprint": "fp-c-3",
+                "kind": "HARNESS_FRICTION",
+                "source_project": "/home/oguz/app",
+                "role_or_tool": "run_command",
+                "summary": "ERROR: malformed ts",
+                "created_at": "not-a-timestamp",
+                "resolved": False,
+            },
+            {
+                "signal_id": "c-fresh",
+                "fingerprint": "fp-c-4",
+                "kind": "HARNESS_FRICTION",
+                "source_project": "/home/oguz/app",
+                "role_or_tool": "run_command",
+                "summary": "ERROR: fresh ts",
+                "created_at": fresh_iso,
+                "resolved": False,
+            },
+        ]
+        inbox_c_file.write_text(json.dumps({"signals": seeded_c}, indent=2), encoding="utf-8")
+        res_c = inbox_c.prune(max_age_days=7, dry_run=False)
+        self.assertEqual(res_c["removed"], 2)
+        self.assertEqual(res_c["removed_by_reason"]["expired"], 2)
+        self.assertEqual({s["signal_id"] for s in inbox_c.load_signals()}, {"c-malformed", "c-fresh"})
 
 
 if __name__ == "__main__":

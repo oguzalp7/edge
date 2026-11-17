@@ -58,15 +58,12 @@ def test_primary_model_succeeds(tmp_path: Path):
         assert result.error is None
         assert mock_run.call_count == 1
 
-        # Check command args
+        # Check command args: agy --mode plan --model <model> -p <prompt>
         cmd = mock_run.call_args[0][0]
+        assert len(cmd) == 7
         assert cmd[0] == "agy"
-        assert cmd[1] == "-p"
-        assert cmd[2] == "--mode"
-        assert cmd[3] == "plan"
-        assert cmd[4] == "--model"
-        assert cmd[5] == "claude-opus-5-5-high"
-        prompt_arg = cmd[6]
+        assert cmd[1:6] == ["--mode", "plan", "--model", "claude-opus-5-5-high", "-p"]
+        prompt_arg = cmd[-1]
         assert "slice-auth.md" in prompt_arg
         assert "# Slice Auth Specification" in prompt_arg
 
@@ -122,10 +119,12 @@ def test_primary_quota_error_triggers_fallback_success(tmp_path: Path):
 
         # Check call 1 was primary, call 2 was fallback
         call_1_cmd = mock_run.call_args_list[0][0][0]
-        assert call_1_cmd[5] == "claude-opus-5-5-high"
+        assert call_1_cmd[1:6] == ["--mode", "plan", "--model", "claude-opus-5-5-high", "-p"]
+        assert "slice-booking.md" in call_1_cmd[-1]
 
         call_2_cmd = mock_run.call_args_list[1][0][0]
-        assert call_2_cmd[5] == "gemini-3.8-flash-high"
+        assert call_2_cmd[1:6] == ["--mode", "plan", "--model", "gemini-3.8-flash-high", "-p"]
+        assert "slice-booking.md" in call_2_cmd[-1]
 
         # Check persisted report
         report_file = repo_dir / ".edge" / "specs" / "slice-booking-critique.md"

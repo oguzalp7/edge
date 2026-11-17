@@ -296,6 +296,11 @@ tracked_paths:
         self.assertEqual(res.status, "DRIFT_DETECTED")
         self.assertTrue(res.llm_invoked)
         self.assertEqual(len(llm_called), 1)
+        agy_cmd = llm_called[0]
+        self.assertEqual(len(agy_cmd), 7)
+        self.assertEqual(agy_cmd[:5], ["agy", "--mode", "plan", "--model", DRIFT_MODEL])
+        self.assertEqual(agy_cmd[5], "-p")
+        self.assertIn("bookings", agy_cmd[-1])
         self.assertIn("BROKEN_INVARIANT", res.findings_markdown)
 
         # Verify report was written
@@ -457,10 +462,13 @@ tracked_paths:
 - Subscription orders deferred to Phase 2.
 """
 
+        agy_cmds = []
+
         def mock_cmd(cmd, cwd=None, timeout=None):
             if cmd == ["git", "rev-parse", "HEAD"]:
                 return (0, "sha_initial", "")
             if isinstance(cmd, list) and cmd[0] == "agy":
+                agy_cmds.append(cmd)
                 return (0, mock_generated_doc, "")
             return (1, "", "Unknown")
 
@@ -475,6 +483,12 @@ tracked_paths:
         )
 
         self.assertTrue(success)
+        self.assertEqual(len(agy_cmds), 1)
+        agy_cmd = agy_cmds[0]
+        self.assertEqual(len(agy_cmd), 7)
+        self.assertEqual(agy_cmd[:5], ["agy", "--mode", "plan", "--model", DRIFT_MODEL])
+        self.assertEqual(agy_cmd[5], "-p")
+        self.assertIn("orders", agy_cmd[-1])
         self.assertTrue(target_path.exists())
         self.assertIn("orders.md", str(target_path))
 
