@@ -2820,5 +2820,203 @@ class TestDistillSwarmLinkingAndWorktreeMatching(unittest.TestCase):
         self.assertIn("collection error exit 2", insights_toon)
 
 
+class TestDistillHarvesterSlice2Fixes(unittest.TestCase):
+    """RED tests for Slice 2 Pillar 4: 3 Live-Shadow-Harvest Fixes."""
+
+    def setUp(self):
+        self.temp_dir = Path(tempfile.mkdtemp(prefix="test_distill_s2_"))
+        self.brain_root = self.temp_dir / "brain"
+        self.brain_root.mkdir(parents=True)
+        self.repo_dir = self.temp_dir / "target-project"
+        self.repo_dir.mkdir(parents=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _create_session(self, conv_id: str, steps: List[Dict[str, Any]]) -> Path:
+        logs_dir = self.brain_root / conv_id / ".system_generated" / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        with open(logs_dir / "transcript.jsonl", "w", encoding="utf-8") as f:
+            for st in steps:
+                f.write(json.dumps(st) + "\n")
+        return self.brain_root / conv_id
+
+    def test_read_search_tools_ignore_error_text_in_file_contents_and_mixed_turns(self):
+        from tools.distill.harvester import _extract_tool_frictions_from_steps
+
+        noisy_file_body = (
+            "FAILED test_x\n"
+            "exit code 1\n"
+            "error TS2322: Type 'string' is not assignable\n"
+            "Traceback (most recent call last):\n"
+            "AssertionError: expected True\n"
+            "SyntaxError: invalid syntax\n"
+            "ModuleNotFoundError: No module named x\n"
+            "npm ERR! code ELIFECYCLE\n"
+            "Command failed\n"
+            "fatal: not a git repository\n"
+            "WSL (123 - Relay)\n"
+        )
+
+        # 1. Single-tool read/search calls returning noisy file text -> 0 frictions
+        for tool_name in ("read_file", "view_file", "grep_search", "find_by_name", "list_dir"):
+            steps = [
+                {"step_index": 0, "type": "PLANNER_RESPONSE", "tool_calls": [{"name": tool_name, "args": {"Path": "src/a.py"}}]},
+                {"step_index": 1, "type": "TOOL_RESULT", "content": noisy_file_body},
+            ]
+            self.assertEqual(
+                _extract_tool_frictions_from_steps(f"cid-{tool_name}", steps),
+                [],
+                f"{tool_name} must NOT emit ToolFrictionSignal for error keywords inside file content",
+            )
+
+        # 2. Mixed multi-tool turn where len(results_list) != len(tool_calls):
+        #    read_file must NOT inherit run_command's joined failure
+        mixed_unaligned = [
+            {
+                "step_index": 0,
+                "type": "PLANNER_RESPONSE",
+                "tool_calls": [
+                    {"name": "read_file", "args": {"Path": "src/a.py"}},
+                    {"name": "run_command", "args": {"CommandLine": "pytest -q"}},
+                ],
+            },
+            {"step_index": 1, "type": "GENERIC", "content": "FAILED tests/test_a.py\nCommand exited with code 1."},
+        ]
+        frictions_unaligned = _extract_tool_frictions_from_steps("cid-mixed-unaligned", mixed_unaligned)
+        self.assertEqual([f.tool_name for f in frictions_unaligned], ["run_command"])
+
+        # 3. Mixed multi-tool turn where len(results_list) == len(tool_calls):
+        #    read_file has noisy content, run_command exits 0 -> 0 frictions
+        mixed_aligned = [
+            {
+                "step_index": 0,
+                "type": "PLANNER_RESPONSE",
+                "tool_calls": [
+                    {"name": "read_file", "args": {"Path": "src/a.py"}},
+                    {"name": "run_command", "args": {"CommandLine": "pytest -q"}},
+                ],
+            },
+            {"step_index": 1, "type": "TOOL_RESULT", "content": noisy_file_body},
+            {"step_index": 2, "type": "GENERIC", "content": "Command exited with code 0.\n10 passed"},
+        ]
+        self.assertEqual(_extract_tool_frictions_from_steps("cid-mixed-aligned", mixed_aligned), [])
+
+        # 4. Explicit tool errors on read_file MUST still emit ToolFrictionSignal
+        explicit_err_steps = [
+            {"step_index": 0, "type": "PLANNER_RESPONSE", "tool_calls": [{"name": "read_file", "args": {"Path": "missing.py"}}]},
+            {"step_index": 1, "type": "GENERIC", "content": "Encountered error in tool execution: File does not exist"},
+            {"step_index": 2, "type": "PLANNER_RESPONSE", "tool_calls": [{"name": "read_file", "args": {"Path": "locked.py"}}]},
+            {"step_index": 3, "type": "GENERIC", "content": "Command exited with code 1.\nPermission denied"},
+        ]
+        explicit_frictions = _extract_tool_frictions_from_steps("cid-read-err", explicit_err_steps)
+        self.assertEqual(len(explicit_frictions), 2)
+        self.assertEqual(explicit_frictions[1].exit_code, 1)
+
+    def test_check_examiner_escape_ignores_step0_system_and_read_search_results(self):
+        from tools.distill.harvester import _extract_station_escapes_from_steps
+
+        # 1. SYSTEM / USER_INPUT Step-0 prompt containing 'EXAMINER REVIEW: PASS' must be ignored
+        for src, stype in (("SYSTEM", "SYSTEM_MESSAGE"), ("USER_EXPLICIT", "USER_INPUT")):
+            steps_prompt = [
+                {"step_index": 0, "source": src, "type": stype, "content": "If clean, state: 'EXAMINER REVIEW: PASS'."},
+                {"step_index": 1, "source": "MODEL", "type": "PLANNER_RESPONSE", "tool_calls": [{"name": "run_command", "args": {"CommandLine": "pytest"}}]},
+                {"step_index": 2, "source": "GENERIC", "type": "GENERIC", "content": "FAILED tests/test_x.py (exit code 1)"},
+            ]
+            escapes = [e for e in _extract_station_escapes_from_steps("cid-sys0", steps_prompt) if e.escape_type == "ESCAPED_DEFECT"]
+            self.assertEqual(escapes, [], f"Must ignore EXAMINER REVIEW: PASS in {src}/{stype} step 0")
+
+        # 2. MODEL PASS followed by read_file/grep_search result containing 'FAILED'/'exit code 1' must be ignored
+        steps_read_after = [
+            {"step_index": 1, "source": "MODEL", "type": "PLANNER_RESPONSE", "content": "EXAMINER REVIEW: PASS"},
+            {"step_index": 2, "source": "MODEL", "type": "PLANNER_RESPONSE", "tool_calls": [{"name": "read_file", "args": {"Path": "docs/notes.md"}}]},
+            {"step_index": 3, "source": "GENERIC", "type": "TOOL_RESULT", "content": "Past note: FAILED with exit code 1"},
+            {"step_index": 4, "source": "MODEL", "type": "PLANNER_RESPONSE", "tool_calls": [{"name": "grep_search", "args": {"Query": "FAIL"}}]},
+            {"step_index": 5, "source": "GENERIC", "type": "GENERIC", "content": "tests/test_a.py: FAIL"},
+        ]
+        escapes_read = [e for e in _extract_station_escapes_from_steps("cid-read-after", steps_read_after) if e.escape_type == "ESCAPED_DEFECT"]
+        self.assertEqual(escapes_read, [])
+
+        # 3. Synthetic MODEL step-0 fixture followed by run_command failure STILL detects ESCAPED_DEFECT
+        steps_model0 = [
+            {"step_index": 0, "source": "MODEL", "type": "PLANNER_RESPONSE", "content": "EXAMINER REVIEW: PASS"},
+            {"step_index": 1, "source": "MODEL", "type": "PLANNER_RESPONSE", "tool_calls": [{"name": "run_command", "args": {"CommandLine": "python tools/gate.py"}}]},
+            {"step_index": 2, "source": "GENERIC", "type": "GENERIC", "content": "gate.py: FAILED with exit code 1"},
+        ]
+        escapes_model0 = [e for e in _extract_station_escapes_from_steps("cid-model0", steps_model0) if e.escape_type == "ESCAPED_DEFECT"]
+        self.assertEqual(len(escapes_model0), 1)
+
+    def test_navigation_friction_role_resolution_invoke_subagent_active_stations_and_step0(self):
+        from tools.distill.harvester import TranscriptGraphHarvester
+
+        # Parent session spawns 2 parallel invoke_subagent workers with descriptive Role args
+        parent_steps = [
+            {"step_index": 0, "workspaceUris": [f"file://{self.repo_dir.as_posix()}"]},
+            {
+                "step_index": 1,
+                "source": "MODEL",
+                "type": "PLANNER_RESPONSE",
+                "tool_calls": [
+                    {"name": "invoke_subagent", "args": {"TypeName": "self", "Role": "Surgeon Specialist", "Prompt": "Refactor"}},
+                    {"name": "invoke_subagent", "args": {"TypeName": "self", "Role": "Codebase Researcher", "Prompt": "Trace"}},
+                ],
+            },
+            {"step_index": 2, "type": "TOOL_RESULT", "content": '{"conversationId": "child-surg-1"}'},
+            {"step_index": 3, "type": "TOOL_RESULT", "content": '{"conversationId": "child-res-1"}'},
+        ]
+        self._create_session("parent-invoke-1", parent_steps)
+
+        def _ten_reads(prefix: str = "") -> List[Dict[str, Any]]:
+            steps: List[Dict[str, Any]] = []
+            if prefix:
+                steps.append({"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT", "content": prefix})
+            start = len(steps)
+            for i in range(10):
+                steps.append({"step_index": start + i, "tool_calls": [{"name": "read_file", "args": {"Path": f"src/f{i}.py"}}]})
+            return steps
+
+        self._create_session("child-surg-1", _ten_reads())
+        self._create_session("child-res-1", _ten_reads())
+        self._create_session("child-file-1", _ten_reads("You are the CODER station worker"))
+
+        cue_coder_steps = _ten_reads("Read agents/coder.md first")
+        cue_coder_steps[0]["workspaceUris"] = [f"file://{self.repo_dir.as_posix()}"]
+        self._create_session("sess-cue-coder", cue_coder_steps)
+
+        cue_spec_steps = _ten_reads("You are the SPEC_WRITER station worker")
+        cue_spec_steps[0]["workspaceUris"] = [f"file://{self.repo_dir.as_posix()}"]
+        self._create_session("sess-cue-spec", cue_spec_steps)
+
+        anon_steps = _ten_reads()
+        anon_steps[0]["workspaceUris"] = [f"file://{self.repo_dir.as_posix()}"]
+        self._create_session("sess-anon-hermetic", anon_steps)
+
+        # 1. Hermetic run with active_stations_file=None:
+        #    parent-invoke-1 children resolve via invoke_subagent Role; Step-0 cues resolve; anon stays "unknown"
+        h1 = TranscriptGraphHarvester(brain_roots=[self.brain_root], repo_path=self.repo_dir, active_stations_file=None)
+        d1 = h1.harvest(project_path=self.repo_dir)
+        roles_by_cid1 = {sig.session_id: sig.role for sig in d1.navigation_frictions}
+        self.assertEqual(roles_by_cid1.get("child-surg-1"), "surgeon")
+        self.assertEqual(roles_by_cid1.get("child-res-1"), "researcher")
+        self.assertEqual(roles_by_cid1.get("sess-cue-coder"), "coder")
+        self.assertEqual(roles_by_cid1.get("sess-cue-spec"), "spec_writer")
+        self.assertEqual(roles_by_cid1.get("sess-anon-hermetic"), "unknown")
+
+        # 2. Explicit active_stations_file overrides Step-0 cue for child-file-1
+        active_file = self.temp_dir / "active_stations.json"
+        active_file.write_text(
+            json.dumps({
+                "stations": {
+                    "child-file-1": {"parentConversationId": "parent-invoke-1", "role": "examiner"}
+                }
+            }),
+            encoding="utf-8",
+        )
+        h2 = TranscriptGraphHarvester(brain_roots=[self.brain_root], repo_path=self.repo_dir, active_stations_file=active_file)
+        d2 = h2.harvest(project_path=self.repo_dir)
+        roles_by_cid2 = {sig.session_id: sig.role for sig in d2.navigation_frictions}
+        self.assertEqual(roles_by_cid2.get("child-file-1"), "examiner")
+
+
 if __name__ == "__main__":
     unittest.main()
