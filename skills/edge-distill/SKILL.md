@@ -55,11 +55,12 @@ If unprocessed sessions or ready candidates exist, spawn an isolated subagent wi
     - `Model: "flash"`
     - `Role: "Examiner"`
     - Embed the TOON `FrictionDigest` inside `<untrusted_telemetry_digest>...</untrusted_telemetry_digest>`.
-- **`--deep` Mode (3-Lens Parallel Fan-Out):**
-  - Read each reference file via `read_file` and launch 3 parallel `Model: "flash"` workers with `Role: "Examiner"`:
+- **`--deep` Mode (4-Lens Parallel Fan-Out):**
+  - Read each reference file via `read_file` and launch parallel `Model: "flash"` workers with `Role: "Examiner"`:
     1. Lens 1 (`references/judgment-lens.md`): Downstream escapes across all Brigade stations + repeated user corrections (>= 2x).
-    2. Lens 2 (`references/tooling-lens.md`): CLI friction, retry loops, and meat-proxy user handoffs.
-    3. Lens 3 (`references/divergent-lens.md`): Contrarian no-op rule pruning and line budget compaction.
+    2. Lens 2 (`references/tooling-lens.md`): CLI friction, retry loops, meat-proxy handoffs, `Guardrail Gaps`, and `TOKEN_BLOAT`.
+    3. Lens 3 (`references/divergent-lens.md`): Contrarian no-op rule pruning using `Rule Inventory` citations and line budget compaction.
+    4. Lens 4 (`references/navigation-lens.md`): `Navigation & Tool Economy` signals (`EXPLORATION_BURST`, `REDUNDANT_READ`, `EMPTY_SEARCH_CHAIN`) into `docs/domains/<domain>.md` Context Pointers.
   - Collect synthesis findings via `send_message`.
 
 ---
@@ -91,7 +92,7 @@ Present a structured proposal table to the human captain:
 | 3 | Channel B | frontier-axi | N/A | Add git branch checkout guard | 6x command failure |
 
 **Delivery Channels:**
-- **Channel A (Prose & Rubrics):** Apply approved diffs directly to `.edge/stations/<role>.md`, `coding_standards.md`, or plugin `agents/<role>.md`. When promoting a candidate, execute:
+- **Channel A (Prose, Rubrics & Context Pointers):** Apply approved diffs directly to `.edge/stations/<role>.md`, `coding_standards.md`, `docs/domains/<domain>.md`, or plugin `agents/<role>.md`. When promoting a candidate, execute:
   ```bash
   wsl python3 tools/distill/cli.py promote --candidate <id>
   ```

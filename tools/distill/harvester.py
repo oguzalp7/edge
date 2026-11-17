@@ -16,13 +16,17 @@ from typing import List, Dict, Any, Optional, Tuple, Set
 from datetime import datetime, timezone
 import hashlib
 
-from tools.distill.state import FactoryInbox
+from tools.common.paths import to_wsl_path
+from tools.distill.state import FactoryInbox, collect_budget_targets
 from tools.distill.models import (
     FrictionDigest,
     StationEscapeSignal,
     ToolFrictionSignal,
     RepeatedEscalation,
     DistillWatermarkState,
+    NavigationFrictionSignal,
+    GuardrailGapSignal,
+    RuleInventoryItem,
 )
 
 
@@ -298,44 +302,632 @@ HARNESS_KEYWORDS = (
 )
 
 
+def _read_json_safe(fpath: Path) -> Optional[Dict[str, Any]]:
+    if not fpath.is_file():
+        return None
+    try:
+        data = json.loads(fpath.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _normalize_match_path(raw: Optional[str]) -> str:
+    """Symmetrically normalizes file:// URIs, Windows UNC paths, and WSL paths."""
+    if not raw or not isinstance(raw, str):
+        return ""
+    s = raw.strip()
+    low = s.lower()
+    if low.startswith("file:///\\"):
+        s = s[8:]
+    elif low.startswith("file://wsl.localhost/") or low.startswith("file://wsl$/"):
+        s = "//" + s[7:]
+    elif low.startswith("file://"):
+        s = s[7:]
+        if re.match(r"^/[a-zA-Z]:/", s):
+            s = s[1:]
+    return to_wsl_path(s).replace("\\", "/").rstrip("/").lower()
+
+
+def _collect_worktree_aliases(project_path: Path) -> List[str]:
+    """Collects active worktree aliases from .edge/brigade.json and .edge/checkpoint.json."""
+    aliases: List[str] = []
+    for rel in (".edge/brigade.json", ".edge/checkpoint.json"):
+        data = _read_json_safe(project_path / rel)
+        if not data:
+            continue
+        ticket = data.get("active_ticket")
+        wt_ticket = ticket.get("worktree_path") if isinstance(ticket, dict) else None
+        for raw in (data.get("active_worktree"), wt_ticket):
+            norm = _normalize_match_path(raw)
+            if norm and norm not in aliases:
+                aliases.append(norm)
+    return aliases
+
+
+def _matches_treehouse_slot(text: str, project_name: str) -> bool:
+    if not text or not project_name:
+        return False
+    norm = _normalize_match_path(text) or text.replace("\\", "/").lower()
+    pname = project_name.strip().lower()
+    return bool(re.search(rf"/\.treehouse/pool/[^/]+/{re.escape(pname)}(?:/|$)", norm))
+
+
 def _collect_workspace_uris(steps: List[Dict[str, Any]]) -> Set[str]:
     all_uris: Set[str] = set()
     for step in steps:
         uris = step.get("workspaceUris") or step.get("workspace_uris") or []
         for u in uris:
-            all_uris.add(str(u).replace("\\", "/").lower())
+            norm = _normalize_match_path(str(u))
+            if norm:
+                all_uris.add(norm)
     return all_uris
 
 
-def _step_references_project(step: Dict[str, Any], proj_str: str) -> bool:
+def _text_matches_targets(raw_text: str, target_strs: List[str], proj_name: str) -> bool:
+    norm = _normalize_match_path(raw_text) or raw_text.replace("\\", "/").lower()
+    if any(t in norm for t in target_strs):
+        return True
+    return _matches_treehouse_slot(norm, proj_name)
+
+
+def _step_references_project(step: Dict[str, Any], target_strs: List[str], proj_name: str = "") -> bool:
     for tc in step.get("tool_calls", []):
         for val in tc.get("args", {}).values():
-            if proj_str in str(val).replace("\\", "/").lower():
+            if _text_matches_targets(str(val), target_strs, proj_name):
                 return True
     return False
 
 
-def _calculate_tool_match_ratio(steps: List[Dict[str, Any]], proj_str: str) -> float:
+def _calculate_tool_match_ratio(steps: List[Dict[str, Any]], target_strs: List[str], proj_name: str = "") -> float:
     total = 0
     matched = 0
     for step in steps:
         if step.get("tool_calls"):
             total += 1
-            if _step_references_project(step, proj_str):
+            if _step_references_project(step, target_strs, proj_name):
                 matched += 1
     return (matched / total) if total > 0 else 0.0
 
 
-def _session_matches_project(steps: List[Dict[str, Any]], project_path: Path) -> bool:
-    proj_str = project_path.as_posix().lower()
+def _session_matches_project(
+    steps: List[Dict[str, Any]],
+    project_path: Path,
+    extra_project_paths: Optional[List[str]] = None,
+) -> bool:
+    target_strs: List[str] = []
+    for raw in [str(project_path)] + list(extra_project_paths or []):
+        norm = _normalize_match_path(raw)
+        if norm and norm not in target_strs:
+            target_strs.append(norm)
+    proj_name = project_path.name.lower()
+
     all_uris = _collect_workspace_uris(steps)
     if all_uris:
-        return any(proj_str in u for u in all_uris)
-    return _calculate_tool_match_ratio(steps, proj_str) >= 0.30
+        return any(_text_matches_targets(u, target_strs, proj_name) for u in all_uris)
+    return _calculate_tool_match_ratio(steps, target_strs, proj_name) >= 0.30
 
 
 def _matches_project(steps: List[Dict[str, Any]], project_path: Path) -> bool:
     return _session_matches_project(steps, project_path)
+
+
+READ_SEARCH_TOOLS = {"read_file", "view_file", "find_by_name", "grep_search", "list_dir"}
+SEARCH_ONLY_TOOLS = {"grep_search", "find_by_name"}
+READ_ONLY_TOOLS = {"read_file", "view_file"}
+MUTATION_TOOLS = {"edit_file", "write_file", "replace_file_content", "multi_replace_file_content"}
+READ_SEARCH_CMDS = {"rg", "grep", "find", "git grep", "ls", "tree"}
+SEARCH_ONLY_CMDS = {"rg", "grep", "find", "git grep"}
+_WSL_VALUE_FLAGS = {"--cd", "-d", "--distribution", "-u", "--user"}
+
+
+def _extract_tool_file_path(args: Dict[str, Any]) -> str:
+    if not isinstance(args, dict):
+        return ""
+    raw = args.get("Path") or args.get("AbsolutePath") or args.get("TargetFile") or ""
+    return str(raw).replace("\\", "/").strip()
+
+
+def _peel_wsl_prefix(tokens: List[str]) -> List[str]:
+    idx = 1
+    while idx < len(tokens):
+        tok = tokens[idx]
+        if tok in _WSL_VALUE_FLAGS:
+            idx += 2
+        elif tok.startswith("-"):
+            idx += 1
+        else:
+            break
+    return tokens[idx:]
+
+
+def _peel_command_wrappers(tokens: List[str]) -> List[str]:
+    while tokens:
+        head = Path(tokens[0].strip("'\"")).name.lower()
+        if head == "wsl":
+            tokens = _peel_wsl_prefix(tokens)
+        elif head in ("bash", "sh", "zsh") and len(tokens) >= 2 and tokens[1] in ("-c", "-lc"):
+            tokens = [tokens[2].lstrip("'\"")] + tokens[3:] if len(tokens) > 2 else []
+        elif head == "env":
+            tokens = [t for t in tokens[1:] if "=" not in t]
+        else:
+            break
+    return tokens
+
+
+def _segment_command_verb(segment: str) -> Optional[str]:
+    tokens = _peel_command_wrappers(segment.strip().split())
+    if not tokens:
+        return None
+    verb0 = Path(tokens[0].strip("'\"")).name.lower()
+    if verb0 == "git" and len(tokens) > 1:
+        verb1 = tokens[1].strip("'\"").lower()
+        return "git grep" if verb1 == "grep" else f"git {verb1}"
+    return verb0
+
+
+def _classify_run_command(cmd: str) -> Tuple[bool, bool]:
+    if not cmd:
+        return False, False
+    is_read = False
+    is_search = False
+    for seg in re.split(r"\s*(?:&&|\|\||[;|])\s*", cmd):
+        verb = _segment_command_verb(seg)
+        if verb in READ_SEARCH_CMDS:
+            is_read = True
+        if verb in SEARCH_ONLY_CMDS:
+            is_search = True
+    return is_read, is_search
+
+
+def _is_read_or_search_call(tc: Dict[str, Any]) -> bool:
+    tname = tc.get("name", "")
+    if tname in READ_SEARCH_TOOLS:
+        return True
+    if tname == "run_command":
+        return _classify_run_command(str(tc.get("args", {}).get("CommandLine", "")))[0]
+    return False
+
+
+def _is_search_only_call(tc: Dict[str, Any]) -> bool:
+    tname = tc.get("name", "")
+    if tname in SEARCH_ONLY_TOOLS:
+        return True
+    if tname == "run_command":
+        return _classify_run_command(str(tc.get("args", {}).get("CommandLine", "")))[1]
+    return False
+
+
+def _scan_pre_edit_reads(steps: List[Dict[str, Any]]) -> Tuple[int, Optional[int], int, List[str]]:
+    read_count = 0
+    first_mut_step: Optional[int] = None
+    last_read_step = 0
+    unique_paths: List[str] = []
+    for idx, step in enumerate(steps):
+        s_idx = int(step.get("step_index", idx))
+        for tc in step.get("tool_calls", []):
+            if tc.get("name", "") in MUTATION_TOOLS:
+                return read_count, s_idx, last_read_step, unique_paths
+            if _is_read_or_search_call(tc):
+                read_count += 1
+                last_read_step = s_idx
+                fp = _extract_tool_file_path(tc.get("args", {}))
+                if fp and fp not in unique_paths:
+                    unique_paths.append(fp)
+    return read_count, first_mut_step, last_read_step, unique_paths
+
+
+def _extract_exploration_burst(cid: str, steps: List[Dict[str, Any]], role: str) -> Optional[NavigationFrictionSignal]:
+    read_count, first_mut_step, last_read_step, unique_paths = _scan_pre_edit_reads(steps)
+    if first_mut_step is not None and read_count >= 8:
+        return NavigationFrictionSignal(
+            signal_type="EXPLORATION_BURST",
+            session_id=cid,
+            role=role,
+            step_index=first_mut_step,
+            file_paths=unique_paths[:5],
+            count=read_count,
+            metric_value=read_count,
+            summary=f"{read_count} read/search calls before first edit",
+        )
+    if first_mut_step is None and read_count >= 10:
+        return NavigationFrictionSignal(
+            signal_type="EXPLORATION_BURST",
+            session_id=cid,
+            role=role,
+            step_index=last_read_step,
+            file_paths=unique_paths[:5],
+            count=read_count,
+            metric_value=read_count,
+            summary=f"{read_count} read/search calls with zero edits",
+        )
+    return None
+
+
+def _reset_path_read_streaks(streaks: Dict[Tuple[str, Any, Any], int], norm_path: str) -> None:
+    for key in list(streaks.keys()):
+        if key[0] == norm_path:
+            streaks[key] = 0
+
+
+def _record_read_streak(
+    key: Tuple[str, Any, Any],
+    s_idx: int,
+    streaks: Dict[Tuple[str, Any, Any], int],
+    max_streaks: Dict[Tuple[str, Any, Any], int],
+    second_step: Dict[Tuple[str, Any, Any], int],
+) -> None:
+    cnt = streaks.get(key, 0) + 1
+    streaks[key] = cnt
+    if cnt == 2 and key not in second_step:
+        second_step[key] = s_idx
+    if cnt > max_streaks.get(key, 0):
+        max_streaks[key] = cnt
+
+
+def _build_redundant_read_signals(
+    cid: str,
+    role: str,
+    max_streaks: Dict[Tuple[str, Any, Any], int],
+    second_step: Dict[Tuple[str, Any, Any], int],
+) -> List[NavigationFrictionSignal]:
+    signals: List[NavigationFrictionSignal] = []
+    for key, max_cnt in max_streaks.items():
+        if max_cnt >= 2:
+            signals.append(
+                NavigationFrictionSignal(
+                    signal_type="REDUNDANT_READ",
+                    session_id=cid,
+                    role=role,
+                    step_index=second_step[key],
+                    file_paths=[key[0]],
+                    count=max_cnt,
+                    metric_value=max_cnt,
+                    summary=f"Read {key[0]} ({key[1]}..{key[2]}) {max_cnt}x without edit",
+                )
+            )
+    return signals
+
+
+def _extract_redundant_reads(cid: str, steps: List[Dict[str, Any]], role: str) -> List[NavigationFrictionSignal]:
+    streaks: Dict[Tuple[str, Any, Any], int] = {}
+    max_streaks: Dict[Tuple[str, Any, Any], int] = {}
+    second_step: Dict[Tuple[str, Any, Any], int] = {}
+
+    for idx, step in enumerate(steps):
+        s_idx = int(step.get("step_index", idx))
+        for tc in step.get("tool_calls", []):
+            tname = tc.get("name", "")
+            args = tc.get("args", {})
+            fpath = _extract_tool_file_path(args)
+            if not fpath:
+                continue
+            if tname in READ_ONLY_TOOLS:
+                key = (fpath, args.get("StartLine"), args.get("EndLine"))
+                _record_read_streak(key, s_idx, streaks, max_streaks, second_step)
+            elif tname in MUTATION_TOOLS:
+                _reset_path_read_streaks(streaks, fpath)
+
+    return _build_redundant_read_signals(cid, role, max_streaks, second_step)
+
+
+def _gather_subsequent_result_list(steps: List[Dict[str, Any]], start_idx: int) -> List[str]:
+    results: List[str] = []
+    for next_step in steps[start_idx + 1 :]:
+        stype = next_step.get("type")
+        source = next_step.get("source")
+        if stype in ("PLANNER_RESPONSE", "USER_INPUT") or source == "USER_EXPLICIT":
+            break
+        if stype in ("TOOL_RESULT", "GENERIC") or source == "GENERIC":
+            results.append(str(next_step.get("content", "")))
+    return results
+
+
+def _is_empty_search_output(text: str) -> bool:
+    stripped = re.sub(
+        r"^(?:Created At:|Completed At:|Command exited with code\s+\d+\.?).*$",
+        "",
+        text,
+        flags=re.MULTILINE | re.IGNORECASE,
+    )
+    if _has_explicit_runtime_error(stripped):
+        return False
+    body = stripped.strip()
+    if not body:
+        return True
+    return bool(re.search(r"\b(?:no results found|0 matches|no matches found|0 files)\b", body, re.IGNORECASE))
+
+
+def _search_call_query(tc: Dict[str, Any]) -> str:
+    args = tc.get("args", {})
+    return str(args.get("Query") or args.get("Pattern") or args.get("CommandLine") or tc.get("name", ""))[:40]
+
+
+def _turn_search_status(steps: List[Dict[str, Any]], idx: int) -> Tuple[bool, bool, List[str]]:
+    tool_calls = steps[idx].get("tool_calls", [])
+    search_indices = [i for i, tc in enumerate(tool_calls) if _is_search_only_call(tc)]
+    if not search_indices:
+        return False, False, []
+    results = _gather_subsequent_result_list(steps, idx)
+    fallback = "\n".join(results)
+    for i in search_indices:
+        res_text = results[i] if i < len(results) else fallback
+        if not _is_empty_search_output(res_text):
+            return True, False, []
+    queries = [_search_call_query(tool_calls[i]) for i in search_indices]
+    return True, True, queries
+
+
+def _build_empty_search_signal(cid: str, role: str, start_idx: int, streak: int, queries: List[str]) -> NavigationFrictionSignal:
+    q_str = ", ".join(queries[:3])
+    return NavigationFrictionSignal(
+        signal_type="EMPTY_SEARCH_CHAIN",
+        session_id=cid,
+        role=role,
+        step_index=start_idx,
+        file_paths=[],
+        count=streak,
+        metric_value=streak,
+        summary=f"{streak} consecutive empty searches: {q_str}",
+    )
+
+
+def _extract_empty_search_chains(cid: str, steps: List[Dict[str, Any]], role: str) -> List[NavigationFrictionSignal]:
+    signals: List[NavigationFrictionSignal] = []
+    streak = 0
+    streak_start = 0
+    queries: List[str] = []
+
+    for idx, step in enumerate(steps):
+        has_search, all_empty, turn_queries = _turn_search_status(steps, idx)
+        if not has_search:
+            continue
+        if all_empty:
+            if streak == 0:
+                streak_start = int(step.get("step_index", idx))
+            streak += 1
+            queries.extend(turn_queries)
+        else:
+            if streak >= 2:
+                signals.append(_build_empty_search_signal(cid, role, streak_start, streak, queries))
+            streak = 0
+            queries = []
+
+    if streak >= 2:
+        signals.append(_build_empty_search_signal(cid, role, streak_start, streak, queries))
+    return signals
+
+
+def _describe_tool_call_source(step: Dict[str, Any], idx: int) -> Tuple[int, str, List[str]]:
+    s_idx = int(step.get("step_index", idx))
+    tool_calls = step.get("tool_calls", [])
+    if len(tool_calls) == 1:
+        tname = str(tool_calls[0].get("name", "tool"))
+        fp = _extract_tool_file_path(tool_calls[0].get("args", {}))
+        return s_idx, tname, ([fp] if fp else [])
+    return s_idx, "parallel_tools", []
+
+
+def _extract_token_bloat_signals(cid: str, steps: List[Dict[str, Any]], role: str) -> List[NavigationFrictionSignal]:
+    signals: List[NavigationFrictionSignal] = []
+    last_tool: Optional[Tuple[int, str, List[str]]] = None
+
+    for idx, step in enumerate(steps):
+        if step.get("tool_calls"):
+            last_tool = _describe_tool_call_source(step, idx)
+            continue
+        stype = step.get("type")
+        source = step.get("source")
+        if stype in ("TOOL_RESULT", "GENERIC") or source == "GENERIC":
+            content = str(step.get("content", ""))
+            if len(content) >= 12000:
+                attr_idx, attr_tool, attr_paths = last_tool or (int(step.get("step_index", idx)), "unknown", [])
+                est_tok = len(content) // 4
+                signals.append(
+                    NavigationFrictionSignal(
+                        signal_type="TOKEN_BLOAT",
+                        session_id=cid,
+                        role=role,
+                        step_index=attr_idx,
+                        file_paths=attr_paths,
+                        count=1,
+                        metric_value=len(content),
+                        summary=f"{attr_tool} returned {len(content)} chars (~{est_tok} est. tokens)",
+                    )
+                )
+    return signals
+
+
+def _extract_navigation_frictions_from_steps(
+    cid: str,
+    steps: List[Dict[str, Any]],
+    role: str = "unknown",
+) -> List[NavigationFrictionSignal]:
+    """Deterministically extracts exploration bursts, redundant reads, empty search chains, and token bloat."""
+    signals: List[NavigationFrictionSignal] = []
+    burst = _extract_exploration_burst(cid, steps, role)
+    if burst:
+        signals.append(burst)
+    signals.extend(_extract_redundant_reads(cid, steps, role))
+    signals.extend(_extract_empty_search_chains(cid, steps, role))
+    signals.extend(_extract_token_bloat_signals(cid, steps, role))
+    return signals
+
+
+def _estimate_sessions_tokens(
+    analyzed_sessions: List[str],
+    sessions_steps: Dict[str, List[Dict[str, Any]]],
+) -> int:
+    """Computes total character volume // 4 across all analyzed session steps and tool_calls."""
+    total_chars = 0
+    for cid in analyzed_sessions:
+        for step in sessions_steps.get(cid, []):
+            total_chars += len(str(step.get("content", "")))
+            for tc in step.get("tool_calls", []):
+                total_chars += len(json.dumps(tc.get("args", {}), default=str)) + len(str(tc.get("name", "")))
+    return total_chars // 4
+
+
+def _collect_ci_and_hook_files(project_path: Path) -> Tuple[List[Path], List[Path]]:
+    ci_files: List[Path] = []
+    wf_dir = project_path / ".github" / "workflows"
+    if wf_dir.is_dir():
+        ci_files.extend(sorted(wf_dir.glob("*.yml")))
+        ci_files.extend(sorted(wf_dir.glob("*.yaml")))
+
+    hook_files: List[Path] = []
+    husky_dir = project_path / ".husky"
+    if husky_dir.is_dir():
+        hook_files.extend(sorted(p for p in husky_dir.iterdir() if p.is_file()))
+    pre_commit = project_path / ".git" / "hooks" / "pre-commit"
+    if pre_commit.is_file():
+        hook_files.append(pre_commit)
+    return ci_files, hook_files
+
+
+def _read_concatenated_text(paths: List[Path]) -> str:
+    chunks: List[str] = []
+    for p in paths:
+        try:
+            chunks.append(p.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            continue
+    return "\n".join(chunks)
+
+
+def _discover_repo_checks(project_path: Path) -> List[Tuple[str, str]]:
+    checks: List[Tuple[str, str]] = []
+    pkg = _read_json_safe(project_path / "package.json")
+    if pkg and isinstance(pkg.get("scripts"), dict):
+        scripts = pkg["scripts"]
+        for name in ("lint", "typecheck", "check", "test"):
+            if name in scripts:
+                checks.append(("package.json", name))
+
+    pyproj = project_path / "pyproject.toml"
+    if pyproj.is_file():
+        try:
+            text = pyproj.read_text(encoding="utf-8", errors="replace")
+            for pat, name in ((r"\[tool\.pytest\b", "pytest"), (r"\[tool\.ruff\b", "ruff"), (r"\[tool\.mypy\b", "mypy")):
+                if re.search(pat, text):
+                    checks.append(("pyproject.toml", name))
+        except Exception:
+            pass
+    return checks
+
+
+def _extract_guardrail_gaps(project_path: Path) -> List[GuardrailGapSignal]:
+    """Deterministically discovers missing CI/hooks and unwired lint/typecheck/test scripts."""
+    if not project_path.exists() or not project_path.is_dir():
+        return []
+    _read_json_safe(project_path / ".edge" / "brigade.json")
+    ci_files, hook_files = _collect_ci_and_hook_files(project_path)
+    gaps: List[GuardrailGapSignal] = []
+    if not ci_files and not hook_files:
+        gaps.append(
+            GuardrailGapSignal(
+                gap_type="MISSING_GUARDRAIL",
+                source_file=".github/workflows",
+                script_or_check="ci_and_precommit",
+                summary="No CI workflows (.github/workflows/*.yml|yaml) or pre-commit hooks (.husky/*, .git/hooks/pre-commit) configured",
+            )
+        )
+
+    ci_and_hook_text = _read_concatenated_text(ci_files + hook_files)
+    for source_file, check_name in _discover_repo_checks(project_path):
+        if not re.search(rf"\b{re.escape(check_name)}\b", ci_and_hook_text):
+            gaps.append(
+                GuardrailGapSignal(
+                    gap_type="UNWIRED_GUARDRAIL",
+                    source_file=source_file,
+                    script_or_check=check_name,
+                    summary=f"Check '{check_name}' defined in {source_file} is not wired into CI workflows or pre-commit hooks",
+                )
+            )
+    return gaps
+
+
+def _collect_rule_inventory_targets(project_path: Path) -> List[Tuple[Path, Optional[int]]]:
+    has_agents_dir = (project_path / "agents").is_dir()
+    agents_resolved = (project_path / "agents").resolve()
+    targets: List[Tuple[Path, Optional[int]]] = []
+    for fpath, limit in collect_budget_targets(project_path):
+        if fpath.resolve().parent == agents_resolved and not has_agents_dir:
+            continue
+        targets.append((fpath, limit))
+    cs_path = project_path / "coding_standards.md"
+    if cs_path.is_file():
+        targets.append((cs_path.resolve(), None))
+    return targets
+
+
+def _build_session_citation_blobs(
+    analyzed_sessions: List[str],
+    sessions_steps: Dict[str, List[Dict[str, Any]]],
+) -> List[str]:
+    blobs: List[str] = []
+    for cid in analyzed_sessions:
+        for step in sessions_steps.get(cid, []):
+            parts = [str(step.get("content", ""))]
+            for tc in step.get("tool_calls", []):
+                parts.append(json.dumps(tc.get("args", {}), default=str))
+            blobs.append(" ".join(parts).replace("\\", "/"))
+    return blobs
+
+
+def _count_file_citations(rel_path: str, fname: str, file_text: str, blobs: List[str]) -> int:
+    cand_ids = set(re.findall(r"\bCAND-[A-Za-z0-9]+\b", file_text))
+    count = 0
+    for blob in blobs:
+        if rel_path in blob:
+            count += blob.count(rel_path)
+        elif fname in blob:
+            count += blob.count(fname)
+        for cand_id in cand_ids:
+            if cand_id in blob:
+                count += blob.count(cand_id)
+    return count
+
+
+def _compute_rule_status(line_count: int, budget_limit: Optional[int], citation_count: int) -> str:
+    if budget_limit is not None and line_count > budget_limit:
+        return "OVER_BUDGET"
+    if citation_count == 0:
+        return "ZERO_CITATIONS"
+    return "OK"
+
+
+def _extract_rule_inventory(
+    project_path: Path,
+    analyzed_sessions: List[str],
+    sessions_steps: Dict[str, List[Dict[str, Any]]],
+    mode: str = "project",
+) -> List[RuleInventoryItem]:
+    """Inventories station/agent rubrics and coding_standards.md with line budgets and session citations."""
+    if not project_path.exists() or not project_path.is_dir():
+        return []
+    resolved_root = project_path.resolve()
+    blobs = _build_session_citation_blobs(analyzed_sessions, sessions_steps)
+    items: List[RuleInventoryItem] = []
+    for fpath, limit in _collect_rule_inventory_targets(project_path):
+        try:
+            text = fpath.read_text(encoding="utf-8", errors="replace")
+            rel_path = fpath.resolve().relative_to(resolved_root).as_posix()
+        except Exception:
+            continue
+        line_count = len(text.splitlines())
+        citations = _count_file_citations(rel_path, fpath.name, text, blobs)
+        status = _compute_rule_status(line_count, limit, citations)
+        items.append(
+            RuleInventoryItem(
+                file_path=rel_path,
+                line_count=line_count,
+                budget_limit=limit,
+                citation_count=citations,
+                status=status,
+            )
+        )
+    return items
 
 
 def _find_task_log_file(tasks_dir: Path, task_id: str) -> Optional[Path]:
@@ -567,6 +1159,55 @@ def _enqueue_harness_signals(
     return len(queue)
 
 
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
+_GENERIC_SENDERS = {"coordinator", "system", "user", "unknown", "parent"}
+
+
+def _is_valid_sender_session(sender_id: str, discovered_sessions: Optional[Set[str]], is_swarm: bool) -> bool:
+    if not sender_id or sender_id.lower() in _GENERIC_SENDERS:
+        return False
+    if discovered_sessions and sender_id in discovered_sessions:
+        return True
+    if _UUID_RE.match(sender_id):
+        return True
+    return not is_swarm and ("-" in sender_id or len(sender_id) >= 12)
+
+
+def _append_unique_child(parent_to_children: Dict[str, List[str]], parent: str, child: str) -> None:
+    children = parent_to_children.setdefault(parent, [])
+    if child not in children:
+        children.append(child)
+
+
+def _parse_dead_end_entry(dead: Any) -> Dict[str, Any]:
+    if not isinstance(dead, dict):
+        s = str(dead).strip()
+        return {"kind": "dead_end", "title": s, "reason": "", "prohibited_rule": "", "dead_end": s, "details": dead}
+    title = str(dead.get("title") or dead.get("approach") or "").strip()
+    reason = str(dead.get("reason") or "").strip()
+    prohibited_rule = str(dead.get("prohibited_rule") or "").strip()
+    return {
+        "kind": "dead_end",
+        "title": title,
+        "reason": reason,
+        "prohibited_rule": prohibited_rule,
+        "dead_end": title or reason or prohibited_rule,
+        "details": dead,
+    }
+
+
+def _parse_guard_failure_entry(gfail: Any) -> Dict[str, Any]:
+    if not isinstance(gfail, dict):
+        return {"kind": "guard_failure", "state": "", "message": str(gfail).strip(), "details": {}, "guard_failure": gfail}
+    return {
+        "kind": "guard_failure",
+        "state": str(gfail.get("state", "")).strip(),
+        "message": str(gfail.get("message", "")).strip(),
+        "details": gfail.get("details", {}),
+        "guard_failure": gfail,
+    }
+
+
 class TranscriptGraphHarvester:
     """
     Deterministic Harvester that extracts zero-token friction and signals from Antigravity session transcripts.
@@ -585,6 +1226,7 @@ class TranscriptGraphHarvester:
         self.watermark_state = watermark_state or DistillWatermarkState()
         self.since_hours = since_hours
         self._session_dirs: Dict[str, Path] = {}
+        self._session_roles: Dict[str, str] = {}
 
     def _default_brain_roots(self) -> List[Path]:
         roots = []
@@ -610,6 +1252,9 @@ class TranscriptGraphHarvester:
                     parent_cid = info.get("parentConversationId")
                     if parent_cid:
                         stations_map[child_cid] = parent_cid
+                    role = info.get("role")
+                    if role and child_cid not in self._session_roles:
+                        self._session_roles[child_cid] = str(role).lower()
             except Exception:
                 pass
         return stations_map
@@ -636,38 +1281,76 @@ class TranscriptGraphHarvester:
                 self._session_dirs[sess_dir.name] = sess_dir
         return session_transcripts
 
-    def _inspect_step_relations(self, steps: List[Dict[str, Any]], cid: str, child_to_parent: Dict[str, str], parent_to_children: Dict[str, List[str]]) -> None:
+    def _link_spawned_children(
+        self,
+        steps: List[Dict[str, Any]],
+        cid: str,
+        child_to_parent: Dict[str, str],
+        parent_to_children: Dict[str, List[str]],
+    ) -> None:
         for step in steps:
             content = str(step.get("content", ""))
-            m = re.search(r'"conversationId":\s*"([^"]+)"', content)
-            if m:
+            for m in re.finditer(r'"conversation(?:Id|_id)":\s*"([^"]+)"', content):
                 child_cid = m.group(1)
-                child_to_parent[child_cid] = cid
-                parent_to_children.setdefault(cid, []).append(child_cid)
+                if child_cid and child_cid != cid:
+                    child_to_parent[child_cid] = cid
+                    _append_unique_child(parent_to_children, cid, child_cid)
 
-            if step.get("step_index") == 0:
-                m_snd = re.search(r'sender=([a-zA-Z0-9_\-]+)', content)
-                if m_snd:
-                    p_cid = m_snd.group(1)
-                    child_to_parent[cid] = p_cid
-                    parent_to_children.setdefault(p_cid, []).append(cid)
+    def _link_parent_sender(
+        self,
+        steps: List[Dict[str, Any]],
+        cid: str,
+        child_to_parent: Dict[str, str],
+        parent_to_children: Dict[str, List[str]],
+        discovered_sessions: Optional[Set[str]],
+    ) -> None:
+        step_by_idx = {s.get("step_index"): str(s.get("content", "")) for s in steps}
+        s0 = step_by_idx.get(0, "")
+        s1 = step_by_idx.get(1, "")
+        is_swarm = "[swarm] new board message" in s0.lower()
+
+        if is_swarm and s1:
+            m_role = re.search(r'for\s+(?:\*\*|\[)?@([a-zA-Z0-9_\-]+)(?:\*\*|\])?\s*:', s1)
+            if m_role:
+                self._session_roles[cid] = m_role.group(1).lower()
+
+        search_text = f"{s0}\n{s1}" if is_swarm else s0
+        m_snd = re.search(r"sender=([a-zA-Z0-9_\-]+)", search_text)
+        if m_snd:
+            p_cid = m_snd.group(1)
+            if p_cid != cid and _is_valid_sender_session(p_cid, discovered_sessions, is_swarm):
+                child_to_parent[cid] = p_cid
+                _append_unique_child(parent_to_children, p_cid, cid)
+
+    def _inspect_step_relations(
+        self,
+        steps: List[Dict[str, Any]],
+        cid: str,
+        child_to_parent: Dict[str, str],
+        parent_to_children: Dict[str, List[str]],
+        discovered_sessions: Optional[Set[str]] = None,
+    ) -> None:
+        self._link_spawned_children(steps, cid, child_to_parent, parent_to_children)
+        self._link_parent_sender(steps, cid, child_to_parent, parent_to_children, discovered_sessions)
 
     def _load_transcripts(self, session_transcripts: Dict[str, Path]) -> Tuple[Dict[str, List[Dict[str, Any]]], Dict[str, str], Dict[str, List[str]]]:
         sessions_steps: Dict[str, List[Dict[str, Any]]] = {}
         child_to_parent: Dict[str, str] = dict(self._load_active_stations_map())
         parent_to_children: Dict[str, List[str]] = {}
+        discovered = set(session_transcripts.keys())
 
         for cid, tpath in session_transcripts.items():
             steps = _load_jsonl_steps(tpath)
             sessions_steps[cid] = steps
-            self._inspect_step_relations(steps, cid, child_to_parent, parent_to_children)
+            self._inspect_step_relations(steps, cid, child_to_parent, parent_to_children, discovered_sessions=discovered)
 
         return sessions_steps, child_to_parent, parent_to_children
 
     def _find_matched_sessions(self, sessions_steps: Dict[str, List[Dict[str, Any]]], target_path: Path, parent_to_children: Dict[str, List[str]], child_to_parent: Dict[str, str]) -> Set[str]:
         matched: Set[str] = set()
+        aliases = _collect_worktree_aliases(target_path)
         for cid, steps in sessions_steps.items():
-            if _session_matches_project(steps, target_path):
+            if _session_matches_project(steps, target_path, extra_project_paths=aliases):
                 matched.add(cid)
         return _expand_connected_session_graph(matched, parent_to_children, child_to_parent)
 
@@ -727,6 +1410,19 @@ class TranscriptGraphHarvester:
         escalations = _extract_repeated_escalations(flattened_steps)
         return tool_frictions, station_escapes, escalations
 
+    def _collect_navigation_signals(
+        self,
+        analyzed_sessions: List[str],
+        sessions_steps: Dict[str, List[Dict[str, Any]]],
+    ) -> List[NavigationFrictionSignal]:
+        nav_signals: List[NavigationFrictionSignal] = []
+        for cid in analyzed_sessions:
+            role = self._session_roles.get(cid, "unknown")
+            nav_signals.extend(
+                _extract_navigation_frictions_from_steps(cid, sessions_steps.get(cid, []), role=role)
+            )
+        return nav_signals
+
     def _split_project_signals(
         self,
         frictions_or_signals: Any,
@@ -755,6 +1451,10 @@ class TranscriptGraphHarvester:
         matched = self._find_matched_sessions(sessions_steps, target_path, p2c, c2p)
         analyzed = self._filter_sessions(matched, current_session_id, reprocess, max_sessions, set(transcripts.keys()), mode=mode, target_path=target_path)
         frictions, escapes, escalations = self._collect_signals(analyzed, sessions_steps)
+        nav_frictions = self._collect_navigation_signals(analyzed, sessions_steps)
+        total_tokens = _estimate_sessions_tokens(analyzed, sessions_steps)
+        guardrail_gaps = _extract_guardrail_gaps(target_path)
+        rule_inventory = _extract_rule_inventory(target_path, analyzed, sessions_steps, mode=mode)
 
         harness_queued = 0
         inbox_signals: List[Dict[str, Any]] = []
@@ -777,23 +1477,27 @@ class TranscriptGraphHarvester:
             flight_recorder_insights=self._extract_flight_recorder(target_path),
             git_churn=self._extract_git_churn(target_path),
             critique_findings=self._extract_critiques(target_path),
+            total_tokens_estimate=total_tokens,
             harness_signals_queued=harness_queued,
             factory_inbox_signals=inbox_signals,
+            navigation_frictions=nav_frictions,
+            guardrail_gaps=guardrail_gaps,
+            rule_inventory=rule_inventory,
         )
 
     def _extract_flight_recorder(self, project_path: Path) -> List[Dict[str, Any]]:
         insights: List[Dict[str, Any]] = []
         fr_dir = project_path / ".edge" / "flight-recorder"
-        if fr_dir.exists():
-            for f in fr_dir.glob("*.json"):
-                try:
-                    data = json.loads(f.read_text(encoding="utf-8"))
-                    for dead in data.get("dead_ends", []):
-                        insights.append({"dead_end": dead.get("approach", str(dead)), "details": dead})
-                    for gfail in data.get("guard_failures", []):
-                        insights.append({"guard_failure": gfail})
-                except Exception:
-                    pass
+        if not fr_dir.exists():
+            return insights
+        for f in sorted(fr_dir.glob("*.json")):
+            data = _read_json_safe(f)
+            if not data:
+                continue
+            for dead in data.get("dead_ends", []):
+                insights.append(_parse_dead_end_entry(dead))
+            for gfail in data.get("guard_failures", []):
+                insights.append(_parse_guard_failure_entry(gfail))
         return insights
 
     def _extract_critiques(self, project_path: Path) -> List[Dict[str, Any]]:
