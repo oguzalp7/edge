@@ -1,6 +1,9 @@
+import io
+import json
 import subprocess
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -480,6 +483,181 @@ class TestGhostRootDirectoryGate(_HermeticGitRepoTestCase):
         (self.repo_path / "rc").mkdir()
         passed = self.gate.run_all(base_ref="HEAD", skip_verification=True)
         self.assertFalse(passed)
+
+
+class TestNavigationCheckGate(_HermeticGitRepoTestCase):
+    """Hermetic RED tests for unconditional check:navigation stage in EdgeVerificationGate."""
+
+    def test_skips_when_package_json_missing_malformed_or_unconfigured(self) -> None:
+        self.assertTrue(hasattr(self.gate, "_has_navigation_check_script"))
+        self.assertTrue(hasattr(self.gate, "check_navigation_gate"))
+
+        invalid_package_payloads = [
+            None,  # package.json absent
+            "{malformed json content",
+            "[]",  # non-dict root JSON
+            json.dumps({"name": "no-scripts"}),
+            json.dumps({"scripts": []}),
+            json.dumps({"scripts": None}),
+            json.dumps({"scripts": "bad-type"}),
+            json.dumps({"scripts": {"test": "vitest"}}),
+            json.dumps({"scripts": {"check:navigation": ""}}),
+            json.dumps({"scripts": {"check:navigation": "   \t\n  "}}),
+            json.dumps({"scripts": {"check:navigation": None}}),
+            json.dumps({"scripts": {"check:navigation": 123}}),
+            json.dumps({"scripts": {"check:navigation": False}}),
+            json.dumps({"scripts": {"check:navigation": {}}}),
+        ]
+
+        pkg_path = self.repo_path / "package.json"
+        for idx, raw_payload in enumerate(invalid_package_payloads):
+            if raw_payload is None:
+                if pkg_path.exists():
+                    pkg_path.unlink()
+            else:
+                pkg_path.write_text(raw_payload, encoding="utf-8")
+
+            with patch.object(self.gate, "_run_cmd") as mock_run:
+                self.assertFalse(
+                    self.gate._has_navigation_check_script(),
+                    f"Case {idx} should not detect check:navigation script",
+                )
+                res = self.gate.check_navigation_gate()
+                self.assertIsInstance(res, GateResult)
+                self.assertTrue(res.passed, f"Case {idx} should skip cleanly and pass")
+                self.assertEqual(res.name, "Navigation Check Gate")
+                mock_run.assert_not_called()
+
+    def test_fails_closed_when_node_modules_missing(self) -> None:
+        self.assertTrue(hasattr(self.gate, "check_navigation_gate"))
+        (self.repo_path / "package.json").write_text(
+            json.dumps({"scripts": {"check:navigation": "npx tsx scripts/check-navigation.ts"}}),
+            encoding="utf-8",
+        )
+        self.assertFalse((self.repo_path / "node_modules").exists())
+
+        with patch.object(self.gate, "_run_cmd") as mock_run:
+            self.assertTrue(self.gate._has_navigation_check_script())
+            res = self.gate.check_navigation_gate()
+            self.assertFalse(res.passed)
+            self.assertEqual(res.name, "Navigation Check Gate")
+            self.assertIn("node_modules", res.message)
+            mock_run.assert_not_called()
+
+    def test_runs_npm_check_navigation_when_node_modules_present(self) -> None:
+        self.assertTrue(hasattr(self.gate, "check_navigation_gate"))
+        (self.repo_path / "package.json").write_text(
+            json.dumps({"scripts": {"check:navigation": "npx tsx scripts/check-navigation.ts"}}),
+            encoding="utf-8",
+        )
+        (self.repo_path / "node_modules").mkdir()
+
+        # 1. Pass on exit code 0
+        with patch.object(self.gate, "_run_cmd", return_value=(0, "All links verified", "")) as mock_run:
+            res_ok = self.gate.check_navigation_gate()
+            mock_run.assert_called_once_with(["npm", "run", "check:navigation"], timeout=60)
+            self.assertTrue(res_ok.passed)
+            self.assertEqual(res_ok.name, "Navigation Check Gate")
+
+        # 2. Fail on non-zero exit with stripped diagnostic lines capped at 8
+        stdout_lines = "\n".join(
+            [
+                "",
+                "   nav error line 1   ",
+                "   ",
+                "nav error line 2",
+                "nav error line 3",
+                "nav error line 4",
+                "nav error line 5",
+                "nav error line 6",
+            ]
+        )
+        stderr_lines = "\n".join(
+            [
+                "  nav stderr line 7  ",
+                "nav stderr line 8",
+                "nav stderr line 9",
+                "nav stderr line 10",
+            ]
+        )
+        with patch.object(self.gate, "_run_cmd", return_value=(1, stdout_lines, stderr_lines)) as mock_run:
+            res_fail = self.gate.check_navigation_gate()
+            mock_run.assert_called_once_with(["npm", "run", "check:navigation"], timeout=60)
+            self.assertFalse(res_fail.passed)
+            self.assertEqual(res_fail.name, "Navigation Check Gate")
+            self.assertEqual(len(res_fail.details), 8)
+            self.assertEqual(
+                res_fail.details,
+                [
+                    "nav error line 1",
+                    "nav error line 2",
+                    "nav error line 3",
+                    "nav error line 4",
+                    "nav error line 5",
+                    "nav error line 6",
+                    "nav stderr line 7",
+                    "nav stderr line 8",
+                ],
+            )
+
+    def test_run_all_executes_navigation_gate_unconditionally_across_tracks_and_skip_verify(self) -> None:
+        self.assertTrue(hasattr(self.gate, "check_navigation_gate"))
+        self._write_and_commit({"README.md": "# Repo\n"}, "chore: init")
+
+        orig_run = self.gate._run_cmd
+        nav_calls: list[tuple[list[str], int]] = []
+        nav_response = (0, "Navigation ok", "")
+
+        def _intercept_cmd(cmd, cwd=None, timeout=120):
+            if cmd == ["npm", "run", "check:navigation"]:
+                nav_calls.append((list(cmd), timeout))
+                return nav_response
+            return orig_run(cmd, cwd=cwd, timeout=timeout)
+
+        with patch.object(self.gate, "_run_cmd", side_effect=_intercept_cmd):
+            # 1. Unconfigured repo passes all tracks with skip_verification=True and 0 npm calls
+            for track in ("core", "ui", "feature", "all"):
+                passed = self.gate.run_all(base_ref="HEAD", is_refactor=False, skip_verification=True, track=track)
+                self.assertTrue(passed, f"Unconfigured repo should pass track={track}")
+            self.assertEqual(nav_calls, [])
+
+            # 2. Configure package.json + node_modules; failing check:navigation fails ALL tracks even with skip_verification=True
+            (self.repo_path / "package.json").write_text(
+                json.dumps({"scripts": {"check:navigation": "npx tsx scripts/check-navigation.ts"}}),
+                encoding="utf-8",
+            )
+            (self.repo_path / "node_modules").mkdir()
+
+            nav_response = (1, "BROKEN_ROUTE /missing in Sidebar.tsx", "")
+            for track in ("core", "ui", "feature", "all"):
+                nav_calls.clear()
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    passed = self.gate.run_all(base_ref="HEAD", is_refactor=True, skip_verification=True, track=track)
+                out = buf.getvalue()
+                self.assertFalse(passed, f"Failing check:navigation must fail run_all for track={track}")
+                self.assertEqual(nav_calls, [(["npm", "run", "check:navigation"], 60)])
+                self.assertIn("Stage 0: Ghost Root Directory Sanitizer Gate", out)
+                self.assertIn("Stage 1: Navigation Check Gate", out)
+                if track != "feature":
+                    self.assertIn("Stage 2: MigrationGate Invariant Gate", out)
+                else:
+                    self.assertIn("Stage 2: Max CC Non-Regression Gate", out)
+
+            # 3. Passing check:navigation passes all tracks under skip_verification=True
+            nav_response = (0, "Navigation ok", "")
+            for track in ("core", "ui", "feature", "all"):
+                nav_calls.clear()
+                passed = self.gate.run_all(base_ref="HEAD", is_refactor=False, skip_verification=True, track=track)
+                self.assertTrue(passed, f"Passing check:navigation should pass track={track}")
+                self.assertEqual(nav_calls, [(["npm", "run", "check:navigation"], 60)])
+
+            # 4. Stage 0 ghost-dir fail-fast still halts before running check_navigation_gate
+            nav_calls.clear()
+            (self.repo_path / "rc").mkdir()
+            passed_ghost = self.gate.run_all(base_ref="HEAD", is_refactor=False, skip_verification=True, track="feature")
+            self.assertFalse(passed_ghost)
+            self.assertEqual(nav_calls, [])
 
 
 if __name__ == "__main__":
