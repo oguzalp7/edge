@@ -34,20 +34,27 @@ Instead of spawning disposable generalist agents that try to do everything and e
                                        |
                                        v
        +---------------------------------------------------------------+
-       |                   EXAMINER (Sous / Maitre d')                 |
-       |       Unified Dual-Axis Standards & Architectural Invariants  |
+       |                 GATE (tools/gate.py + diff_image.py)          |
+       |       Static/CC/Drift Gate & UI Visual Parity (<= 0.15%)      |
        +-------------------------------+-------------------------------+
                                        |
                                        v
        +---------------------------------------------------------------+
-       |                 QA_ENGINEER (Sommelier)                       |
-       |  E2E Multi-Agent Browser Delegation & Behavioral Proof Gate   |
+       |           [OPTIONAL] QA_ENGINEER (Sommelier + ProofVerifier)  |
+       |  E2E Browser Delegation, SHA-256 Shots & DB Cross-Check Proof |
+       +-------------------------------+-------------------------------+
+                                       |
+                                       v
+       +---------------------------------------------------------------+
+       |                   EXAMINER (Sous / Maitre d')                 |
+       |  3-Axis Evidence-First Review (Standards, Spec, Evidence)     |
+       |              + Mandatory `brigade seal-review`                |
        +-------------------------------+-------------------------------+
                                        |
                                        v
        +---------------------------------------------------------------+
        |             Deterministic Merge (brigade finish-slice)        |
-       |             Spec Archival & /edge-drift Contract Audit        |
+       |     Spec Archival, /edge-drift Audit & `brigade prepare-ship` |
        +---------------------------------------------------------------+
 ```
 
@@ -72,11 +79,11 @@ Instead of spawning disposable generalist agents that try to do everything and e
    - **Role:** Refactor & structural cleanup specialist.
    - **Constraint:** Decouples bloated controllers and extracts domain repositories in an isolated worktree. Bound by the **MigrationGate Invariant** (never mutates schema or migrations).
 7. **EXAMINER (`examiner` / Sous Chef & Maître d')**:
-   - **Role:** Unified dual-axis review: `coding_standards.md`/Fowler code smells and architectural invariants/scope creep in a single concise pass (< 350 words).
-   - **Constraint:** Strictly read-only. Distinguishes hard violations from judgement calls; skips deterministic checks enforced by `gate.py`.
+   - **Role:** Evidence-first 3-axis review (`standards`, `spec`, `evidence`) inspecting diffs alongside `gate.py`, UI `diff_image.py` pixel diffs, QA proof receipts, screenshots, and `db_crosscheck` in a single concise pass (< 350 words).
+   - **Constraint:** Strictly read-only. Must seal verdict via `brigade seal-review <repo> --verdict PASS|FAIL --summary "..."` before `REVIEW -> STAGING` can pass; skips deterministic checks already enforced by `gate.py`.
 8. **QA_ENGINEER (`qa_engineer` / Sommelier)**:
    - **Role:** End-to-end browser verification, visual quality assurance, and user journey testing.
-   - **Protocol:** Receives translated user scenarios mapped to project ubiquitous domain vocabulary by the Orchestrator. Acts as the QA architect and delegates physical browser interactions to the built-in `browser` subagent (`TypeName: "browser"`, `Model: "flash"`). Stages Lavish references to `<Artifact Directory>/browser_sandbox/references/`. Enforces state persistence via DOM reload and backend DB/state cross-checks (`run_command`). Synthesizes physical Behavioral Proof Receipt (`.edge/qa/proofs/<slug>.json`) to unlock advancement to STAGING.
+   - **Protocol:** Receives translated user scenarios mapped to project ubiquitous domain vocabulary by the Orchestrator. Delegates physical browser interactions to the built-in `browser` subagent (`TypeName: "browser"`, `Model: "flash"`). Stages Lavish references to `<Artifact Directory>/browser_sandbox/references/`. Enforces state persistence via DOM reload and backend DB/state cross-checks (`run_command`). Synthesizes `ProofVerifier`-compliant Behavioral Proof Receipt (`.edge/qa/proofs/<slug>.json` with unique-SHA-256 screenshots, non-auth URLs, `host_facts_verified: true`, and `db_crosscheck`) before advancing to `REVIEW` (`EXAMINER`).
    - **Constraint:** Strictly zero production code mutation (`src/**`, `app/**`, `lib/**`, `db/**`). Documents defects with reproduction steps, network payloads, console errors, and screenshots. Parks non-blocking UX issues to `frontier-axi`.
 
 ### Station Memory Models: Elephant vs. Goldfish
@@ -117,22 +124,29 @@ Transitions are **stateless reducers** governed purely by process exit codes and
                                               │
                                               ▼
                                            VERIFY
-                                              │ (guard_verify: vitest exit==0, tsc --noEmit exit==0)
+                                              │ (guard_verify_to_gate: tests exit==0, tsc exit==0)
                                               ▼
-                                           REVIEW ----[CRITICAL findings]----> POLISH
-                                              │                                    │
-                                              │ [0 critical findings]              │ (guard_polish: tsc exit==0, tests pass)
-                                              ▼                                    ▼
-                                            GATE <─────────────────────────────────+
-                                              │ (guard_gate: python tools/gate.py exit code==0)
-                                              ▼
+                                            GATE
+                                              │ (guard_gate_to_next: gate.py==0 + ui diff_image<=0.15%)
+                                              ├──────────────────────────────┐
+                                              │ should_run_qa()==True        │ should_run_qa()==False
+                                              ▼                              │
+                                             QA  (ProofVerifier + DB check)  │
+                                              │                              │
+                                              ├──[CRITICAL]──► POLISH        │
+                                              └──────────────────────────────┤
+                                                                             ▼
+                                           REVIEW <---[POLISH -> GATE -> ...]┘
+                                              │ (EXAMINER: 3-axis + `brigade seal-review`)
+                                              ├──[CRITICAL or FAIL]──► POLISH (re-enters GATE)
+                                              ▼ [0 CRITICAL & ExaminerReceipt PASS]
                                            STAGING
                                               │ (guard_staging: git merge --ff-only into development,
                                               │  archives .edge/specs/<slice>.md to .edge/archive/specs/,
-                                              │  returns Treehouse worktree, resolves flight recorder)
+                                              │  returns Treehouse worktree, resets ExaminerReceipt)
                                               ▼
                                            COMPLETED
-                                              │ (audit living deeds via /edge-drift)
+                                              │ (audit living deeds via /edge-drift & prepare-ship)
                                               ▼
                                             IDLE
 ```
@@ -200,11 +214,17 @@ brigade triage /path/to/repo --track core
 # 8. Aktif İstasyon Prompt Payload'unu İncele (Negatif kısıtlar ve worktree yolu içerir)
 brigade ticket /path/to/repo --prompt
 
-# 9. Durum Makinesini İlerlet (Deterministik kapıları çalıştırır)
+# 9. Examiner 3-Axis Seal (REVIEW durumunda zorunlu mühür)
+brigade seal-review /path/to/repo --verdict PASS --summary "3-axis & evidence verified" --evidence-reviewed ".edge/qa/proofs/slug.json"
+
+# 10. Durum Makinesini İlerlet (Deterministik kapıları çalıştırır)
 brigade advance /path/to/repo
 
-# 10. Dikey Dilimi Tamamla (development Dalına Fast-Forward Merge, Şartname Arşivleme & Worktree İadesi)
+# 11. Dikey Dilimi Tamamla (development Dalına Fast-Forward Merge, Şartname Arşivleme & Worktree İadesi)
 brigade finish-slice /path/to/repo
+
+# 12. Specs-to-PR Köprüsü (no-mistakes öncesi PR gövdesi, intent ve One-way/Two-way Door risk analizi)
+brigade prepare-ship /path/to/repo --base staging --format pr
 
 # 11. Yaşayan Alan Senetlerini Denetle (Drift Scanner)
 python3 tools/drift/cli.py check /path/to/repo

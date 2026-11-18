@@ -69,7 +69,7 @@ class Station:
 
 @dataclass
 class ReviewFinding:
-    axis: str                                 # "standards" | "spec"
+    axis: str                                 # "standards" | "spec" | "evidence" | "qa"
     severity: str                             # "CRITICAL" | "WARNING" | "ADVISORY"
     file_path: str
     rule: str
@@ -83,6 +83,25 @@ class ReviewFinding:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ReviewFinding":
         return cls(**data)
+
+
+@dataclass
+class ExaminerReceipt:
+    verdict: str                              # "PASS" | "FAIL"
+    summary: str
+    ticket_id: Optional[str] = None
+    evidence_reviewed: List[str] = field(default_factory=list)
+    sealed_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    examiner_cid: Optional[str] = None
+    schema_version: str = "1.0.0"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ExaminerReceipt":
+        valid = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
+        return cls(**valid)
 
 
 @dataclass
@@ -163,6 +182,7 @@ class BrigadeState:
     active_worktree: Optional[str] = None
     stations: Dict[str, Station] = field(default_factory=dict)
     review_findings: List[ReviewFinding] = field(default_factory=list)
+    examiner_receipt: Optional[ExaminerReceipt] = None
     history: List[TransitionLog] = field(default_factory=list)
     blocked_reason: Optional[str] = None
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -179,37 +199,46 @@ class BrigadeState:
             "active_worktree": self.active_worktree,
             "stations": {k: v.to_dict() for k, v in self.stations.items()},
             "review_findings": [f.to_dict() for f in self.review_findings],
+            "examiner_receipt": self.examiner_receipt.to_dict() if self.examiner_receipt else None,
             "history": [h.to_dict() for h in self.history],
             "blocked_reason": self.blocked_reason,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
 
+    @staticmethod
+    def _migrate_stations(raw_stations: Dict[str, Any]) -> Dict[str, Station]:
+        migrated: Dict[str, Station] = {}
+        for k, v in raw_stations.items():
+            if k == "expediter":
+                continue
+            if k in ("standards_examiner", "spec_examiner"):
+                if "examiner" not in migrated:
+                    v_copy = dict(v) if isinstance(v, dict) else (v.to_dict() if hasattr(v, "to_dict") else dict(v))
+                    v_copy["role"] = StationRole.EXAMINER.value
+                    migrated["examiner"] = Station.from_dict(v_copy)
+                continue
+            migrated[k] = Station.from_dict(v) if isinstance(v, dict) else v
+        return migrated
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "BrigadeState":
         raw = dict(data)
-        if "current_state" in raw and raw["current_state"]:
+        if raw.get("current_state"):
             raw["current_state"] = CycleState(raw["current_state"])
-        if "active_ticket" in raw and raw["active_ticket"]:
+        if raw.get("active_ticket"):
             raw["active_ticket"] = Ticket.from_dict(raw["active_ticket"])
-        if "stations" in raw and isinstance(raw["stations"], dict):
-            migrated_stations: Dict[str, Station] = {}
-            for k, v in raw["stations"].items():
-                if k == "expediter":
-                    continue
-                if k in ("standards_examiner", "spec_examiner"):
-                    if "examiner" not in migrated_stations:
-                        v_copy = dict(v) if isinstance(v, dict) else (v.to_dict() if hasattr(v, "to_dict") else dict(v))
-                        v_copy["role"] = StationRole.EXAMINER.value
-                        migrated_stations["examiner"] = Station.from_dict(v_copy)
-                    continue
-                migrated_stations[k] = Station.from_dict(v) if isinstance(v, dict) else v
-            raw["stations"] = migrated_stations
-        if "review_findings" in raw and isinstance(raw["review_findings"], list):
+        if isinstance(raw.get("stations"), dict):
+            raw["stations"] = cls._migrate_stations(raw["stations"])
+        if isinstance(raw.get("review_findings"), list):
             raw["review_findings"] = [ReviewFinding.from_dict(f) for f in raw["review_findings"]]
-        if "history" in raw and isinstance(raw["history"], list):
+        receipt_raw = raw.get("examiner_receipt")
+        raw["examiner_receipt"] = ExaminerReceipt.from_dict(receipt_raw) if isinstance(receipt_raw, dict) else None
+        if isinstance(raw.get("history"), list):
             raw["history"] = [TransitionLog.from_dict(h) for h in raw["history"]]
-        return cls(**raw)
+        valid_fields = {f.name for f in fields(cls)}
+        filtered = {k: v for k, v in raw.items() if k in valid_fields}
+        return cls(**filtered)
 
 
 @dataclass

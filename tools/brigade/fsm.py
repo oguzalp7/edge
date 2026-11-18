@@ -8,8 +8,11 @@ import os
 import sys
 import json
 import re
+import hashlib
+import importlib.util
 import subprocess
 import shutil
+from collections import Counter
 from pathlib import Path
 from typing import Tuple, Dict, Any, Optional, List, Set
 from datetime import datetime, timezone
@@ -382,30 +385,197 @@ def _is_non_empty_list(val: Any) -> bool:
     return isinstance(val, list) and len(val) > 0
 
 
-def _check_proof_data_invariants(data: Dict[str, Any]) -> Tuple[bool, str, Dict[str, Any]]:
-    if not _is_non_empty_list(data.get("visited_urls")):
-        return False, "QA proof receipt invariant failed: 'visited_urls' must be a non-empty list.", {"error": "INVALID_VISITED_URLS"}
+class ProofVerifier:
+    """
+    Deterministic QA behavioral proof validator (Zero Forged-Evidence Tolerance).
+    Enforces disk existence, non-zero byte size, SHA-256 uniqueness across screenshots,
+    auth-wall redirect trap detection, host_facts_verified, and db_crosscheck.
+    """
 
-    if not _is_non_empty_list(data.get("user_actions_executed")):
-        return False, "QA proof receipt invariant failed: 'user_actions_executed' must be a non-empty list.", {"error": "INVALID_ACTIONS"}
+    AUTH_TOKENS: Tuple[str, ...] = (
+        "auth", "login", "signin", "sign-in", "oauth", "session", "sso", "password",
+    )
+    AUTH_URL_MARKERS: Tuple[str, ...] = ("/login", "/signin", "redirect=")
 
-    if data.get("persistence_verified") is not True:
-        return False, "QA proof receipt invariant failed: 'persistence_verified' must be True (DOM reload + DB cross-check required).", {"error": "PERSISTENCE_NOT_VERIFIED"}
+    @staticmethod
+    def is_auth_ticket(ticket: Optional[Ticket]) -> bool:
+        if not ticket:
+            return False
+        fields_to_check = (
+            ticket.domain or "",
+            ticket.branch_name or "",
+            ticket.ticket_id or "",
+            ticket.description or "",
+            ticket.spec_path or "",
+        )
+        combined = " ".join(fields_to_check).lower()
+        tokens = set(re.findall(r"[a-z0-9-]+", combined)) | set(re.findall(r"[a-z0-9]+", combined))
+        return any(tok in tokens for tok in ProofVerifier.AUTH_TOKENS)
 
-    if data.get("console_clean") is not True:
-        return False, "QA proof receipt invariant failed: 'console_clean' must be True (zero console.error, 0 unhandled exceptions).", {"error": "CONSOLE_NOT_CLEAN"}
+    @staticmethod
+    def resolve_screenshot_file(raw_path: str, search_roots: List[Path]) -> Optional[Path]:
+        cleaned = str(raw_path or "").strip()
+        if not cleaned:
+            return None
+        p = Path(cleaned)
+        if p.is_absolute() or is_wsl_path(cleaned):
+            norm = normalize_target_path(cleaned)
+            return norm if norm.is_file() else None
+        rel = cleaned[2:] if cleaned.startswith("./") else cleaned
+        for root in search_roots:
+            cand = Path(root) / rel
+            if cand.is_file():
+                return cand
+        return None
 
-    if not _is_non_empty_list(data.get("screenshot_paths")):
-        return False, "QA proof receipt invariant failed: 'screenshot_paths' must be a non-empty list.", {"error": "MISSING_SCREENSHOTS"}
+    @staticmethod
+    def _hash_single_screenshot(
+        raw_path: Any,
+        search_roots: List[Path],
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            return False, "QA proof receipt invariant failed: screenshot path must be a non-empty string.", {"error": "MISSING_SCREENSHOTS"}
+        resolved = ProofVerifier.resolve_screenshot_file(raw_path, search_roots)
+        if not resolved:
+            return False, f"QA proof verification failed: screenshot file not found '{raw_path}'.", {
+                "error": "MISSING_SCREENSHOT_FILE",
+                "missing_file": raw_path,
+            }
+        if resolved.stat().st_size <= 0:
+            return False, f"QA proof verification failed: screenshot file is zero bytes '{raw_path}'.", {
+                "error": "EMPTY_SCREENSHOT_FILE",
+                "empty_file": raw_path,
+            }
+        digest = hashlib.sha256(resolved.read_bytes()).hexdigest()
+        return True, "", {"digest": digest}
 
-    return True, "", {}
+    @staticmethod
+    def verify_screenshots(
+        screenshot_paths: Any,
+        search_roots: List[Path],
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        if not _is_non_empty_list(screenshot_paths):
+            return False, "QA proof receipt invariant failed: 'screenshot_paths' must be a non-empty list.", {"error": "MISSING_SCREENSHOTS"}
+        hashes: Dict[str, str] = {}
+        for raw_path in screenshot_paths:
+            ok, msg, info = ProofVerifier._hash_single_screenshot(raw_path, search_roots)
+            if not ok:
+                return False, msg, info
+            hashes[str(raw_path)] = info["digest"]
+        if len(screenshot_paths) > 1 and len(set(hashes.values())) < len(screenshot_paths):
+            counts = Counter(hashes.values())
+            dups = [d for d, c in counts.items() if c > 1]
+            return False, "QA proof verification failed: duplicate SHA-256 screenshot hashes detected.", {
+                "error": "DUPLICATE_SCREENSHOT_EVIDENCE",
+                "duplicate_hashes": dups,
+                "screenshot_hashes": hashes,
+            }
+        return True, "", {"screenshot_hashes": hashes}
+
+    @staticmethod
+    def _is_non_empty_str_list(val: Any) -> bool:
+        return isinstance(val, list) and len(val) > 0 and all(isinstance(x, str) and x.strip() for x in val)
+
+    @staticmethod
+    def _is_auth_wall_url(url: str) -> bool:
+        low = url.lower()
+        return any(marker in low for marker in ProofVerifier.AUTH_URL_MARKERS)
+
+    @staticmethod
+    def verify_urls(data: Dict[str, Any], ticket: Optional[Ticket]) -> Tuple[bool, str, Dict[str, Any]]:
+        visited = data.get("visited_urls")
+        if not ProofVerifier._is_non_empty_str_list(visited):
+            return False, "QA proof receipt invariant failed: 'visited_urls' must be a non-empty list.", {"error": "INVALID_VISITED_URLS"}
+        all_urls = [str(u).strip() for u in visited]
+        final_urls = data.get("final_urls")
+        if isinstance(final_urls, list):
+            all_urls.extend(str(u).strip() for u in final_urls if isinstance(u, str) and u.strip())
+        if not ProofVerifier.is_auth_ticket(ticket):
+            trapped = [u for u in all_urls if ProofVerifier._is_auth_wall_url(u)]
+            if trapped:
+                return False, f"QA proof verification failed: auth-wall redirect trap detected in {trapped}.", {
+                    "error": "AUTH_WALL_REDIRECT_TRAP",
+                    "trapped_urls": trapped,
+                }
+        return True, "", {"visited_urls": visited}
+
+    @staticmethod
+    def _verify_core_flags(data: Dict[str, Any]) -> Tuple[bool, str, Dict[str, Any]]:
+        if not ProofVerifier._is_non_empty_str_list(data.get("user_actions_executed")):
+            return False, "QA proof receipt invariant failed: 'user_actions_executed' must be a non-empty list.", {"error": "INVALID_ACTIONS"}
+        if data.get("persistence_verified") is not True:
+            return False, "QA proof receipt invariant failed: 'persistence_verified' must be True (DOM reload + DB cross-check required).", {"error": "PERSISTENCE_NOT_VERIFIED"}
+        if data.get("console_clean") is not True:
+            return False, "QA proof receipt invariant failed: 'console_clean' must be True (zero console.error, 0 unhandled exceptions).", {"error": "CONSOLE_NOT_CLEAN"}
+        return True, "", {}
+
+    @staticmethod
+    def _verify_telemetry(data: Dict[str, Any]) -> Tuple[bool, str, Dict[str, Any]]:
+        if data.get("host_facts_verified") is not True:
+            return False, "QA proof verification failed: 'host_facts_verified' must be True.", {"error": "HOST_FACTS_NOT_VERIFIED"}
+        db_cc = data.get("db_crosscheck")
+        if not isinstance(db_cc, dict) or len(db_cc) == 0:
+            return False, "QA proof verification failed: 'db_crosscheck' must be a non-empty dict.", {"error": "MISSING_DB_CROSSCHECK"}
+        return True, "", {"db_crosscheck": db_cc}
+
+    @staticmethod
+    def _load_receipt_json(proof_path: Path) -> Tuple[bool, Optional[Dict[str, Any]], str, Dict[str, Any]]:
+        if not proof_path.is_file():
+            return False, None, f"QA verification blocked: missing proof receipt at '{proof_path}'.", {"error": "MISSING_PROOF_RECEIPT"}
+        try:
+            data = json.loads(proof_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            return False, None, f"QA verification blocked: malformed JSON in proof receipt at '{proof_path}': {exc}", {"error": "MALFORMED_PROOF_RECEIPT"}
+        if not isinstance(data, dict):
+            return False, None, f"QA verification blocked: proof receipt JSON must be an object at '{proof_path}'.", {"error": "MALFORMED_PROOF_RECEIPT"}
+        return True, data, "", {}
+
+    @staticmethod
+    def verify_receipt(
+        proof_path: Path,
+        search_roots: List[Path],
+        ticket: Optional[Ticket] = None,
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        loaded_ok, data, l_msg, l_det = ProofVerifier._load_receipt_json(proof_path)
+        if not loaded_ok or data is None:
+            return False, l_msg, l_det
+
+        url_ok, url_msg, url_det = ProofVerifier.verify_urls(data, ticket)
+        if not url_ok:
+            return False, url_msg, url_det
+
+        flag_ok, flag_msg, flag_det = ProofVerifier._verify_core_flags(data)
+        if not flag_ok:
+            return False, flag_msg, flag_det
+
+        shot_ok, shot_msg, shot_det = ProofVerifier.verify_screenshots(data.get("screenshot_paths"), search_roots)
+        if not shot_ok:
+            return False, shot_msg, shot_det
+
+        tel_ok, tel_msg, tel_det = ProofVerifier._verify_telemetry(data)
+        if not tel_ok:
+            return False, tel_msg, tel_det
+
+        slug = str(data.get("slug") or proof_path.stem)
+        return True, f"QA proof receipt verified for '{slug}'.", {
+            "slug": slug,
+            "visited_urls": data["visited_urls"],
+            "user_actions_executed": data["user_actions_executed"],
+            "screenshot_paths": data["screenshot_paths"],
+            "screenshot_count": len(data["screenshot_paths"]),
+            "screenshot_hashes": shot_det["screenshot_hashes"],
+            "db_crosscheck": tel_det["db_crosscheck"],
+            "persistence_verified": True,
+            "console_clean": True,
+            "host_facts_verified": True,
+        }
 
 
 def _validate_qa_proof_receipt(
     repo_path: Path,
     work_dir: Path,
     ticket: Ticket,
-    scenario_slug: str = "qa_scenario"
+    scenario_slug: str = "qa_scenario",
 ) -> Tuple[bool, str, Dict[str, Any]]:
     slug = StationRegistry._resolve_qa_slug(scenario_slug, ticket)
 
@@ -420,32 +590,17 @@ def _validate_qa_proof_receipt(
             False,
             f"QA verification blocked: missing proof receipt at '.edge/qa/proofs/{slug}.json'. "
             "QA_ENGINEER must delegate browser verification to the browser subagent and synthesize the receipt.",
-            {"error": "MISSING_PROOF_RECEIPT", "expected_slug": slug}
+            {"error": "MISSING_PROOF_RECEIPT", "expected_slug": slug},
         )
 
-    try:
-        data = json.loads(proof_file.read_text(encoding="utf-8"))
-    except Exception as e:
-        return (
-            False,
-            f"QA verification blocked: malformed JSON in proof receipt at '{proof_file}': {e}",
-            {"error": "MALFORMED_PROOF_RECEIPT", "expected_slug": slug}
-        )
+    search_roots = list(dict.fromkeys([work_dir, repo_path]))
+    ok, msg, details = ProofVerifier.verify_receipt(proof_file, search_roots, ticket=ticket)
+    if not ok:
+        details.setdefault("expected_slug", slug)
+        return False, msg, details
 
-    inv_ok, inv_msg, inv_details = _check_proof_data_invariants(data)
-    if not inv_ok:
-        return False, inv_msg, inv_details
-
-    visited = data.get("visited_urls", [])
-    screenshots = data.get("screenshot_paths", [])
-
-    return True, f"QA proof receipt verified for '{slug}'.", {
-        "slug": slug,
-        "visited_urls": visited,
-        "screenshot_count": len(screenshots),
-        "persistence_verified": True,
-        "console_clean": True,
-    }
+    details.setdefault("slug", slug)
+    return True, msg, details
 
 
 class BrigadeFSM:
@@ -767,90 +922,236 @@ class BrigadeFSM:
 
         return True, "Hermetic verification passed: Tests and TypeScript compilation clean."
 
+    def guard_verify_to_gate(self) -> Tuple[bool, str, Dict[str, Any]]:
+        """Validates hermetic verification (characterization tests + tsc) before GATE."""
+        return self.guard_verify_to_review()
+
     def guard_verify_to_review(self) -> Tuple[bool, str, Dict[str, Any]]:
-        """Validates hermetic verification (characterization tests + tsc) before review."""
+        """Validates hermetic verification (characterization tests + tsc)."""
         passed, msg = self._run_hermetic_verification()
         if not passed:
             return False, msg, {}
         return True, "Verification passed: Characterization tests and TypeScript compilation are 100% clean.", {}
 
+    def _seal_findings_to_recorder(self) -> None:
+        if not (self.state.review_findings and self.state.active_ticket):
+            return
+        try:
+            recorder = FlightRecorder(self.target_repo, self.state.active_ticket.ticket_id)
+            recorder.seal_review_findings(self.state.review_findings)
+        except Exception as e:
+            print(f"[WARN] Failed to seal review findings into flight recorder: {e}")
+
+    def _validate_examiner_receipt(self) -> Tuple[Optional[CycleState], str, Dict[str, Any]]:
+        receipt = self.state.examiner_receipt
+        if receipt is None:
+            return (
+                CycleState.REVIEW,
+                "Review blocked: Examiner seal missing. Run 'brigade seal-review <repo> --verdict PASS|FAIL --summary \"...\"' before advancing.",
+                {"error": "MISSING_EXAMINER_RECEIPT"},
+            )
+        active_tid = self.state.active_ticket.ticket_id if self.state.active_ticket else None
+        if receipt.ticket_id and active_tid and receipt.ticket_id != active_tid:
+            return (
+                CycleState.REVIEW,
+                f"Review blocked: Examiner seal is stale (receipt ticket '{receipt.ticket_id}' != '{active_tid}'). Re-run 'brigade seal-review'.",
+                {"error": "STALE_EXAMINER_RECEIPT", "receipt_ticket_id": receipt.ticket_id, "active_ticket_id": active_tid},
+            )
+        verdict = (receipt.verdict or "").strip().upper()
+        if verdict == "FAIL":
+            return (
+                CycleState.POLISH,
+                "Examiner sealed verdict FAIL. Routing to POLISH for remediation.",
+                {"verdict": "FAIL"},
+            )
+        if verdict != "PASS":
+            return (
+                CycleState.REVIEW,
+                f"Review blocked: Invalid ExaminerReceipt verdict '{receipt.verdict}'. Expected PASS or FAIL.",
+                {"error": "INVALID_EXAMINER_VERDICT"},
+            )
+        return None, "", {"examiner_receipt": receipt.to_dict()}
+
     def guard_review_to_next(self) -> Tuple[CycleState, str, Dict[str, Any]]:
         """
-        Evaluates review findings and enforces hermetic verification gate:
+        Evaluates 3-axis review findings, mandatory ExaminerReceipt seal, and hermetic verification:
         - If CRITICAL findings exist -> POLISH
-        - If hermetic verification fails (tests/tsc fail) -> POLISH
-        - If only WARNING/ADVISORY or clean AND verification passes -> GATE
+        - If ExaminerReceipt missing/stale -> REVIEW (blocks advancement)
+        - If ExaminerReceipt.verdict == FAIL -> POLISH
+        - If hermetic verification fails -> POLISH
+        - Otherwise (0 CRITICAL + PASS seal + clean verification) -> STAGING
         """
-        if self.state.review_findings and self.state.active_ticket:
-            try:
-                recorder = FlightRecorder(self.target_repo, self.state.active_ticket.ticket_id)
-                recorder.seal_review_findings(self.state.review_findings)
-            except Exception as e:
-                print(f"[WARN] Failed to seal review findings into flight recorder: {e}")
+        self._seal_findings_to_recorder()
 
         critical_findings = [f for f in self.state.review_findings if f.severity == "CRITICAL"]
         if critical_findings:
             msg = f"Review flagged {len(critical_findings)} critical finding(s). Advancing to POLISH for remediation."
             return CycleState.POLISH, msg, {"critical_count": len(critical_findings)}
 
+        receipt_state, receipt_msg, receipt_details = self._validate_examiner_receipt()
+        if receipt_state is not None:
+            return receipt_state, receipt_msg, receipt_details
+
         v_passed, v_msg = self._run_hermetic_verification()
         if not v_passed:
-            msg = f"Review blocked: Hermetic verification failed before GATE entry:\n{v_msg}"
+            msg = f"Review blocked: Hermetic verification failed before STAGING entry:\n{v_msg}"
             return CycleState.POLISH, msg, {"verification_failed": True, "error": v_msg}
 
-        msg = "Review clean (0 critical findings) and hermetic verification passed. Advancing to GATE."
-        return CycleState.GATE, msg, {"total_findings": len(self.state.review_findings)}
+        msg = "Review clean (0 critical findings, Examiner PASS seal) and hermetic verification passed. Advancing to STAGING."
+        return CycleState.STAGING, msg, {
+            "total_findings": len(self.state.review_findings),
+            **receipt_details,
+        }
 
     def guard_polish_to_review(self) -> Tuple[bool, str, Dict[str, Any]]:
-        """Re-verifies compiler and tests after polish remediation and clears prior findings."""
+        """Re-verifies compiler and tests after polish remediation and clears prior findings and receipt."""
         passed, msg = self._run_hermetic_verification()
         if not passed:
             return False, f"Post-polish verification failed:\n{msg}", {}
         self.state.review_findings = []
-        return True, "Post-polish verification passed. Routing to REVIEW for examiner re-audit.", {}
+        self.state.examiner_receipt = None
+        return True, "Post-polish verification passed. Routing to GATE for re-verification.", {}
 
     def guard_polish_to_gate(self) -> Tuple[bool, str, Dict[str, Any]]:
         """Alias for guard_polish_to_review for backward compatibility."""
         return self.guard_polish_to_review()
 
-    def guard_gate_to_staging(self) -> Tuple[bool, str, Dict[str, Any]]:
-        """Runs tools/gate.py to execute the full deterministic verification suite."""
+    @staticmethod
+    def _resolve_visual_from_receipt(receipt_path: Path, roots: List[Path]) -> Optional[Tuple[Path, Path, Optional[Path]]]:
+        if not receipt_path.is_file():
+            return None
+        try:
+            data = json.loads(receipt_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        if not isinstance(data, dict):
+            return None
+        b_raw = str(data.get("baseline_path") or "").strip()
+        r_raw = str(data.get("refactored_path") or "").strip()
+        if not b_raw or not r_raw:
+            return None
+        b_file = ProofVerifier.resolve_screenshot_file(b_raw, roots)
+        r_file = ProofVerifier.resolve_screenshot_file(r_raw, roots)
+        if not (b_file and r_file):
+            return None
+        d_raw = str(data.get("diff_out_path") or "").strip()
+        d_path = normalize_target_path(d_raw) if d_raw else None
+        return b_file, r_file, d_path
+
+    def _find_visual_parity_pair(self, slug: str, work_dir: Path) -> Optional[Tuple[Path, Path, Path]]:
+        roots = list(dict.fromkeys([work_dir, self.target_repo]))
+        default_diff = work_dir / ".edge" / "qa" / "visual" / f"{slug}-diff.png"
+        for root in roots:
+            vis_dir = root / ".edge" / "qa" / "visual"
+            b_path = vis_dir / f"{slug}-baseline.png"
+            r_path = vis_dir / f"{slug}-refactored.png"
+            if b_path.is_file() and r_path.is_file():
+                return b_path, r_path, default_diff
+        for root in roots:
+            for cand in (
+                root / ".edge" / "qa" / "visual" / f"{slug}-diff.json",
+                root / ".edge" / "qa" / "proofs" / f"{slug}-visual.json",
+            ):
+                resolved = self._resolve_visual_from_receipt(cand, roots)
+                if resolved:
+                    return resolved[0], resolved[1], resolved[2] or default_diff
+        return None
+
+    def _run_diff_image_subprocess(self, baseline: Path, refactored: Path, diff_out: Path) -> Tuple[bool, str, Dict[str, Any]]:
+        plugin_root = Path(__file__).resolve().parents[2]
+        uv_bin = shutil.which("uv") or str(Path.home() / ".local" / "bin" / "uv")
+        b_arg = to_wsl_path(baseline) if is_wsl_path(baseline) else str(baseline)
+        r_arg = to_wsl_path(refactored) if is_wsl_path(refactored) else str(refactored)
+        d_arg = to_wsl_path(diff_out) if is_wsl_path(diff_out) else str(diff_out)
+        cmd = [
+            uv_bin, "run", "--with", "pillow", "python3",
+            "-m", "tools.ui_audit.diff_image",
+            b_arg, r_arg, "--tolerance", "15", "--max-mismatch", "0.15", "--diff-out", d_arg,
+        ]
+        code, out, err = self._run_cmd(cmd, cwd=plugin_root)
+        if code != 0:
+            detail_msg = (out or err or "Pixel mismatch exceeded 0.15% threshold.").strip()
+            return False, f"UI visual parity FAILED (mismatch > 0.15%): {detail_msg}", {
+                "error": "VISUAL_PARITY_FAILED",
+                "baseline": str(baseline),
+                "refactored": str(refactored),
+                "diff_out": str(diff_out),
+                "output": out,
+            }
+        return True, "UI visual parity passed (<= 0.15%).", {
+            "baseline": str(baseline),
+            "refactored": str(refactored),
+            "diff_out": str(diff_out),
+            "output": out,
+        }
+
+    def _check_ui_visual_parity(self, ticket: Ticket, work_dir: Path) -> Tuple[bool, str, Dict[str, Any]]:
+        slug = StationRegistry._resolve_qa_slug("qa_scenario", ticket)
+        pair = self._find_visual_parity_pair(slug, work_dir)
+        if not pair:
+            return (
+                False,
+                f"UI visual parity blocked: missing baseline/refactored screenshots for '{slug}'. "
+                f"Expected '.edge/qa/visual/{slug}-baseline.png' and '.edge/qa/visual/{slug}-refactored.png'.",
+                {"error": "MISSING_VISUAL_PARITY_IMAGES", "slug": slug},
+            )
+        baseline, refactored, diff_out = pair
+        if importlib.util.find_spec("PIL") is not None:
+            from tools.ui_audit.diff_image import compare_images
+            passed = compare_images(baseline, refactored, tolerance=15, max_mismatch_pct=0.15, diff_out_path=diff_out)
+            if not passed:
+                return False, f"UI visual parity FAILED (mismatch > 0.15%) for '{slug}'.", {
+                    "error": "VISUAL_PARITY_FAILED",
+                    "baseline": str(baseline),
+                    "refactored": str(refactored),
+                    "diff_out": str(diff_out),
+                }
+            return True, f"UI visual parity passed (<= 0.15%) for '{slug}'.", {
+                "baseline": str(baseline),
+                "refactored": str(refactored),
+                "diff_out": str(diff_out),
+            }
+        return self._run_diff_image_subprocess(baseline, refactored, diff_out)
+
+    def _build_gate_command(self, ticket: Ticket, eff_repo: Any) -> List[str]:
+        gate_script = Path(__file__).resolve().parent.parent / "gate.py"
+        base_to_compare = self.state.base_branch.strip() if (self.state.base_branch and self.state.base_branch.strip()) else "HEAD~1"
+        no_refactor_flag = ["--no-refactor"] if getattr(ticket, "track", "core") == "feature" else []
+        if is_wsl_path(eff_repo):
+            return [
+                "python3", to_wsl_path(gate_script), to_wsl_path(eff_repo),
+                "--base", base_to_compare, "--track", ticket.track, "--skip-verify",
+            ] + no_refactor_flag
+        return [
+            sys.executable, str(gate_script), str(eff_repo),
+            "--base", base_to_compare, "--track", ticket.track, "--skip-verify",
+        ] + no_refactor_flag
+
+    def guard_gate_to_next(self) -> Tuple[bool, str, Dict[str, Any]]:
+        """Runs tools/gate.py (and diff_image.py visual parity on ui track) before QA/REVIEW."""
         ticket = self.state.active_ticket
         if not ticket:
             return False, "No active ticket found.", {}
 
-        # Resolve path to tools/gate.py
-        gate_script = Path(__file__).resolve().parent.parent / "gate.py"
         eff_repo = ticket.worktree_path if (ticket and ticket.worktree_path) else self.target_repo
-        base_to_compare = self.state.base_branch.strip() if (self.state.base_branch and self.state.base_branch.strip()) else "HEAD~1"
-        no_refactor_flag = ["--no-refactor"] if getattr(ticket, "track", "core") == "feature" else []
-
-        if is_wsl_path(eff_repo):
-            wsl_target = to_wsl_path(eff_repo)
-            wsl_gate = to_wsl_path(gate_script)
-            cmd = [
-                "python3",
-                wsl_gate,
-                wsl_target,
-                "--base", base_to_compare,
-                "--track", ticket.track,
-                "--skip-verify",
-            ] + no_refactor_flag
-        else:
-            cmd = [
-                sys.executable,
-                str(gate_script),
-                str(eff_repo),
-                "--base", base_to_compare,
-                "--track", ticket.track,
-                "--skip-verify",
-            ] + no_refactor_flag
-
+        cmd = self._build_gate_command(ticket, eff_repo)
         code, stdout, stderr = self._run_cmd(cmd)
         if code != 0:
             return False, f"Edge Verification Gate FAILED (exit code {code}):\n{stdout}\n{stderr}", {"output": stdout}
 
-        return True, "Edge Verification Gate PASSED all invariant stages.", {"output": stdout}
+        details: Dict[str, Any] = {"output": stdout}
+        if getattr(ticket, "track", "core") == "ui":
+            work_dir = normalize_target_path(eff_repo)
+            parity_ok, parity_msg, parity_details = self._check_ui_visual_parity(ticket, work_dir)
+            if not parity_ok:
+                return False, parity_msg, parity_details
+            details["visual_parity"] = parity_details
+
+        return True, "Edge Verification Gate PASSED all invariant stages.", details
+
+    def guard_gate_to_staging(self) -> Tuple[bool, str, Dict[str, Any]]:
+        """Backward-compatibility alias delegating to guard_gate_to_next."""
+        return self.guard_gate_to_next()
 
     def should_run_qa(self, ticket: Optional[Ticket] = None) -> bool:
         """
@@ -934,11 +1235,12 @@ class BrigadeFSM:
 
         return True, "QA DB Drift Preflight PASSED: Database schema is fully synchronized with migrations."
 
-    def guard_qa_to_staging(self) -> Tuple[bool, str, Dict[str, Any]]:
+    def guard_qa_to_review(self) -> Tuple[bool, str, Dict[str, Any]]:
         """
-        Validates the QA verification stage:
-        1. Fails if any CRITICAL review finding exists (e.g. unhandled console errors, broken flows).
-        2. Enforces deterministic Behavioral Proof Receipt Gate (.edge/qa/proofs/<slug>.json).
+        Validates the QA verification stage before Examiner REVIEW:
+        1. Fails if any CRITICAL review finding exists (routes to POLISH).
+        2. Enforces deterministic ProofVerifier Receipt Gate (.edge/qa/proofs/<slug>.json).
+        3. Executes QA DB drift preflight.
         """
         ticket = self.state.active_ticket
         if not ticket:
@@ -971,12 +1273,16 @@ class BrigadeFSM:
 
         return (
             True,
-            f"QA verification passed (0 critical findings, valid proof receipt for '{proof_details.get('slug')}'). Advancing to STAGING.",
+            f"QA verification passed (0 critical findings, valid proof receipt for '{proof_details.get('slug')}'). Advancing to REVIEW.",
             {
                 "total_findings": len(self.state.review_findings),
                 "proof_details": proof_details,
             },
         )
+
+    def guard_qa_to_staging(self) -> Tuple[bool, str, Dict[str, Any]]:
+        """Backward-compatibility alias delegating to guard_qa_to_review."""
+        return self.guard_qa_to_review()
 
     def get_next_station_handoff(self, target_state: Optional[CycleState] = None) -> Dict[str, Any]:
         """
@@ -1030,10 +1336,11 @@ class BrigadeFSM:
         instructions = {
             CycleState.RED_TEST: "Establish Feathers seams and failing RED tests in the isolated worktree.",
             CycleState.SURGERY: "Implement clean code in the isolated worktree to turn red tests green. Follow contracts strictly.",
-            CycleState.VERIFY: "Run characterization tests and compiler verification in worktree.",
-            CycleState.REVIEW: "Conduct Dual-Axis review (Axis 1: Standards/Smells, Axis 2: Architectural/Spec Boundaries). Keep under 350 words.",
-            CycleState.POLISH: "Remediate review findings in the isolated worktree and verify compiler clean.",
-            CycleState.QA: "Execute browser E2E verification, check Lavish-to-Reality parity, and verify zero console errors.",
+            CycleState.VERIFY: "Run characterization tests and compiler verification in worktree, then advance to GATE.",
+            CycleState.GATE: "Run tools/gate.py (and diff_image.py on ui track) and advance to QA or REVIEW.",
+            CycleState.QA: "Execute browser E2E verification, synthesize ProofVerifier receipt, and advance to REVIEW (EXAMINER).",
+            CycleState.REVIEW: "Conduct 3-axis review (Axis 1: Standards, Axis 2: Spec Boundaries, Axis 3: Multimodal Evidence) and run 'brigade seal-review' before advancing to STAGING.",
+            CycleState.POLISH: "Remediate review findings in the isolated worktree and verify compiler clean before re-entering GATE.",
             CycleState.STAGING: f"[READY_FOR_STAGING] Ticket {tid} passed all verification gates. Fast-forward merge ready.",
             CycleState.BLOCKED: f"[ESCALATION] Ticket {tid} blocked at state {state_val}. Captain intervention required.",
         }
@@ -1250,130 +1557,126 @@ class BrigadeFSM:
                 print(f"[WARN] Failed to record guard failure in flight recorder: {e}")
 
     def _advance_from_gate(self, force: bool = False) -> Tuple[bool, CycleState, str]:
-        """Handles advance logic from GATE to either QA (preflight checked) or STAGING."""
+        """Handles advance logic from GATE to either QA (preflight checked) or REVIEW."""
         curr = CycleState.GATE
-        passed, msg, details = self.guard_gate_to_staging()
+        passed, msg, details = self.guard_gate_to_next()
         if not passed and not force:
             self._record_guard_failure(curr, msg, details)
             return False, curr, f"Edge Gate blocked advancement: {msg}"
 
         if self.should_run_qa(self.state.active_ticket):
             drift_ok, drift_msg = self._run_qa_db_drift_preflight()
-            if not drift_ok:
+            if not drift_ok and not force:
                 self._record_guard_failure(curr, drift_msg, {"db_drift": True})
                 return False, curr, f"QA Preflight blocked advancement: {drift_msg}"
 
             adv_msg = "Gate passed; Lavish prototype detected -> advancing to QA."
             self._transition(CycleState.QA, adv_msg, details)
             return True, self.state.current_state, adv_msg
-        else:
-            adv_msg = "Gate passed; no Lavish session -> bypassing QA to STAGING."
-            self._transition(CycleState.STAGING, adv_msg, details)
-            return True, self.state.current_state, adv_msg
+
+        adv_msg = "Gate passed; no QA required -> advancing to REVIEW."
+        self._transition(CycleState.REVIEW, adv_msg, details)
+        return True, self.state.current_state, adv_msg
+
+    def _advance_from_qa(self, force: bool = False) -> Tuple[bool, CycleState, str]:
+        curr = CycleState.QA
+        passed, msg, details = self.guard_qa_to_review()
+        if not passed and not force:
+            self._record_guard_failure(curr, msg, details)
+            if details.get("critical_count", 0) > 0:
+                self._transition(CycleState.POLISH, f"QA failed with critical defects -> routing to POLISH: {msg}", details)
+                return False, CycleState.POLISH, f"Critical QA defects detected. Routed to POLISH: {msg}"
+            return False, curr, f"QA guard blocked advancement: {msg}"
+        self._transition(CycleState.REVIEW, msg, details)
+        return True, self.state.current_state, msg
+
+    def _advance_from_review(self, force: bool = False) -> Tuple[bool, CycleState, str]:
+        curr = CycleState.REVIEW
+        next_state, msg, details = self.guard_review_to_next()
+        if next_state == CycleState.REVIEW:
+            if force:
+                self._transition(CycleState.STAGING, f"Forced advance from REVIEW: {msg}", details)
+                return True, self.state.current_state, msg
+            self._record_guard_failure(curr, msg, details)
+            return False, curr, msg
+        self._transition(next_state, msg, details)
+        return True, self.state.current_state, msg
+
+    def _advance_from_polish(self, force: bool = False) -> Tuple[bool, CycleState, str]:
+        curr = CycleState.POLISH
+        passed, msg, details = self.guard_polish_to_review()
+        if not passed and not force:
+            self._record_guard_failure(curr, msg, details)
+            return False, curr, f"Polish guard blocked advancement: {msg}"
+        if force:
+            self.state.review_findings = []
+            self.state.examiner_receipt = None
+        self._transition(CycleState.GATE, msg, details)
+        return True, self.state.current_state, msg
+
+    def _advance_from_completed(self) -> Tuple[bool, CycleState, str]:
+        self._seal_findings_to_recorder()
+        self._transition(CycleState.IDLE, "Cycle completed. Reset to IDLE.")
+        self.state.active_ticket = None
+        self.state.active_branch = None
+        self.state.review_findings = []
+        self.state.examiner_receipt = None
+        self.save()
+        return True, self.state.current_state, "Reset to IDLE for next ticket."
+
+    def _advance_guarded(
+        self,
+        curr: CycleState,
+        guard_fn: Any,
+        next_state: CycleState,
+        err_prefix: str,
+        force: bool = False,
+    ) -> Tuple[bool, CycleState, str]:
+        passed, msg, details = guard_fn()
+        if not passed and not force:
+            self._record_guard_failure(curr, msg, details)
+            return False, curr, f"{err_prefix}: {msg}"
+        self._transition(next_state, msg, details)
+        return True, self.state.current_state, msg
 
     def advance(self, force: bool = False) -> Tuple[bool, CycleState, str]:
         """
         Advances the state machine to the next deterministic state.
-        Guards govern each step. If a guard fails, the machine remains in place
-        or transitions to BLOCKED.
+        Order: VERIFY -> GATE -> [QA] -> REVIEW -> STAGING -> COMPLETED -> IDLE.
         """
         curr = self.state.current_state
-
         if curr == CycleState.IDLE:
             if not self.state.active_ticket:
                 return False, curr, "Cannot advance from IDLE without an active ticket. Run 'triage' first."
             self._transition(CycleState.TRIAGE, "Initialized triage from active ticket.")
             return True, self.state.current_state, "Moved to TRIAGE."
 
-        elif curr == CycleState.TRIAGE:
-            passed, msg, details = self.guard_triage_to_surgery()
-            if not passed and not force:
-                self._record_guard_failure(curr, msg, details)
-                return False, curr, f"Triage validation failed: {msg}"
-            self._transition(CycleState.SURGERY, msg, details)
-            return True, self.state.current_state, msg
+        simple_routes = {
+            CycleState.TRIAGE: (self.guard_triage_to_surgery, CycleState.SURGERY, "Triage validation failed"),
+            CycleState.RED_TEST: (self.guard_red_to_surgery, CycleState.SURGERY, "Red test guard blocked advancement"),
+            CycleState.SURGERY: (self.guard_surgery_to_verify, CycleState.VERIFY, "Surgery guard blocked advancement"),
+            CycleState.VERIFY: (self.guard_verify_to_gate, CycleState.GATE, "Verification guard blocked advancement"),
+            CycleState.STAGING: (self.guard_staging_to_completed, CycleState.COMPLETED, "Staging guard blocked completion"),
+        }
+        if curr in simple_routes:
+            guard_fn, next_st, prefix = simple_routes[curr]
+            return self._advance_guarded(curr, guard_fn, next_st, prefix, force=force)
 
-        elif curr == CycleState.RED_TEST:
-            passed, msg, details = self.guard_red_to_surgery()
-            if not passed and not force:
-                self._record_guard_failure(curr, msg, details)
-                return False, curr, f"Red test guard blocked advancement: {msg}"
-            self._transition(CycleState.SURGERY, msg, details)
-            return True, self.state.current_state, msg
+        complex_handlers = {
+            CycleState.GATE: lambda: self._advance_from_gate(force),
+            CycleState.QA: lambda: self._advance_from_qa(force),
+            CycleState.REVIEW: lambda: self._advance_from_review(force),
+            CycleState.POLISH: lambda: self._advance_from_polish(force),
+            CycleState.COMPLETED: self._advance_from_completed,
+        }
+        handler = complex_handlers.get(curr)
+        if handler:
+            return handler()
 
-        elif curr == CycleState.SURGERY:
-            passed, msg, details = self.guard_surgery_to_verify()
-            if not passed and not force:
-                self._record_guard_failure(curr, msg, details)
-                return False, curr, f"Surgery guard blocked advancement: {msg}"
-            self._transition(CycleState.VERIFY, msg, details)
-            return True, self.state.current_state, msg
-
-        elif curr == CycleState.VERIFY:
-            passed, msg, details = self.guard_verify_to_review()
-            if not passed and not force:
-                self._record_guard_failure(curr, msg, details)
-                return False, curr, f"Verification guard blocked advancement: {msg}"
-            self._transition(CycleState.REVIEW, msg, details)
-            return True, self.state.current_state, msg
-
-        elif curr == CycleState.REVIEW:
-            next_state, msg, details = self.guard_review_to_next()
-            self._transition(next_state, msg, details)
-            return True, self.state.current_state, msg
-
-        elif curr == CycleState.POLISH:
-            passed, msg, details = self.guard_polish_to_review()
-            if not passed and not force:
-                self._record_guard_failure(curr, msg, details)
-                return False, curr, f"Polish guard blocked advancement: {msg}"
-            self._transition(CycleState.REVIEW, msg, details)
-            return True, self.state.current_state, msg
-
-        elif curr == CycleState.GATE:
-            return self._advance_from_gate(force)
-
-        elif curr == CycleState.QA:
-            passed, msg, details = self.guard_qa_to_staging()
-            if not passed and not force:
-                self._record_guard_failure(curr, msg, details)
-                if details.get("critical_count", 0) > 0:
-                    self._transition(CycleState.POLISH, f"QA failed with critical defects -> routing to POLISH: {msg}", details)
-                    return False, CycleState.POLISH, f"Critical QA defects detected. Routed to POLISH: {msg}"
-                return False, curr, f"QA guard blocked advancement: {msg}"
-            self._transition(CycleState.STAGING, msg, details)
-            return True, self.state.current_state, msg
-
-        elif curr == CycleState.STAGING:
-            passed, msg, details = self.guard_staging_to_completed()
-            if not passed and not force:
-                self._record_guard_failure(curr, msg, details)
-                return False, curr, f"Staging guard blocked completion: {msg}"
-            self._transition(CycleState.COMPLETED, msg, details)
-            return True, self.state.current_state, msg
-
-        elif curr == CycleState.COMPLETED:
-            if self.state.review_findings and self.state.active_ticket:
-                try:
-                    recorder = FlightRecorder(self.target_repo, self.state.active_ticket.ticket_id)
-                    recorder.seal_review_findings(self.state.review_findings)
-                except Exception as e:
-                    print(f"[WARN] Failed to seal review findings into flight recorder: {e}")
-
-            # Reset for next cycle
-            self._transition(CycleState.IDLE, "Cycle completed. Reset to IDLE.")
-            self.state.active_ticket = None
-            self.state.active_branch = None
-            self.state.review_findings = []
-            self.save()
-            return True, self.state.current_state, "Reset to IDLE for next ticket."
-
-        elif curr == CycleState.BLOCKED:
+        if curr == CycleState.BLOCKED:
             return False, curr, f"State is BLOCKED ({self.state.blocked_reason}). Run 'abort' to reset."
-
-        elif curr == CycleState.PAUSED:
+        if curr == CycleState.PAUSED:
             return False, curr, "State is PAUSED. Run 'brigade resume' to restore execution."
-
         return False, curr, f"Unknown state {curr}."
 
     def _transition(self, to_state: CycleState, message: str, details: Optional[Dict[str, Any]] = None) -> None:
@@ -1419,6 +1722,7 @@ class BrigadeFSM:
         self.state.active_branch = None
         self.state.active_worktree = None
         self.state.review_findings = []
+        self.state.examiner_receipt = None
         self.state.blocked_reason = None
         self._transition(CycleState.IDLE, f"Aborted: {reason}")
 
@@ -1799,6 +2103,7 @@ class BrigadeFSM:
         self.state.active_branch = None
         self.state.active_worktree = None
         self.state.review_findings = []
+        self.state.examiner_receipt = None
         self.state.blocked_reason = None
         self._transition(CycleState.IDLE, f"Slice {ticket.ticket_id} finished and merged cleanly.")
 
@@ -1817,27 +2122,19 @@ class BrigadeFSM:
             if eff_ticket
             else "target file"
         )
-        if state == CycleState.IDLE:
-            return SubstepList([]), SubstepList(["triage_next_ticket"]), "Run 'brigade triage' to pick next ticket from radar."
-        elif state == CycleState.TRIAGE:
-            return SubstepList(["ticket_triaged"]), SubstepList(["git_branch_created", "baseline_compiler_verified", "surgery"]), "Run 'brigade advance' to transition to SURGERY and dispatch Surgeon."
-        elif state == CycleState.RED_TEST:
-            return SubstepList(["slice_started"]), SubstepList(["write_red_tests", "verify_red_baseline"]), f"Author failing unit/contract tests for {target} to establish red baseline before advancing to SURGERY."
-        elif state == CycleState.SURGERY:
-            return SubstepList(["ticket_triaged", "git_branch_created"]), SubstepList(["code_modifications", "hermetic_verification", "gate_verification"]), f"Execute bounded surgery on {target}, then verify with tests and tsc before advancing to VERIFY."
-        elif state == CycleState.VERIFY:
-            return SubstepList(["ticket_triaged", "surgery_completed"]), SubstepList(["test_seam_verification", "tsc_compilation", "dual_axis_review"]), "Run hermetic test seams and advance to REVIEW."
-        elif state == CycleState.REVIEW:
-            return SubstepList(["ticket_triaged", "surgery_completed", "hermetic_tests_passed"]), SubstepList(["standards_review", "spec_review", "edge_gate"]), "Execute dual-axis review (Standards & Spec) and record findings."
-        elif state == CycleState.POLISH:
-            return SubstepList(["review_findings_recorded"]), SubstepList(["remediate_critical_findings", "re_verify", "edge_gate"]), "Remediate critical review findings and advance to GATE."
-        elif state == CycleState.GATE:
-            return SubstepList(["review_clean"]), SubstepList(["edge_gate_execution", "qa_verification", "squash_merge"]), "Run 'python tools/gate.py' verification suite and advance."
-        elif state == CycleState.QA:
-            return SubstepList(["gate_passed"]), SubstepList(["browser_e2e_verification", "lavish_parity_check", "zero_console_errors", "squash_merge"]), "Execute QA browser inspection (chrome-devtools-axi) and advance to STAGING."
-        elif state == CycleState.STAGING:
-            return SubstepList(["gate_passed", "qa_verified"]), SubstepList(["squash_merge_to_base", "radar_ledger_update"]), "Squash-merge refactor branch into base and update radar ledger."
-        return SubstepList([]), SubstepList([]), f"Resume execution in state {state.value}."
+        mapping = {
+            CycleState.IDLE: (SubstepList([]), SubstepList(["triage_next_ticket"]), "Run 'brigade triage' to pick next ticket from radar."),
+            CycleState.TRIAGE: (SubstepList(["ticket_triaged"]), SubstepList(["git_branch_created", "baseline_compiler_verified", "surgery"]), "Run 'brigade advance' to transition to SURGERY and dispatch Surgeon."),
+            CycleState.RED_TEST: (SubstepList(["slice_started"]), SubstepList(["write_red_tests", "verify_red_baseline"]), f"Author failing unit/contract tests for {target} to establish red baseline before advancing to SURGERY."),
+            CycleState.SURGERY: (SubstepList(["ticket_triaged", "git_branch_created"]), SubstepList(["code_modifications", "hermetic_verification", "gate_verification"]), f"Execute bounded surgery on {target}, then verify with tests and tsc before advancing to VERIFY."),
+            CycleState.VERIFY: (SubstepList(["ticket_triaged", "surgery_completed"]), SubstepList(["test_seam_verification", "tsc_compilation", "edge_gate"]), "Run hermetic test seams and advance to GATE."),
+            CycleState.GATE: (SubstepList(["hermetic_tests_passed"]), SubstepList(["edge_gate_execution", "ui_visual_parity", "qa_or_review"]), "Run 'python tools/gate.py' (and UI diff_image.py if ui track) and advance to QA or REVIEW."),
+            CycleState.QA: (SubstepList(["gate_passed"]), SubstepList(["browser_e2e_verification", "proof_verifier_receipt", "zero_console_errors", "examiner_review"]), "Execute QA browser inspection, synthesize ProofVerifier receipt, and advance to REVIEW."),
+            CycleState.REVIEW: (SubstepList(["gate_passed", "qa_verified_if_needed"]), SubstepList(["standards_review", "spec_review", "evidence_review", "seal_review"]), "Execute 3-axis review (Standards, Spec, Evidence) and run 'brigade seal-review' before advancing to STAGING."),
+            CycleState.POLISH: (SubstepList(["review_findings_recorded"]), SubstepList(["remediate_critical_findings", "re_verify", "edge_gate"]), "Remediate critical review findings and advance to GATE."),
+            CycleState.STAGING: (SubstepList(["gate_passed", "review_sealed_pass"]), SubstepList(["squash_merge_to_base", "radar_ledger_update"]), "Squash-merge branch into base and update radar ledger."),
+        }
+        return mapping.get(state, (SubstepList([]), SubstepList([]), f"Resume execution in state {state.value}."))
 
     def pause(self, reason: str = "MANUAL_PAUSE") -> Checkpoint:
         """

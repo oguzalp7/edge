@@ -61,8 +61,19 @@ If currently on `development`, create and checkout a release/milestone branch be
 git checkout -b release/<feature-milestone>
 ```
 
+### Step 1.5: Specs-to-PR Bridge (`brigade prepare-ship`)
+Before invoking `no-mistakes`, synthesize the deterministic Specs-to-PR payload to verify all QA proof receipts via `ProofVerifier`, classify One-way vs. Two-way Door risk, lock `--intent`, and generate the **Matt Pocock / Dex Horthy** PR body (`## Summary`, `## Evidence`, `## Merge Danger`):
+
+```bash
+# Generate PR body & validate proofs (exits 1 if any .edge/qa/proofs/*.json fails ProofVerifier)
+python3 tools/brigade/cli.py prepare-ship . --base staging --format pr
+
+# Or emit machine-readable JSON (contains intent, scenario_contract, pr_body, door_type, blast_radius)
+python3 tools/brigade/cli.py prepare-ship . --base staging --format json --out .edge/ship-payload.json
+```
+
 ### Step 2: Run no-mistakes Targeting Staging
-Execute `no-mistakes axi run` with `--base-branch staging`:
+Execute `no-mistakes axi run` with `--base-branch staging` using the locked `--intent` from `prepare-ship`:
 
 ```bash
 no-mistakes axi run \

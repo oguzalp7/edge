@@ -60,10 +60,10 @@ suggested_skills:
         Dönen `conversationId`'yi hemen `brigade register <repo> --role <role> --conversation-id <id>` ile `.edge/brigade.json`'a kaydet.
      4. **Kanonik İstasyon Zorunluluğu (Ad-Hoc Rol Yasağı):** Asla `Database Operator`, `Quality Worker` gibi ad-hoc roller türetme. 8 Kanonik İstasyon (`SPEC_WRITER`, `SPEC_CRITIC`, `RESEARCHER`, `SEAM_ARCHITECT`, `CODER`, `SURGEON`, `EXAMINER`, `QA_ENGINEER`) kullan. Teslimat ve entegrasyon deterministik CLI (`brigade finish-slice`) ile yürütülür.
    - **İş Akışı Zincirleri:**
-     - **Feature İşi:** `SPEC_WRITER` $\rightarrow$ `SPEC_CRITIC` (`brigade critique-spec` Danışman Eleştiri) $\rightarrow$ **[TREEHOUSE WORKTREE GATE]** (`brigade start-slice --track feature` ile peşin kiralama & `RED_TEST`) $\rightarrow$ `SEAM_ARCHITECT` (Worktree'de Kırmızı Test, `brigade advance` ile doğrulama $\rightarrow$ `SURGERY`) $\rightarrow$ `CODER` (Worktree'de Yeşil Test) $\rightarrow$ `EXAMINER` $\rightarrow$ `QA_ENGINEER` $\rightarrow$ Deterministik Teslimat (`brigade finish-slice` ile birleştirme, şartname arşivleme, `/edge-drift` denetimi).
-     - **Refactor İşi:** **[TREEHOUSE WORKTREE GATE]** $\rightarrow$ `SURGEON` (Worktree'de Cerrahi) $\rightarrow$ `EXAMINER` $\rightarrow$ Deterministik Teslimat (`brigade finish-slice`).
-     - **Bug-Fix İşi:** `RESEARCHER` (RCA) $\rightarrow$ `SEAM_ARCHITECT` (Karakterizasyon Testi) $\rightarrow$ **[TREEHOUSE WORKTREE GATE]** $\rightarrow$ `CODER` $\rightarrow$ `EXAMINER` $\rightarrow$ `QA_ENGINEER` $\rightarrow$ Deterministik Teslimat (`brigade finish-slice`).
-     - **QA / E2E Doğrulama:** `QA_ENGINEER` (Multi-Agent `browser` Subagent Delegasyonu + Davranışsal Kanıt Makbuzu / Proof Receipt Gate `.edge/qa/proofs/<slug>.json` + DB/State Cross-Check + Scraper Anomaly Journaling).
+     - **Feature İşi:** `SPEC_WRITER` $\rightarrow$ `SPEC_CRITIC` (`brigade critique-spec` Danışman Eleştiri) $\rightarrow$ **[TREEHOUSE WORKTREE GATE]** (`brigade start-slice --track feature` ile peşin kiralama & `RED_TEST`) $\rightarrow$ `SEAM_ARCHITECT` (Worktree'de Kırmızı Test, `brigade advance` ile doğrulama $\rightarrow$ `SURGERY`) $\rightarrow$ `CODER` (Worktree'de Yeşil Test) $\rightarrow$ `GATE` (`tools/gate.py` + UI `diff_image.py`) $\rightarrow$ `[QA_ENGINEER]` (`ProofVerifier` Makbuzu) $\rightarrow$ `EXAMINER` (3-Eksenli Kanıt Odaklı İnceleme + `brigade seal-review`) $\rightarrow$ Deterministik Teslimat (`brigade finish-slice` ile birleştirme, şartname arşivleme, `/edge-drift` denetimi, `brigade prepare-ship`).
+     - **Refactor İşi:** **[TREEHOUSE WORKTREE GATE]** $\rightarrow$ `SURGEON` (Worktree'de Cerrahi) $\rightarrow$ `GATE` (`tools/gate.py` + `ui` izinde `diff_image.py <= 0.15%`) $\rightarrow$ `[QA_ENGINEER]` $\rightarrow$ `EXAMINER` (3-Eksenli İnceleme + `brigade seal-review`) $\rightarrow$ Deterministik Teslimat (`brigade finish-slice`).
+     - **Bug-Fix İşi:** `RESEARCHER` (RCA) $\rightarrow$ `SEAM_ARCHITECT` (Karakterizasyon Testi) $\rightarrow$ **[TREEHOUSE WORKTREE GATE]** $\rightarrow$ `CODER` $\rightarrow$ `GATE` $\rightarrow$ `[QA_ENGINEER]` $\rightarrow$ `EXAMINER` (`brigade seal-review`) $\rightarrow$ Deterministik Teslimat (`brigade finish-slice`).
+     - **QA / E2E Doğrulama:** `QA_ENGINEER` (Multi-Agent `browser` Subagent Delegasyonu + `ProofVerifier` ile SHA-256 Ekran Görüntüsü, Auth-Wall Engeli & `db_crosscheck` Doğrulaması `.edge/qa/proofs/<slug>.json`).
 
 5. **Bağlam Isısı & Güvenli Duraklatma (Context Heat Sentinel):**
    - 🟢 **YEŞİL BÖLGE (< 45k token, `GREEN_HEAT_THRESHOLD = 45,000`):** Görüşmeler ve biletlemeler normal seyreder. Fil istasyonları `send_message` ile korunur.
@@ -91,11 +91,17 @@ brigade critique-spec <repo_path> --spec .edge/specs/<slice-adi>.md
 # 4. Dikey Dilimi Başlat (Treehouse Worktree Kiralar & RED_TEST Başlatır)
 brigade start-slice <repo_path> --name <slice-adi> --track feature
 
-# 5. İşi İlerlet (Deterministik Kapılar Geçişi Yönetir)
+# 5. İşi İlerlet (Deterministik Kapılar Geçişi Yönetir: VERIFY -> GATE -> [QA] -> REVIEW -> STAGING)
 brigade advance <repo_path>
+
+# 5b. Examiner 3-Eksenli İnceleme Mührü (REVIEW -> STAGING öncesi zorunlu)
+brigade seal-review <repo_path> --verdict PASS --summary "<summary>" --evidence-reviewed "<paths>"
 
 # 6. Dikey Dilimi Tamamla (development Dalına Fast-Forward Merge, Şartname Arşivleme & Worktree İadesi)
 brigade finish-slice <repo_path>
+
+# 6b. Specs-to-PR Köprüsü (no-mistakes öncesi intent kilitleme ve Pocock/Horthy PR gövdesi üretimi)
+brigade prepare-ship <repo_path> --base staging --format pr
 
 # 7. Yaşayan Alan Senetlerini Denetle (Drift Scanner)
 python3 tools/drift/cli.py check <repo_path>

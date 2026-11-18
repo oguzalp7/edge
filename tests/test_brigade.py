@@ -6,8 +6,13 @@ Unit Tests for Edge Brigade: Michelin Station & Deterministic State Machine Engi
 import os
 import sys
 import json
+import zlib
+import struct
 import shutil
 import tempfile
+import importlib
+import importlib.util
+import subprocess
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -17,6 +22,9 @@ root_dir = Path(__file__).resolve().parent.parent
 if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
 
+import tools.brigade.models as brigade_models
+import tools.brigade.fsm as brigade_fsm
+import tools.brigade.cli as brigade_cli
 from tools.brigade.models import (
     StationRole,
     CycleState,
@@ -569,14 +577,19 @@ class TestBrigadeFSM(unittest.TestCase):
             self.assertTrue(passed)
 
     def test_review_branching_to_polish_or_gate(self):
+        ExaminerReceipt = getattr(brigade_models, "ExaminerReceipt", None)
+        self.assertIsNotNone(ExaminerReceipt, "ExaminerReceipt must exist in tools.brigade.models")
+        self.assertTrue(hasattr(self.fsm.state, "examiner_receipt"), "BrigadeState must have examiner_receipt")
+
         self.fsm.state.current_state = CycleState.REVIEW
-        
-        # Case A: Clean review -> goes to GATE
+        self.fsm.state.examiner_receipt = ExaminerReceipt(verdict="PASS", summary="Clean review")
+
+        # Case A: Clean review with PASS seal -> goes to STAGING
         self.fsm.state.review_findings = [
             ReviewFinding(axis="standards", severity="WARNING", file_path="a.ts", rule="r1", description="minor", suggested_fix="f1")
         ]
         next_state, msg, _ = self.fsm.guard_review_to_next()
-        self.assertEqual(next_state, CycleState.GATE)
+        self.assertEqual(next_state, CycleState.STAGING)
 
         # Case B: Critical review finding -> goes to POLISH
         self.fsm.state.review_findings.append(
@@ -586,6 +599,12 @@ class TestBrigadeFSM(unittest.TestCase):
         self.assertEqual(next_state, CycleState.POLISH)
 
     def test_full_cycle_progression_and_reset(self):
+        ExaminerReceipt = getattr(brigade_models, "ExaminerReceipt", None)
+        self.assertIsNotNone(ExaminerReceipt, "ExaminerReceipt must exist in tools.brigade.models")
+        self.assertTrue(hasattr(self.fsm, "guard_verify_to_gate"), "BrigadeFSM must define guard_verify_to_gate")
+        self.assertTrue(hasattr(self.fsm, "guard_gate_to_next"), "BrigadeFSM must define guard_gate_to_next")
+        self.assertTrue(hasattr(self.fsm.state, "examiner_receipt"), "BrigadeState must have examiner_receipt")
+
         ticket = Ticket(
             ticket_id="TICK-LIFECYCLE",
             track="core",
@@ -619,19 +638,25 @@ class TestBrigadeFSM(unittest.TestCase):
             self.assertTrue(s)
             self.assertEqual(state, CycleState.VERIFY)
 
-        # VERIFY -> REVIEW
-        with patch.object(self.fsm, "guard_verify_to_review", return_value=(True, "ok", {})):
+        # VERIFY -> GATE
+        with patch.object(self.fsm, "guard_verify_to_gate", return_value=(True, "ok", {})):
+            s, state, _ = self.fsm.advance()
+            self.assertTrue(s)
+            self.assertEqual(state, CycleState.GATE)
+
+        # GATE -> REVIEW (no QA required)
+        with patch.object(self.fsm, "guard_gate_to_next", return_value=(True, "ok", {})):
             s, state, _ = self.fsm.advance()
             self.assertTrue(s)
             self.assertEqual(state, CycleState.REVIEW)
 
-        # REVIEW -> GATE (clean review)
-        s, state, _ = self.fsm.advance()
-        self.assertTrue(s)
-        self.assertEqual(state, CycleState.GATE)
-
-        # GATE -> STAGING
-        with patch.object(self.fsm, "guard_gate_to_staging", return_value=(True, "ok", {})):
+        # REVIEW -> STAGING (sealed PASS receipt + clean review + hermetic verification pass)
+        self.fsm.state.examiner_receipt = ExaminerReceipt(
+            verdict="PASS",
+            summary="Clean 3-axis review",
+            ticket_id=ticket.ticket_id,
+        )
+        with patch.object(self.fsm, "_run_hermetic_verification", return_value=(True, "ok")):
             s, state, _ = self.fsm.advance()
             self.assertTrue(s)
             self.assertEqual(state, CycleState.STAGING)
@@ -647,6 +672,7 @@ class TestBrigadeFSM(unittest.TestCase):
         self.assertTrue(s)
         self.assertEqual(state, CycleState.IDLE)
         self.assertIsNone(self.fsm.state.active_ticket)
+        self.assertIsNone(self.fsm.state.examiner_receipt)
 
     def test_abort_resets_cycle(self):
         self.fsm.state.current_state = CycleState.SURGERY
@@ -1882,6 +1908,7 @@ class TestBrigadeSlice2LavishGatedQAState(unittest.TestCase):
         self.assertTrue(self.fsm.should_run_qa(ticket))
 
     def test_advance_from_gate_routes_to_qa_or_bypasses_to_staging(self):
+        self.assertTrue(hasattr(self.fsm, "guard_gate_to_next"), "BrigadeFSM must define guard_gate_to_next")
         ticket = Ticket(
             ticket_id="TICK-GATE-ROUTING",
             track="ui",
@@ -1902,22 +1929,22 @@ class TestBrigadeSlice2LavishGatedQAState(unittest.TestCase):
         # Case A: When should_run_qa is True -> advance from GATE transitions to CycleState.QA
         ticket.require_qa = True
         qa_state = getattr(CycleState, "QA", "QA")
-        with patch.object(self.fsm, "guard_gate_to_staging", return_value=(True, "Gate passed", {})):
+        with patch.object(self.fsm, "guard_gate_to_next", return_value=(True, "Gate passed", {})):
             ok, next_state, msg = self.fsm.advance()
             self.assertTrue(ok)
             self.assertEqual(next_state, qa_state)
             self.assertEqual(self.fsm.state.current_state, qa_state)
             self.assertIn("QA", msg)
 
-        # Case B: When should_run_qa is False -> advance from GATE bypasses QA directly to CycleState.STAGING
+        # Case B: When should_run_qa is False -> advance from GATE bypasses QA directly to CycleState.REVIEW
         ticket.require_qa = False
         self.fsm.state.current_state = CycleState.GATE
-        with patch.object(self.fsm, "guard_gate_to_staging", return_value=(True, "Gate passed", {})):
+        with patch.object(self.fsm, "guard_gate_to_next", return_value=(True, "Gate passed", {})):
             ok, next_state, msg = self.fsm.advance()
             self.assertTrue(ok)
-            self.assertEqual(next_state, CycleState.STAGING)
-            self.assertEqual(self.fsm.state.current_state, CycleState.STAGING)
-            self.assertIn("STAGING", msg)
+            self.assertEqual(next_state, CycleState.REVIEW)
+            self.assertEqual(self.fsm.state.current_state, CycleState.REVIEW)
+            self.assertIn("REVIEW", msg)
 
     def test_guard_qa_to_staging_passes_or_routes_to_polish(self):
         ticket = Ticket(
@@ -1938,9 +1965,12 @@ class TestBrigadeSlice2LavishGatedQAState(unittest.TestCase):
         qa_state = getattr(CycleState, "QA", "QA")
         self.fsm.state.current_state = qa_state
 
-        # Case A: Clean findings or non-blocking advisory/warning with valid proof receipt -> advance to STAGING
+        # Case A: Clean findings or non-blocking advisory/warning with valid proof receipt -> advance to REVIEW
         proof_dir = self.repo_path / ".edge" / "qa" / "proofs"
         proof_dir.mkdir(parents=True, exist_ok=True)
+        shot_file = self.repo_path / ".edge" / "qa" / "screenshots" / "dash.png"
+        shot_file.parent.mkdir(parents=True, exist_ok=True)
+        shot_file.write_bytes(b"\x89PNG\r\n\x1a\nvalid-dashboard-screenshot")
         valid_receipt = {
             "slug": "dashboard",
             "visited_urls": ["http://localhost:3000/dashboard"],
@@ -1948,6 +1978,8 @@ class TestBrigadeSlice2LavishGatedQAState(unittest.TestCase):
             "persistence_verified": True,
             "console_clean": True,
             "screenshot_paths": [".edge/qa/screenshots/dash.png"],
+            "host_facts_verified": True,
+            "db_crosscheck": {"dashboard": 1},
         }
         (proof_dir / "dashboard.json").write_text(json.dumps(valid_receipt), encoding="utf-8")
 
@@ -1962,9 +1994,9 @@ class TestBrigadeSlice2LavishGatedQAState(unittest.TestCase):
             )
         ]
         ok, next_state, msg = self.fsm.advance()
-        self.assertTrue(ok)
-        self.assertEqual(next_state, CycleState.STAGING)
-        self.assertEqual(self.fsm.state.current_state, CycleState.STAGING)
+        self.assertTrue(ok, f"QA advance should succeed with valid ProofVerifier receipt: {msg}")
+        self.assertEqual(next_state, CycleState.REVIEW)
+        self.assertEqual(self.fsm.state.current_state, CycleState.REVIEW)
 
         # Case B: Critical finding exists -> advance fails and transitions to POLISH
         self.fsm.state.current_state = qa_state
@@ -3136,6 +3168,10 @@ class TestBrigadeQABrowserProofGate(unittest.TestCase):
         self.assertEqual(self.fsm.state.current_state, CycleState.QA)
 
     def test_guard_qa_to_staging_valid_receipt_advances(self):
+        self.assertTrue(hasattr(self.fsm, "guard_qa_to_review"), "BrigadeFSM must define guard_qa_to_review")
+        shot_file = self.repo_path / ".edge" / "qa" / "screenshots" / "dash.png"
+        shot_file.parent.mkdir(parents=True, exist_ok=True)
+        shot_file.write_bytes(b"\x89PNG\r\n\x1a\nvalid-dash-shot")
         receipt = {
             "slug": "dashboard",
             "visited_urls": ["http://localhost:3000/dashboard"],
@@ -3143,11 +3179,13 @@ class TestBrigadeQABrowserProofGate(unittest.TestCase):
             "persistence_verified": True,
             "console_clean": True,
             "screenshot_paths": [".edge/qa/screenshots/dash.png"],
+            "host_facts_verified": True,
+            "db_crosscheck": {"rows": 1},
         }
         (self.proofs_dir / "dashboard.json").write_text(json.dumps(receipt), encoding="utf-8")
 
         ok, msg, details = self.fsm.guard_qa_to_staging()
-        self.assertTrue(ok)
+        self.assertTrue(ok, f"guard_qa_to_staging should pass with valid proof: {msg}")
         self.assertIn("QA verification passed", msg)
         self.assertIn("proof_details", details)
         self.assertEqual(details["proof_details"].get("slug"), "dashboard")
@@ -3155,10 +3193,13 @@ class TestBrigadeQABrowserProofGate(unittest.TestCase):
 
         adv_ok, next_state, adv_msg = self.fsm.advance()
         self.assertTrue(adv_ok)
-        self.assertEqual(next_state, CycleState.STAGING)
-        self.assertEqual(self.fsm.state.current_state, CycleState.STAGING)
+        self.assertEqual(next_state, CycleState.REVIEW)
+        self.assertEqual(self.fsm.state.current_state, CycleState.REVIEW)
 
     def test_guard_qa_to_staging_critical_findings_priority(self):
+        shot_file = self.repo_path / ".edge" / "qa" / "screenshots" / "dash.png"
+        shot_file.parent.mkdir(parents=True, exist_ok=True)
+        shot_file.write_bytes(b"\x89PNG\r\n\x1a\nvalid-dash-shot")
         receipt = {
             "slug": "dashboard",
             "visited_urls": ["http://localhost:3000/dashboard"],
@@ -3166,6 +3207,8 @@ class TestBrigadeQABrowserProofGate(unittest.TestCase):
             "persistence_verified": True,
             "console_clean": True,
             "screenshot_paths": [".edge/qa/screenshots/dash.png"],
+            "host_facts_verified": True,
+            "db_crosscheck": {"rows": 1},
         }
         (self.proofs_dir / "dashboard.json").write_text(json.dumps(receipt), encoding="utf-8")
 
@@ -3524,8 +3567,9 @@ class TestWorktreeAutoRebaseAndQaPreflight(unittest.TestCase):
     @patch("tools.brigade.fsm.run_command")
     def test_advance_gate_to_qa_blocked_by_db_drift(self, mock_run):
         """Scenario 5c: advance() halts at GATE when db:check-drift fails."""
+        self.assertTrue(hasattr(self.fsm, "guard_gate_to_next"), "BrigadeFSM must define guard_gate_to_next")
         self.fsm.state.current_state = CycleState.GATE
-        self.fsm.guard_gate_to_staging = MagicMock(return_value=(True, "Gate OK", {}))
+        self.fsm.guard_gate_to_next = MagicMock(return_value=(True, "Gate OK", {}))
         self.fsm.should_run_qa = MagicMock(return_value=True)
 
         pkg_json = self.worktree_path / "package.json"
@@ -3559,8 +3603,27 @@ class TestWorktreeAutoRebaseAndQaPreflight(unittest.TestCase):
             encoding="utf-8",
         )
 
+        shot_file = self.worktree_path / ".edge" / "qa" / "screenshots" / "sync.png"
+        shot_file.parent.mkdir(parents=True, exist_ok=True)
+        shot_file.write_bytes(b"\x89PNG\r\n\x1a\nsync-shot")
+        proof_dir = self.worktree_path / ".edge" / "qa" / "proofs"
+        proof_dir.mkdir(parents=True, exist_ok=True)
+        (proof_dir / "core.json").write_text(
+            json.dumps({
+                "slug": "core",
+                "visited_urls": ["http://localhost:3000/sync"],
+                "user_actions_executed": ["click button#sync"],
+                "persistence_verified": True,
+                "console_clean": True,
+                "screenshot_paths": [".edge/qa/screenshots/sync.png"],
+                "host_facts_verified": True,
+                "db_crosscheck": {"sync": 1},
+            }),
+            encoding="utf-8",
+        )
+
         # Mock proof receipt validator to pass
-        with patch("tools.brigade.fsm._validate_qa_proof_receipt", return_value=(True, "Valid receipt", {"slug": "sync"})):
+        with patch("tools.brigade.fsm._validate_qa_proof_receipt", return_value=(True, "Valid receipt", {"slug": "core"})):
             mock_run.return_value = (1, "", "Migration drift detected")
             passed, msg, details = self.fsm.guard_qa_to_staging()
             self.assertFalse(passed)
@@ -3593,8 +3656,13 @@ class TestBrigadeFSMHardeningAndWorktreePreemption(unittest.TestCase):
         shutil.rmtree(self.worktree_dir, ignore_errors=True)
 
     def test_polish_advances_to_review_and_clears_findings(self):
-        """Scenario 1: Polish transitions to REVIEW and clears prior review findings."""
+        """Scenario 1: Polish transitions to GATE and clears prior review findings and examiner receipt."""
+        ExaminerReceipt = getattr(brigade_models, "ExaminerReceipt", None)
+        self.assertIsNotNone(ExaminerReceipt, "ExaminerReceipt must exist in tools.brigade.models")
+        self.assertTrue(hasattr(self.fsm.state, "examiner_receipt"), "BrigadeState must have examiner_receipt")
+
         self.fsm.state.current_state = CycleState.POLISH
+        self.fsm.state.examiner_receipt = ExaminerReceipt(verdict="FAIL", summary="Needs fix")
         self.fsm.state.review_findings = [
             ReviewFinding(
                 axis="spec",
@@ -3609,13 +3677,19 @@ class TestBrigadeFSMHardeningAndWorktreePreemption(unittest.TestCase):
         with patch.object(self.fsm, "_run_hermetic_verification", return_value=(True, "Tests & TSC clean")):
             success, next_state, msg = self.fsm.advance()
             self.assertTrue(success)
-            self.assertEqual(next_state, CycleState.REVIEW, "POLISH must transition to REVIEW for examiner re-audit")
-            self.assertEqual(self.fsm.state.current_state, CycleState.REVIEW)
+            self.assertEqual(next_state, CycleState.GATE, "POLISH must transition to GATE for gate/QA re-verification before REVIEW")
+            self.assertEqual(self.fsm.state.current_state, CycleState.GATE)
             self.assertEqual(self.fsm.state.review_findings, [], "Remediated review findings must be cleared")
+            self.assertIsNone(self.fsm.state.examiner_receipt, "Prior ExaminerReceipt must be cleared after POLISH")
 
     def test_review_blocked_by_hermetic_verification_failure(self):
-        """Scenario 2: REVIEW to GATE blocked when hermetic verification fails (routes to POLISH)."""
+        """Scenario 2: REVIEW to STAGING blocked when hermetic verification fails (routes to POLISH)."""
+        ExaminerReceipt = getattr(brigade_models, "ExaminerReceipt", None)
+        self.assertIsNotNone(ExaminerReceipt, "ExaminerReceipt must exist in tools.brigade.models")
+        self.assertTrue(hasattr(self.fsm.state, "examiner_receipt"), "BrigadeState must have examiner_receipt")
+
         self.fsm.state.current_state = CycleState.REVIEW
+        self.fsm.state.examiner_receipt = ExaminerReceipt(verdict="PASS", summary="Review PASS")
         self.fsm.state.review_findings = [
             ReviewFinding(
                 axis="standards",
@@ -3638,8 +3712,13 @@ class TestBrigadeFSMHardeningAndWorktreePreemption(unittest.TestCase):
             self.assertEqual(self.fsm.state.current_state, CycleState.POLISH)
 
     def test_review_advances_to_gate_when_verification_passes_and_zero_critical(self):
-        """Scenario 2b: REVIEW advances to GATE when 0 critical findings AND verification passes."""
+        """Scenario 2b: REVIEW advances to STAGING when 0 critical findings, PASS seal, AND verification passes."""
+        ExaminerReceipt = getattr(brigade_models, "ExaminerReceipt", None)
+        self.assertIsNotNone(ExaminerReceipt, "ExaminerReceipt must exist in tools.brigade.models")
+        self.assertTrue(hasattr(self.fsm.state, "examiner_receipt"), "BrigadeState must have examiner_receipt")
+
         self.fsm.state.current_state = CycleState.REVIEW
+        self.fsm.state.examiner_receipt = ExaminerReceipt(verdict="PASS", summary="Verified 3-axis review")
         self.fsm.state.review_findings = [
             ReviewFinding(
                 axis="standards",
@@ -3653,12 +3732,12 @@ class TestBrigadeFSMHardeningAndWorktreePreemption(unittest.TestCase):
 
         with patch.object(self.fsm, "_run_hermetic_verification", return_value=(True, "Tests & compilation clean")):
             next_state, msg, details = self.fsm.guard_review_to_next()
-            self.assertEqual(next_state, CycleState.GATE)
+            self.assertEqual(next_state, CycleState.STAGING)
 
             adv_success, adv_state, adv_msg = self.fsm.advance()
             self.assertTrue(adv_success)
-            self.assertEqual(adv_state, CycleState.GATE)
-            self.assertEqual(self.fsm.state.current_state, CycleState.GATE)
+            self.assertEqual(adv_state, CycleState.STAGING)
+            self.assertEqual(self.fsm.state.current_state, CycleState.STAGING)
 
     def test_flight_recorder_record_dead_end_is_abort_flag(self):
         """Scenario 3 & 4: record_dead_end preserves ACTIVE status unless is_abort=True."""
@@ -3955,6 +4034,796 @@ class TestBrigadeFSMHardeningAndWorktreePreemption(unittest.TestCase):
             self.assertEqual(self.fsm.state.current_state, CycleState.SURGERY)
             self.assertEqual(self.fsm.state.active_ticket.ticket_id, "TICK-FEAT-EPIC-SLIC1")
             self.assertEqual(self.fsm.state.active_worktree, str(self.worktree_path))
+
+
+class TestEvidenceFirstReviewAndShipBridge(unittest.TestCase):
+    """
+    RED/Contract tests for SPEC-EDGE-BRIGADE-003 (IC-1 .. IC-5):
+    - IC-1: FSM Order Inversion (VERIFY -> GATE -> [QA] -> REVIEW -> STAGING, POLISH -> GATE)
+    - IC-2: Deterministic ProofVerifier (disk existence, non-zero size, SHA-256 uniqueness, auth-wall trap, host_facts_verified, db_crosscheck)
+    - IC-3: UI Refactor diff_image.py Pixel Parity Gate (<= 0.15%)
+    - IC-4: Examiner Axis 3 ('evidence'), ExaminerReceipt & brigade seal-review CLI
+    - IC-5: tools.brigade.ship_prep & brigade prepare-ship CLI
+    """
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.repo_path = Path(self.test_dir)
+        self.repo_root = Path(__file__).resolve().parents[1]
+        self.fsm = BrigadeFSM(self.repo_path)
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    @staticmethod
+    def _make_solid_png(width: int, height: int, rgb: tuple) -> bytes:
+        """Creates a valid minimal RGB PNG using Python stdlib only."""
+        def chunk(tag: bytes, data: bytes) -> bytes:
+            return (
+                struct.pack("!I", len(data))
+                + tag
+                + data
+                + struct.pack("!I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+            )
+
+        r, g, b = rgb
+        row = b"\x00" + bytes([r, g, b]) * width
+        raw = row * height
+        ihdr = struct.pack("!IIBBBBB", width, height, 8, 2, 0, 0, 0)
+        return (
+            b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", ihdr)
+            + chunk(b"IDAT", zlib.compress(raw))
+            + chunk(b"IEND", b"")
+        )
+
+    def _make_ticket(self, **overrides) -> Ticket:
+        defaults = dict(
+            ticket_id="TICK-FEAT-BRIDGE",
+            track="feature",
+            domain="bookings",
+            rule_id="RULE-FEAT",
+            severity="NORMAL",
+            target_file="src/bookings/service.ts",
+            line_number=1,
+            fingerprint="fp-bridge",
+            description="Booking workflow slice",
+            suggested_fix="Implement slice",
+            branch_name="feat/bookings-flow",
+            test_seam_command="npm run test:unit",
+        )
+        defaults.update(overrides)
+        return Ticket(**defaults)
+
+    # ------------------------------------------------------------------
+    # IC-1: FSM Order Inversion (VERIFY -> GATE -> [QA] -> REVIEW -> STAGING & POLISH -> GATE)
+    # ------------------------------------------------------------------
+
+    def test_ic1_fsm_verify_to_gate_and_gate_to_qa_or_review(self):
+        self.assertTrue(hasattr(self.fsm, "guard_verify_to_gate"), "BrigadeFSM must define guard_verify_to_gate")
+        self.assertTrue(hasattr(self.fsm, "guard_gate_to_next"), "BrigadeFSM must define guard_gate_to_next")
+
+        ticket = self._make_ticket(require_qa=True)
+        self.fsm.state.active_ticket = ticket
+        self.fsm.state.current_state = CycleState.VERIFY
+
+        with patch.object(self.fsm, "_run_hermetic_verification", return_value=(True, "Tests & tsc clean")):
+            ok, next_state, msg = self.fsm.advance()
+            self.assertTrue(ok, f"VERIFY should advance to GATE: {msg}")
+            self.assertEqual(next_state, CycleState.GATE)
+            self.assertEqual(self.fsm.state.current_state, CycleState.GATE)
+
+        # GATE -> QA when should_run_qa() is True
+        with (
+            patch.object(self.fsm, "guard_gate_to_next", return_value=(True, "Gate OK", {})),
+            patch.object(self.fsm, "_run_qa_db_drift_preflight", return_value=(True, "No drift")),
+        ):
+            ok, next_state, msg = self.fsm.advance()
+            self.assertTrue(ok, f"GATE with require_qa=True should advance to QA: {msg}")
+            self.assertEqual(next_state, CycleState.QA)
+            self.assertEqual(self.fsm.state.current_state, CycleState.QA)
+
+        # GATE -> REVIEW when should_run_qa() is False
+        ticket.require_qa = False
+        self.fsm.state.current_state = CycleState.GATE
+        with patch.object(self.fsm, "guard_gate_to_next", return_value=(True, "Gate OK", {})):
+            ok, next_state, msg = self.fsm.advance()
+            self.assertTrue(ok, f"GATE with require_qa=False should advance to REVIEW: {msg}")
+            self.assertEqual(next_state, CycleState.REVIEW)
+            self.assertEqual(self.fsm.state.current_state, CycleState.REVIEW)
+
+    def test_ic1_qa_to_review_or_polish(self):
+        self.assertTrue(hasattr(self.fsm, "guard_qa_to_review"), "BrigadeFSM must define guard_qa_to_review")
+
+        ticket = self._make_ticket(domain="orders", branch_name="feat/orders")
+        self.fsm.state.active_ticket = ticket
+        self.fsm.state.current_state = CycleState.QA
+
+        shot_path = self.repo_path / ".edge" / "qa" / "screenshots" / "orders.png"
+        shot_path.parent.mkdir(parents=True, exist_ok=True)
+        shot_path.write_bytes(self._make_solid_png(4, 4, (10, 20, 30)))
+
+        proof_path = self.repo_path / ".edge" / "qa" / "proofs" / "orders.json"
+        proof_path.parent.mkdir(parents=True, exist_ok=True)
+        proof_path.write_text(
+            json.dumps({
+                "slug": "orders",
+                "visited_urls": ["http://localhost:3000/orders"],
+                "user_actions_executed": ["submit order form"],
+                "persistence_verified": True,
+                "console_clean": True,
+                "screenshot_paths": [".edge/qa/screenshots/orders.png"],
+                "host_facts_verified": True,
+                "db_crosscheck": {"orders": 1},
+            }),
+            encoding="utf-8",
+        )
+
+        with patch.object(self.fsm, "_run_qa_db_drift_preflight", return_value=(True, "No drift")):
+            ok, next_state, msg = self.fsm.advance()
+            self.assertTrue(ok, f"QA should advance to REVIEW with valid proof: {msg}")
+            self.assertEqual(next_state, CycleState.REVIEW)
+            self.assertEqual(self.fsm.state.current_state, CycleState.REVIEW)
+
+        # CRITICAL finding in QA routes to POLISH
+        self.fsm.state.current_state = CycleState.QA
+        self.fsm.state.review_findings = [
+            ReviewFinding(
+                axis="qa",
+                severity="CRITICAL",
+                file_path="src/orders/page.tsx",
+                rule="TIER1-CONSOLE-ERROR",
+                description="Uncaught TypeError",
+                suggested_fix="Guard null order",
+            )
+        ]
+        ok, next_state, msg = self.fsm.advance()
+        self.assertFalse(ok)
+        self.assertEqual(next_state, CycleState.POLISH)
+        self.assertEqual(self.fsm.state.current_state, CycleState.POLISH)
+
+    def test_ic1_review_requires_examiner_receipt_and_routes_pass_fail(self):
+        ExaminerReceipt = getattr(brigade_models, "ExaminerReceipt", None)
+        self.assertIsNotNone(ExaminerReceipt, "ExaminerReceipt must exist in tools.brigade.models")
+        self.assertTrue(hasattr(self.fsm.state, "examiner_receipt"), "BrigadeState must have examiner_receipt")
+
+        ticket = self._make_ticket(ticket_id="TICK-REV-SEAL")
+        self.fsm.state.active_ticket = ticket
+        self.fsm.state.current_state = CycleState.REVIEW
+        self.fsm.state.review_findings = []
+        self.fsm.state.examiner_receipt = None
+
+        # 1. Missing ExaminerReceipt -> MUST reject advancement and stay in REVIEW
+        ok, state, msg = self.fsm.advance()
+        self.assertFalse(ok, "REVIEW without ExaminerReceipt must NOT advance")
+        self.assertEqual(state, CycleState.REVIEW)
+        self.assertEqual(self.fsm.state.current_state, CycleState.REVIEW)
+        self.assertIn("seal-review", msg)
+
+        # 2. Stale ticket_id receipt -> blocked in REVIEW
+        self.fsm.state.examiner_receipt = ExaminerReceipt(
+            verdict="PASS",
+            summary="Old ticket receipt",
+            ticket_id="TICK-OTHER",
+        )
+        ok, state, msg = self.fsm.advance()
+        self.assertFalse(ok, "Stale ExaminerReceipt for another ticket must block in REVIEW")
+        self.assertEqual(state, CycleState.REVIEW)
+
+        # 3. Sealed FAIL verdict -> routes to POLISH
+        self.fsm.state.examiner_receipt = ExaminerReceipt(
+            verdict="FAIL",
+            summary="Missing error boundary in evidence review",
+            ticket_id=ticket.ticket_id,
+        )
+        ok, state, msg = self.fsm.advance()
+        self.assertTrue(ok)
+        self.assertEqual(state, CycleState.POLISH)
+        self.assertEqual(self.fsm.state.current_state, CycleState.POLISH)
+
+        # 4. Sealed PASS verdict + 0 CRITICAL + hermetic pass -> transitions to STAGING
+        self.fsm.state.current_state = CycleState.REVIEW
+        self.fsm.state.examiner_receipt = ExaminerReceipt(
+            verdict="PASS",
+            summary="All 3 axes verified",
+            ticket_id=ticket.ticket_id,
+            evidence_reviewed=[".edge/qa/proofs/bookings.json"],
+        )
+        with patch.object(self.fsm, "_run_hermetic_verification", return_value=(True, "Clean")):
+            ok, state, msg = self.fsm.advance()
+            self.assertTrue(ok, f"REVIEW with PASS seal should advance to STAGING: {msg}")
+            self.assertEqual(state, CycleState.STAGING)
+            self.assertEqual(self.fsm.state.current_state, CycleState.STAGING)
+
+    def test_ic1_polish_clears_findings_and_receipt_and_returns_to_gate(self):
+        ExaminerReceipt = getattr(brigade_models, "ExaminerReceipt", None)
+        self.assertIsNotNone(ExaminerReceipt, "ExaminerReceipt must exist in tools.brigade.models")
+        self.assertTrue(hasattr(self.fsm.state, "examiner_receipt"), "BrigadeState must have examiner_receipt")
+
+        ticket = self._make_ticket()
+        self.fsm.state.active_ticket = ticket
+        self.fsm.state.current_state = CycleState.POLISH
+        self.fsm.state.review_findings = [
+            ReviewFinding(
+                axis="evidence",
+                severity="CRITICAL",
+                file_path="src/bookings/service.ts",
+                rule="EVIDENCE-GAP",
+                description="Stubbed response",
+                suggested_fix="Persist to DB",
+            )
+        ]
+        self.fsm.state.examiner_receipt = ExaminerReceipt(
+            verdict="FAIL",
+            summary="Failed evidence check",
+            ticket_id=ticket.ticket_id,
+        )
+
+        with patch.object(self.fsm, "_run_hermetic_verification", return_value=(True, "Clean")):
+            ok, next_state, msg = self.fsm.advance()
+            self.assertTrue(ok, f"POLISH should advance to GATE: {msg}")
+            self.assertEqual(next_state, CycleState.GATE)
+            self.assertEqual(self.fsm.state.current_state, CycleState.GATE)
+            self.assertEqual(self.fsm.state.review_findings, [])
+            self.assertIsNone(self.fsm.state.examiner_receipt)
+
+    # ------------------------------------------------------------------
+    # IC-2: Deterministic ProofVerifier
+    # ------------------------------------------------------------------
+
+    def test_ic2_proof_verifier_missing_and_empty_screenshot(self):
+        ProofVerifier = getattr(brigade_fsm, "ProofVerifier", None)
+        self.assertIsNotNone(ProofVerifier, "ProofVerifier must exist in tools.brigade.fsm")
+
+        proof_path = self.repo_path / ".edge" / "qa" / "proofs" / "bookings.json"
+        proof_path.parent.mkdir(parents=True, exist_ok=True)
+        ticket = self._make_ticket()
+
+        # 1. Missing screenshot file
+        proof_path.write_text(
+            json.dumps({
+                "slug": "bookings",
+                "visited_urls": ["http://localhost:3000/bookings"],
+                "user_actions_executed": ["click#create"],
+                "persistence_verified": True,
+                "console_clean": True,
+                "screenshot_paths": [".edge/qa/screenshots/missing.png"],
+                "host_facts_verified": True,
+                "db_crosscheck": {"bookings": 1},
+            }),
+            encoding="utf-8",
+        )
+        ok, msg, details = ProofVerifier.verify_receipt(proof_path, [self.repo_path], ticket=ticket)
+        self.assertFalse(ok)
+        self.assertEqual(details.get("error"), "MISSING_SCREENSHOT_FILE")
+
+        # 2. Zero-byte screenshot file
+        empty_shot = self.repo_path / ".edge" / "qa" / "screenshots" / "empty.png"
+        empty_shot.parent.mkdir(parents=True, exist_ok=True)
+        empty_shot.write_bytes(b"")
+        proof_path.write_text(
+            json.dumps({
+                "slug": "bookings",
+                "visited_urls": ["http://localhost:3000/bookings"],
+                "user_actions_executed": ["click#create"],
+                "persistence_verified": True,
+                "console_clean": True,
+                "screenshot_paths": [".edge/qa/screenshots/empty.png"],
+                "host_facts_verified": True,
+                "db_crosscheck": {"bookings": 1},
+            }),
+            encoding="utf-8",
+        )
+        ok, msg, details = ProofVerifier.verify_receipt(proof_path, [self.repo_path], ticket=ticket)
+        self.assertFalse(ok)
+        self.assertEqual(details.get("error"), "EMPTY_SCREENSHOT_FILE")
+
+    def test_ic2_proof_verifier_duplicate_screenshot_sha256(self):
+        ProofVerifier = getattr(brigade_fsm, "ProofVerifier", None)
+        self.assertIsNotNone(ProofVerifier, "ProofVerifier must exist in tools.brigade.fsm")
+
+        shots_dir = self.repo_path / ".edge" / "qa" / "screenshots"
+        shots_dir.mkdir(parents=True, exist_ok=True)
+        same_bytes = self._make_solid_png(4, 4, (50, 100, 150))
+        (shots_dir / "before.png").write_bytes(same_bytes)
+        (shots_dir / "after.png").write_bytes(same_bytes)
+
+        proof_path = self.repo_path / ".edge" / "qa" / "proofs" / "bookings.json"
+        proof_path.parent.mkdir(parents=True, exist_ok=True)
+        proof_path.write_text(
+            json.dumps({
+                "slug": "bookings",
+                "visited_urls": ["http://localhost:3000/bookings"],
+                "user_actions_executed": ["click#create", "reload"],
+                "persistence_verified": True,
+                "console_clean": True,
+                "screenshot_paths": [
+                    ".edge/qa/screenshots/before.png",
+                    ".edge/qa/screenshots/after.png",
+                ],
+                "host_facts_verified": True,
+                "db_crosscheck": {"bookings": 1},
+            }),
+            encoding="utf-8",
+        )
+
+        ok, msg, details = ProofVerifier.verify_receipt(proof_path, [self.repo_path], ticket=self._make_ticket())
+        self.assertFalse(ok)
+        self.assertEqual(details.get("error"), "DUPLICATE_SCREENSHOT_EVIDENCE")
+
+    def test_ic2_proof_verifier_auth_wall_redirect_trap(self):
+        ProofVerifier = getattr(brigade_fsm, "ProofVerifier", None)
+        self.assertIsNotNone(ProofVerifier, "ProofVerifier must exist in tools.brigade.fsm")
+
+        shots_dir = self.repo_path / ".edge" / "qa" / "screenshots"
+        shots_dir.mkdir(parents=True, exist_ok=True)
+        (shots_dir / "s1.png").write_bytes(self._make_solid_png(4, 4, (10, 10, 10)))
+
+        proof_path = self.repo_path / ".edge" / "qa" / "proofs" / "bookings.json"
+        proof_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Non-auth ticket trapped at /login?redirect=...
+        non_auth_ticket = self._make_ticket(
+            ticket_id="TICK-BOOK-1",
+            domain="bookings",
+            branch_name="feat/bookings-create",
+            description="Create a booking",
+        )
+        for bad_url in [
+            "http://localhost:3000/login?redirect=/bookings",
+            "http://localhost:3000/signin",
+        ]:
+            proof_path.write_text(
+                json.dumps({
+                    "slug": "bookings",
+                    "visited_urls": [bad_url],
+                    "user_actions_executed": ["open /bookings"],
+                    "persistence_verified": True,
+                    "console_clean": True,
+                    "screenshot_paths": [".edge/qa/screenshots/s1.png"],
+                    "host_facts_verified": True,
+                    "db_crosscheck": {"bookings": 1},
+                }),
+                encoding="utf-8",
+            )
+            ok, msg, details = ProofVerifier.verify_receipt(proof_path, [self.repo_path], ticket=non_auth_ticket)
+            self.assertFalse(ok, f"Auth wall URL {bad_url} must be rejected on non-auth ticket")
+            self.assertEqual(details.get("error"), "AUTH_WALL_REDIRECT_TRAP")
+
+        # Auth ticket IS allowed to visit /login
+        auth_ticket = self._make_ticket(
+            ticket_id="TICK-AUTH-1",
+            domain="auth",
+            branch_name="feat/login",
+            description="User login flow",
+        )
+        proof_path.write_text(
+            json.dumps({
+                "slug": "auth",
+                "visited_urls": ["http://localhost:3000/login"],
+                "user_actions_executed": ["submit credentials"],
+                "persistence_verified": True,
+                "console_clean": True,
+                "screenshot_paths": [".edge/qa/screenshots/s1.png"],
+                "host_facts_verified": True,
+                "db_crosscheck": {"sessions": 1},
+            }),
+            encoding="utf-8",
+        )
+        ok, msg, details = ProofVerifier.verify_receipt(proof_path, [self.repo_path], ticket=auth_ticket)
+        self.assertTrue(ok, f"Auth ticket should be permitted to visit /login: {msg}")
+
+    def test_ic2_proof_verifier_host_facts_and_db_crosscheck_and_valid_pass(self):
+        ProofVerifier = getattr(brigade_fsm, "ProofVerifier", None)
+        self.assertIsNotNone(ProofVerifier, "ProofVerifier must exist in tools.brigade.fsm")
+
+        shots_dir = self.repo_path / ".edge" / "qa" / "screenshots"
+        shots_dir.mkdir(parents=True, exist_ok=True)
+        (shots_dir / "pre.png").write_bytes(self._make_solid_png(4, 4, (1, 2, 3)))
+        (shots_dir / "post.png").write_bytes(self._make_solid_png(4, 4, (200, 210, 220)))
+
+        proof_path = self.repo_path / ".edge" / "qa" / "proofs" / "bookings.json"
+        proof_path.parent.mkdir(parents=True, exist_ok=True)
+        ticket = self._make_ticket()
+
+        # 1. host_facts_verified=False -> HOST_FACTS_NOT_VERIFIED
+        proof_path.write_text(
+            json.dumps({
+                "slug": "bookings",
+                "visited_urls": ["http://localhost:3000/bookings"],
+                "user_actions_executed": ["create booking"],
+                "persistence_verified": True,
+                "console_clean": True,
+                "screenshot_paths": [".edge/qa/screenshots/pre.png"],
+                "host_facts_verified": False,
+                "db_crosscheck": {"bookings": 1},
+            }),
+            encoding="utf-8",
+        )
+        ok, msg, details = ProofVerifier.verify_receipt(proof_path, [self.repo_path], ticket=ticket)
+        self.assertFalse(ok)
+        self.assertEqual(details.get("error"), "HOST_FACTS_NOT_VERIFIED")
+
+        # 2. db_crosscheck={} -> MISSING_DB_CROSSCHECK
+        proof_path.write_text(
+            json.dumps({
+                "slug": "bookings",
+                "visited_urls": ["http://localhost:3000/bookings"],
+                "user_actions_executed": ["create booking"],
+                "persistence_verified": True,
+                "console_clean": True,
+                "screenshot_paths": [".edge/qa/screenshots/pre.png"],
+                "host_facts_verified": True,
+                "db_crosscheck": {},
+            }),
+            encoding="utf-8",
+        )
+        ok, msg, details = ProofVerifier.verify_receipt(proof_path, [self.repo_path], ticket=ticket)
+        self.assertFalse(ok)
+        self.assertEqual(details.get("error"), "MISSING_DB_CROSSCHECK")
+
+        # 3. Full valid receipt with 2 unique-hash screenshots
+        proof_path.write_text(
+            json.dumps({
+                "slug": "bookings",
+                "visited_urls": ["http://localhost:3000/bookings"],
+                "user_actions_executed": ["create booking", "reload"],
+                "persistence_verified": True,
+                "console_clean": True,
+                "screenshot_paths": [
+                    ".edge/qa/screenshots/pre.png",
+                    ".edge/qa/screenshots/post.png",
+                ],
+                "host_facts_verified": True,
+                "db_crosscheck": {"bookings": 1},
+            }),
+            encoding="utf-8",
+        )
+        ok, msg, details = ProofVerifier.verify_receipt(proof_path, [self.repo_path], ticket=ticket)
+        self.assertTrue(ok, f"Valid ProofVerifier receipt should pass: {msg}")
+        hashes = details.get("screenshot_hashes", {})
+        self.assertEqual(len(hashes), 2)
+        self.assertEqual(len(set(hashes.values())), 2)
+
+    # ------------------------------------------------------------------
+    # IC-3: UI Refactor diff_image.py Pixel Parity Gate
+    # ------------------------------------------------------------------
+
+    def test_ic3_ui_track_gate_blocks_missing_visual_parity_images(self):
+        self.assertTrue(hasattr(self.fsm, "guard_gate_to_next"), "BrigadeFSM must define guard_gate_to_next")
+        self.assertTrue(hasattr(self.fsm, "_check_ui_visual_parity"), "BrigadeFSM must define _check_ui_visual_parity")
+
+        ticket = self._make_ticket(track="ui", domain="checkout", branch_name="refactor/ui-checkout")
+        self.fsm.state.active_ticket = ticket
+        self.fsm.state.current_state = CycleState.GATE
+
+        with patch.object(self.fsm, "_run_cmd", return_value=(0, "Gate passed", "")):
+            ok, msg, details = self.fsm.guard_gate_to_next()
+            self.assertFalse(ok)
+            self.assertEqual(details.get("error"), "MISSING_VISUAL_PARITY_IMAGES")
+
+    def test_ic3_ui_track_gate_diff_image_mismatch_fail_and_pass(self):
+        self.assertTrue(hasattr(self.fsm, "guard_gate_to_next"), "BrigadeFSM must define guard_gate_to_next")
+        self.assertTrue(hasattr(self.fsm, "_check_ui_visual_parity"), "BrigadeFSM must define _check_ui_visual_parity")
+
+        from tools.common import run_command as real_run_command
+
+        ticket = self._make_ticket(track="ui", domain="checkout", branch_name="refactor/ui-checkout")
+        self.fsm.state.active_ticket = ticket
+        self.fsm.state.current_state = CycleState.GATE
+
+        visual_dir = self.repo_path / ".edge" / "qa" / "visual"
+        visual_dir.mkdir(parents=True, exist_ok=True)
+        baseline = visual_dir / "checkout-baseline.png"
+        refactored = visual_dir / "checkout-refactored.png"
+
+        def run_cmd_side_effect(cmd, cwd=None):
+            cmd_str = " ".join(str(x) for x in cmd)
+            if "gate.py" in cmd_str:
+                return (0, "Gate passed", "")
+            return real_run_command(cmd, cwd=cwd or self.repo_root)
+
+        # 1. Mismatch > 0.15% (black vs white 10x10 PNG -> 100% mismatch) -> VISUAL_PARITY_FAILED
+        baseline.write_bytes(self._make_solid_png(10, 10, (0, 0, 0)))
+        refactored.write_bytes(self._make_solid_png(10, 10, (255, 255, 255)))
+        with patch.object(self.fsm, "_run_cmd", side_effect=run_cmd_side_effect):
+            ok, msg, details = self.fsm.guard_gate_to_next()
+            self.assertFalse(ok, "Mismatched UI screenshots (> 0.15%) must fail GATE")
+            self.assertEqual(details.get("error"), "VISUAL_PARITY_FAILED")
+
+        # 2. Identical images (0.0% <= 0.15%) -> GATE passes
+        identical = self._make_solid_png(10, 10, (120, 140, 160))
+        baseline.write_bytes(identical)
+        refactored.write_bytes(identical)
+        with patch.object(self.fsm, "_run_cmd", side_effect=run_cmd_side_effect):
+            ok, msg, details = self.fsm.guard_gate_to_next()
+            self.assertTrue(ok, f"Identical UI screenshots (<= 0.15%) must pass GATE: {msg}")
+
+    # ------------------------------------------------------------------
+    # IC-4: Examiner Axis 3 ('evidence') & brigade seal-review CLI
+    # ------------------------------------------------------------------
+
+    def test_ic4_examiner_axis_evidence_seal_review_cli_and_prompt(self):
+        ExaminerReceipt = getattr(brigade_models, "ExaminerReceipt", None)
+        self.assertIsNotNone(ExaminerReceipt, "ExaminerReceipt must exist in tools.brigade.models")
+        self.assertTrue(hasattr(brigade_cli, "cmd_seal_review"), "tools.brigade.cli must define cmd_seal_review")
+
+        ticket = self._make_ticket(ticket_id="TICK-IC4-EXAM")
+        self.fsm.state.active_ticket = ticket
+        self.fsm.state.current_state = CycleState.REVIEW
+        self.fsm.save()
+
+        # 1. ReviewFinding supports axis="evidence" and CLI add-finding --axis evidence works
+        rf = ReviewFinding(
+            axis="evidence",
+            severity="WARNING",
+            file_path=".edge/qa/proofs/test.json",
+            rule="EVIDENCE-AUDIT",
+            description="Minor missing assertion",
+            suggested_fix="Add reload assertion",
+        )
+        self.assertEqual(rf.axis, "evidence")
+
+        try:
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "brigade",
+                    "add-finding",
+                    str(self.repo_path),
+                    "--axis",
+                    "evidence",
+                    "--severity",
+                    "WARNING",
+                    "--file",
+                    ".edge/qa/proofs/test.json",
+                    "--rule",
+                    "EVIDENCE-AUDIT",
+                    "--desc",
+                    "Minor missing assertion",
+                ],
+            ):
+                ret_find = brigade_cli.main()
+        except SystemExit as exc:
+            self.fail(f"CLI 'add-finding --axis evidence' exited abnormally: {exc}")
+        self.assertEqual(ret_find, 0)
+
+        # 2. CLI seal-review saves ExaminerReceipt to BrigadeState
+        try:
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "brigade",
+                    "seal-review",
+                    str(self.repo_path),
+                    "--verdict",
+                    "PASS",
+                    "--summary",
+                    "Verified code and proofs",
+                    "--evidence-reviewed",
+                    ".edge/qa/proofs/test.json,.edge/qa/visual/diff.png",
+                ],
+            ):
+                ret_seal = brigade_cli.main()
+        except SystemExit as exc:
+            self.fail(f"CLI 'seal-review' exited abnormally: {exc}")
+        self.assertEqual(ret_seal, 0)
+
+        reloaded = BrigadeFSM(self.repo_path)
+        self.assertIsNotNone(reloaded.state.examiner_receipt)
+        self.assertEqual(reloaded.state.examiner_receipt.verdict, "PASS")
+        self.assertEqual(reloaded.state.examiner_receipt.summary, "Verified code and proofs")
+        self.assertEqual(reloaded.state.examiner_receipt.ticket_id, "TICK-IC4-EXAM")
+        self.assertEqual(
+            reloaded.state.examiner_receipt.evidence_reviewed,
+            [".edge/qa/proofs/test.json", ".edge/qa/visual/diff.png"],
+        )
+
+        # Legacy BrigadeState.from_dict without examiner_receipt defaults to None
+        legacy_dict = reloaded.state.to_dict()
+        legacy_dict.pop("examiner_receipt", None)
+        restored_legacy = BrigadeState.from_dict(legacy_dict)
+        self.assertIsNone(restored_legacy.examiner_receipt)
+
+        # 3. build_examiner_prompt includes Axis 3 / evidence and seal-review
+        prompt = StationRegistry.build_examiner_prompt(ticket, "development")
+        self.assertIn("axis 3", prompt.lower())
+        self.assertIn("evidence", prompt.lower())
+        self.assertIn("seal-review", prompt)
+
+        # 4. agents/examiner.md stays <= 60 lines and documents Axis 3 & seal-review
+        examiner_md = self.repo_root / "agents" / "examiner.md"
+        ex_text = examiner_md.read_text(encoding="utf-8")
+        self.assertLessEqual(len(ex_text.splitlines()), 60)
+        self.assertIn("Axis 3", ex_text)
+        self.assertIn("seal-review", ex_text)
+
+    # ------------------------------------------------------------------
+    # IC-5: tools.brigade.ship_prep & brigade prepare-ship CLI
+    # ------------------------------------------------------------------
+
+    def test_ic5_parse_index_diff_and_classify_merge_danger(self):
+        spec = importlib.util.find_spec("tools.brigade.ship_prep")
+        self.assertIsNotNone(spec, "tools.brigade.ship_prep module must exist")
+        ship_prep = importlib.import_module("tools.brigade.ship_prep")
+
+        sample_diff = "\n".join([
+            "diff --git a/specs/INDEX.md b/specs/INDEX.md",
+            "--- a/specs/INDEX.md",
+            "+++ b/specs/INDEX.md",
+            "@@ -1,2 +1,8 @@",
+            "+- @route /bookings | Page: BookingsPage | Create and list bookings",
+            "+- @module bookings | Action: createBookingAction | Schema: bookings",
+            "+- @spec .edge/archive/specs/bookings-flow.md",
+        ])
+        changes = ship_prep.parse_index_diff(sample_diff)
+        self.assertTrue(len(changes) >= 5, f"Expected structured index tokens parsed, got: {changes}")
+        kinds = {c.kind for c in changes}
+        for expected_kind in ("@route", "Page", "@module", "Action", "Schema", "@spec"):
+            self.assertIn(expected_kind, kinds, f"Missing parsed token kind {expected_kind} in {changes}")
+
+        door_sql, blast_sql = ship_prep.classify_merge_danger(
+            ["drizzle/0001_init.sql", "src/actions/bookings.ts"],
+            diff_stat="2 files changed, 20 insertions(+)",
+        )
+        self.assertTrue(door_sql.startswith("One-way door"), f"Expected One-way door for drizzle SQL, got: {door_sql}")
+        self.assertIsInstance(blast_sql, dict)
+
+        door_schema, _ = ship_prep.classify_merge_danger(["src/db/schema/users.ts"])
+        self.assertTrue(door_schema.startswith("One-way door"), f"Expected One-way door for src/db/schema, got: {door_schema}")
+
+        door_two_way, _ = ship_prep.classify_merge_danger(["src/lib/bookings/service.ts", "tests/bookings.test.ts"])
+        self.assertTrue(door_two_way.startswith("Two-way door"), f"Expected Two-way door, got: {door_two_way}")
+
+    def test_ic5_prepare_ship_payload_and_cli_prepare_ship(self):
+        spec = importlib.util.find_spec("tools.brigade.ship_prep")
+        self.assertIsNotNone(spec, "tools.brigade.ship_prep module must exist")
+        self.assertTrue(hasattr(brigade_cli, "cmd_prepare_ship"), "tools.brigade.cli must define cmd_prepare_ship")
+        ExaminerReceipt = getattr(brigade_models, "ExaminerReceipt", None)
+        self.assertIsNotNone(ExaminerReceipt, "ExaminerReceipt must exist in tools.brigade.models")
+
+        ship_prep = importlib.import_module("tools.brigade.ship_prep")
+
+        def git(*git_args):
+            proc = subprocess.run(
+                ["git", *git_args],
+                cwd=self.repo_path,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            return proc.stdout.strip()
+
+        git("init", "-b", "staging")
+        git("config", "user.email", "brigade@example.com")
+        git("config", "user.name", "Edge Brigade")
+
+        (self.repo_path / "specs").mkdir(parents=True, exist_ok=True)
+        (self.repo_path / "specs" / "INDEX.md").write_text("# Navigation Index\n", encoding="utf-8")
+        (self.repo_path / "CONTEXT.md").write_text("# Context\n- **Booking**: Customer reservation.\n", encoding="utf-8")
+        git("add", "-A")
+        git("commit", "-m", "chore: base staging")
+
+        git("checkout", "-b", "feat/bookings-flow")
+        (self.repo_path / "specs" / "INDEX.md").write_text(
+            "# Navigation Index\n"
+            "- @route /bookings | Page: BookingsPage | Booking flow\n"
+            "- @module bookings | Action: createBooking | Schema: bookings\n"
+            "- @spec .edge/archive/specs/bookings-flow.md\n",
+            encoding="utf-8",
+        )
+        arch_dir = self.repo_path / ".edge" / "archive" / "specs"
+        arch_dir.mkdir(parents=True, exist_ok=True)
+        (arch_dir / "bookings-flow.md").write_text("# Bookings Flow Spec\nCreate and persist bookings.\n", encoding="utf-8")
+
+        shots_dir = self.repo_path / ".edge" / "qa" / "screenshots"
+        shots_dir.mkdir(parents=True, exist_ok=True)
+        (shots_dir / "bookings-1.png").write_bytes(self._make_solid_png(4, 4, (30, 60, 90)))
+        (shots_dir / "bookings-2.png").write_bytes(self._make_solid_png(4, 4, (90, 120, 150)))
+
+        proofs_dir = self.repo_path / ".edge" / "qa" / "proofs"
+        proofs_dir.mkdir(parents=True, exist_ok=True)
+        (proofs_dir / "bookings.json").write_text(
+            json.dumps({
+                "slug": "bookings",
+                "visited_urls": ["http://localhost:3000/bookings"],
+                "user_actions_executed": ["create booking", "reload"],
+                "persistence_verified": True,
+                "console_clean": True,
+                "screenshot_paths": [
+                    ".edge/qa/screenshots/bookings-1.png",
+                    ".edge/qa/screenshots/bookings-2.png",
+                ],
+                "host_facts_verified": True,
+                "db_crosscheck": {"bookings": 1},
+            }),
+            encoding="utf-8",
+        )
+
+        fsm_local = BrigadeFSM(self.repo_path)
+        fsm_local.state.examiner_receipt = ExaminerReceipt(
+            verdict="PASS",
+            summary="Verified code and QA proofs",
+            ticket_id="TICK-FEAT-BOOKINGS",
+            evidence_reviewed=[".edge/qa/proofs/bookings.json"],
+        )
+        fsm_local.save()
+
+        (self.repo_path / "src" / "bookings").mkdir(parents=True, exist_ok=True)
+        (self.repo_path / "src" / "bookings" / "service.ts").write_text("export const createBooking = () => true;\n", encoding="utf-8")
+
+        git("add", "-A")
+        git("commit", "-m", "feat(bookings): implement booking flow")
+
+        ok, result, err = ship_prep.prepare_ship_payload(self.repo_path, base_branch="staging")
+        self.assertTrue(ok, f"prepare_ship_payload should succeed: {err}")
+        self.assertTrue(result.intent.strip())
+        self.assertNotIn("\n", result.intent.strip())
+        self.assertTrue(len(result.scenario_contract) > 0)
+
+        pr_text = ship_prep.format_ship_output(result, fmt="pr")
+        self.assertIn("## Summary", pr_text)
+        self.assertIn("## Evidence", pr_text)
+        self.assertIn("## Merge Danger", pr_text)
+        self.assertIn("Two-way door", pr_text)
+
+        # CLI prepare-ship --format json --out <path>
+        out_file = self.repo_path / ".edge" / "ship-payload.json"
+        try:
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "brigade",
+                    "prepare-ship",
+                    str(self.repo_path),
+                    "--base",
+                    "staging",
+                    "--format",
+                    "json",
+                    "--out",
+                    str(out_file),
+                ],
+            ):
+                ret_ship = brigade_cli.main()
+        except SystemExit as exc:
+            self.fail(f"CLI 'prepare-ship' exited abnormally: {exc}")
+        self.assertEqual(ret_ship, 0)
+        self.assertTrue(out_file.is_file())
+        payload = json.loads(out_file.read_text(encoding="utf-8"))
+        for key in ("intent", "scenario_contract", "pr_body", "door_type", "blast_radius", "verified_proofs", "failed_proofs"):
+            self.assertIn(key, payload)
+
+        # Broken QA proof receipt -> prepare-ship fails (exit 1)
+        (proofs_dir / "broken.json").write_text(
+            json.dumps({
+                "slug": "broken",
+                "visited_urls": ["http://localhost:3000/bookings"],
+                "user_actions_executed": ["click"],
+                "persistence_verified": True,
+                "console_clean": True,
+                "screenshot_paths": [".edge/qa/screenshots/nonexistent.png"],
+                "host_facts_verified": True,
+                "db_crosscheck": {"bookings": 1},
+            }),
+            encoding="utf-8",
+        )
+        ok_bad, res_bad, _ = ship_prep.prepare_ship_payload(self.repo_path, base_branch="staging")
+        self.assertFalse(ok_bad, "Broken QA proof must fail prepare_ship_payload")
+        self.assertTrue(len(res_bad.failed_proofs) >= 1)
+
+        try:
+            with patch.object(
+                sys,
+                "argv",
+                ["brigade", "prepare-ship", str(self.repo_path), "--base", "staging"],
+            ):
+                ret_bad = brigade_cli.main()
+        except SystemExit as exc:
+            self.fail(f"CLI 'prepare-ship' should return 1 cleanly instead of raising SystemExit: {exc}")
+        self.assertEqual(ret_bad, 1)
 
 
 if __name__ == "__main__":

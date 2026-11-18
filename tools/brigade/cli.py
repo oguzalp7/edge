@@ -20,21 +20,23 @@ setup_utf8_console()
 
 
 try:
-    from .models import StationRole, CycleState, ReviewFinding, Ticket
+    from .models import StationRole, CycleState, ReviewFinding, Ticket, ExaminerReceipt
     from .fsm import BrigadeFSM
     from .stations import StationRegistry
     from .worktree import get_pool_status, is_treehouse_installed
     from .flight_recorder import FlightRecorder
     from .spec_critic import run_spec_critique, PRIMARY_CRITIC_MODEL, FALLBACK_CRITIC_MODEL
     from .tier import get_tier_status, switch_tier, format_tier_card
+    from .ship_prep import prepare_ship_payload, format_ship_output
 except ImportError:
-    from tools.brigade.models import StationRole, CycleState, ReviewFinding, Ticket
+    from tools.brigade.models import StationRole, CycleState, ReviewFinding, Ticket, ExaminerReceipt
     from tools.brigade.fsm import BrigadeFSM
     from tools.brigade.stations import StationRegistry
     from tools.brigade.worktree import get_pool_status, is_treehouse_installed
     from tools.brigade.flight_recorder import FlightRecorder
     from tools.brigade.spec_critic import run_spec_critique, PRIMARY_CRITIC_MODEL, FALLBACK_CRITIC_MODEL
     from tools.brigade.tier import get_tier_status, switch_tier, format_tier_card
+    from tools.brigade.ship_prep import prepare_ship_payload, format_ship_output
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -150,8 +152,11 @@ def _resolve_state_prompt(fsm: BrigadeFSM, ticket: Ticket, repo_path: Path) -> s
         if is_feature:
             return StationRegistry.build_coder_prompt(ticket, ticket.test_seam_command, repo_path=repo_path)
         return StationRegistry.build_surgeon_prompt(ticket, fsm.state.base_branch, repo_path=repo_path)
+    if curr == CycleState.GATE:
+        ui_note = " + UI diff_image.py (<= 0.15%)" if getattr(ticket, "track", "core") == "ui" else ""
+        return f"GATE STATE: Run deterministic verification (tools/gate.py{ui_note}) via:\nbrigade advance {repo_path}"
     if curr == CycleState.REVIEW:
-        return "=== EXAMINER REVIEW PROMPT ===\n" + StationRegistry.build_examiner_prompt(ticket, fsm.state.base_branch, repo_path=repo_path)
+        return "=== EXAMINER 3-AXIS REVIEW PROMPT ===\n" + StationRegistry.build_examiner_prompt(ticket, fsm.state.base_branch, repo_path=repo_path)
     if curr == CycleState.POLISH:
         if is_feature:
             return StationRegistry.build_coder_polish_prompt(ticket, fsm.state.review_findings, repo_path=repo_path)
@@ -273,6 +278,70 @@ def cmd_clear_findings(args: argparse.Namespace) -> int:
     fsm.state.review_findings = []
     fsm.save()
     print(f"✅ Cleared {count} review findings.")
+    return 0
+
+
+def cmd_seal_review(args: argparse.Namespace) -> int:
+    repo_path = normalize_target_path(args.repo)
+    verdict = str(getattr(args, "verdict", "") or "").strip().upper()
+    summary = str(getattr(args, "summary", "") or "").strip()
+    if verdict not in ("PASS", "FAIL"):
+        print(f"❌ Invalid verdict '{args.verdict}'. Expected PASS or FAIL.")
+        return 1
+    if not summary:
+        print("❌ Non-empty --summary is required to seal review.")
+        return 1
+
+    raw_ev = getattr(args, "evidence_reviewed", "") or ""
+    evidence = [e.strip() for e in raw_ev.split(",") if e.strip()]
+
+    fsm = BrigadeFSM(repo_path)
+    ticket_id = fsm.state.active_ticket.ticket_id if fsm.state.active_ticket else None
+    fsm.state.examiner_receipt = ExaminerReceipt(
+        verdict=verdict,
+        summary=summary,
+        ticket_id=ticket_id,
+        evidence_reviewed=evidence,
+        examiner_cid=getattr(args, "examiner_cid", None),
+    )
+    fsm.save()
+    print(f"✅ Examiner review sealed: [{verdict}] (ticket: {ticket_id or 'N/A'})")
+    return 0
+
+
+def _write_atomic_text(out_path: Path, content: str) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = out_path.with_suffix(out_path.suffix + ".tmp")
+    tmp_path.write_text(content, encoding="utf-8")
+    os.replace(tmp_path, out_path)
+
+
+def cmd_prepare_ship(args: argparse.Namespace) -> int:
+    repo_path = normalize_target_path(args.repo)
+    base_branch = getattr(args, "base", "staging") or "staging"
+    fmt = getattr(args, "format", "pr") or "pr"
+    strict_proofs = bool(getattr(args, "strict_proofs", False))
+
+    ok, result, err = prepare_ship_payload(
+        repo_path=repo_path,
+        base_branch=base_branch,
+        strict_proofs=strict_proofs,
+    )
+    rendered = format_ship_output(result, fmt=fmt)
+
+    if not ok:
+        print(f"❌ prepare-ship blocked: {err}", file=sys.stderr)
+        if rendered:
+            print(rendered)
+        return 1
+
+    out_arg = getattr(args, "out", None)
+    if out_arg:
+        out_path = normalize_target_path(out_arg) if Path(out_arg).is_absolute() else (repo_path / out_arg)
+        _write_atomic_text(out_path, rendered)
+        print(f"✅ Ship payload written atomically to {out_path}")
+
+    print(rendered)
     return 0
 
 
@@ -463,7 +532,7 @@ def cmd_graph(args: argparse.Namespace) -> int:
         print(f"   {status_dot} {role.value.upper():<20} {name_str} {cid_str}")
 
     print("\n🔄 PIPELINE FLOW (ASCII):")
-    states = ["IDLE", "TRIAGE", "SURGERY", "VERIFY", "REVIEW", "GATE", "STAGING", "COMPLETED"]
+    states = ["IDLE", "TRIAGE", "SURGERY", "VERIFY", "GATE", "QA", "REVIEW", "STAGING", "COMPLETED"]
     flow_str = ""
     for s in states:
         if s == curr:
@@ -477,14 +546,17 @@ def cmd_graph(args: argparse.Namespace) -> int:
         print("```mermaid")
         print("stateDiagram-v2")
         print("    direction LR")
-        print("    IDLE --> TRIAGE: triage (whitelist/blacklist)")
-        print("    TRIAGE --> SURGERY: assign to Surgeon")
+        print("    IDLE --> TRIAGE: triage / start-slice")
+        print("    TRIAGE --> SURGERY: assign to Coder/Surgeon")
         print("    SURGERY --> VERIFY: test seam & tsc")
-        print("    VERIFY --> REVIEW: vitest == 0")
-        print("    REVIEW --> GATE: Standards PASS")
-        print("    GATE --> STAGING: gate.py exit 0")
-        print("    GATE --> STAGNATED: fail (attempts >= N)")
-        print("    STAGING --> COMPLETED: squash-merge & ledger resolved")
+        print("    VERIFY --> GATE: hermetic verify == 0")
+        print("    GATE --> QA: gate.py == 0 (if QA required)")
+        print("    GATE --> REVIEW: gate.py == 0 (no QA)")
+        print("    QA --> REVIEW: ProofVerifier PASS")
+        print("    REVIEW --> STAGING: 3-axis PASS + seal-review")
+        print("    REVIEW --> POLISH: CRITICAL or FAIL")
+        print("    POLISH --> GATE: hermetic re-verify")
+        print("    STAGING --> COMPLETED: ff-merge & archive spec")
         print(f"    classDef active fill:#22c55e,stroke:#15803d,stroke-width:3px,color:#fff")
         print(f"    class {curr} active")
         print("```")
@@ -985,7 +1057,7 @@ def main() -> int:
     # add-finding
     p_find = subparsers.add_parser("add-finding", help="Record a review finding")
     p_find.add_argument("repo", help="Path to target repository")
-    p_find.add_argument("--axis", required=True, choices=["standards", "spec"], help="Review axis")
+    p_find.add_argument("--axis", required=True, choices=["standards", "spec", "evidence", "qa"], help="Review axis")
     p_find.add_argument("--severity", required=True, choices=["CRITICAL", "WARNING", "ADVISORY"], help="Severity")
     p_find.add_argument("--file", required=True, help="File path with finding")
     p_find.add_argument("--rule", required=True, help="Rule ID violated")
@@ -996,6 +1068,14 @@ def main() -> int:
     # clear-findings
     p_clr = subparsers.add_parser("clear-findings", help="Clear review findings")
     p_clr.add_argument("repo", help="Path to target repository")
+
+    # seal-review
+    p_seal = subparsers.add_parser("seal-review", help="Seal 3-axis Examiner review verdict into BrigadeState")
+    p_seal.add_argument("repo", help="Path to target repository")
+    p_seal.add_argument("--verdict", required=True, choices=["PASS", "FAIL", "pass", "fail"], help="Examiner verdict (PASS or FAIL)")
+    p_seal.add_argument("--summary", required=True, help="Concise 3-axis review summary")
+    p_seal.add_argument("--evidence-reviewed", default="", help="Comma-separated evidence paths reviewed")
+    p_seal.add_argument("--examiner-cid", default=None, help="Optional Examiner conversation ID")
 
     # advance
     p_adv = subparsers.add_parser("advance", help="Execute guards and advance to next state")
@@ -1112,6 +1192,14 @@ def main() -> int:
     p_tier.add_argument("--target", choices=["pro", "ultra"], help="Target tier when action is switch (pro or ultra)")
     p_tier.add_argument("--json", action="store_true", help="Output machine-readable JSON")
 
+    # prepare-ship
+    p_ship = subparsers.add_parser("prepare-ship", help="Synthesize Specs-to-PR ship payload for no-mistakes")
+    p_ship.add_argument("repo", help="Path to target repository")
+    p_ship.add_argument("--base", default="staging", help="Base branch to diff against (default: staging)")
+    p_ship.add_argument("--format", choices=["pr", "show-me", "json"], default="pr", help="Output format (default: pr)")
+    p_ship.add_argument("--out", help="Optional output file path (written atomically)")
+    p_ship.add_argument("--strict-proofs", action="store_true", help="Require at least one verified QA proof or ExaminerReceipt")
+
     args = parser.parse_args()
 
     commands = {
@@ -1123,6 +1211,7 @@ def main() -> int:
         "ticket": cmd_ticket,
         "add-finding": cmd_add_finding,
         "clear-findings": cmd_clear_findings,
+        "seal-review": cmd_seal_review,
         "advance": cmd_advance,
         "status": cmd_status,
         "graph": cmd_graph,
@@ -1141,6 +1230,7 @@ def main() -> int:
         "critique-spec": cmd_critique_spec,
         "prompt": cmd_prompt,
         "tier": cmd_tier,
+        "prepare-ship": cmd_prepare_ship,
     }
 
     func = commands.get(args.command)

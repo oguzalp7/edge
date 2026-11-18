@@ -69,9 +69,10 @@ class StationRegistry:
             "",
             "🤝 **PEER-TO-PEER HANDOFF RULES (Autonomous Kitchen Relay):**",
             "- `seam_architect` -> `coder`: Red tests passing -> advance to `SURGERY`, message `coder` directly.",
-            "- `coder`/`surgeon` -> `examiner`: Verify passing -> advance to `REVIEW`, message `examiner` directly.",
-            "- `examiner` -> `coder` (POLISH) or `gate`: Review findings clean -> advance to `GATE`.",
-            "- `gate` -> `qa_engineer` (if Lavish prototype present) or `STAGING`.",
+            "- `coder`/`surgeon` -> `gate`: Verify passing -> advance to `GATE` (runs `tools/gate.py` & UI `diff_image.py`).",
+            "- `gate` -> `qa_engineer` (if QA needed) or `examiner` (`REVIEW`).",
+            "- `qa_engineer` -> `examiner`: Proof receipt verified -> advance to `REVIEW`, message `examiner` directly.",
+            "- `examiner` -> `coder`/`surgeon` (`POLISH`) or `@orchestrator` (`STAGING` after `brigade seal-review`).",
             "- **Green-Zone Invariant:** Message `@orchestrator` ONLY upon reaching `STAGING` (`[READY_FOR_STAGING]`) or unresolvable `[ESCALATION]`!",
         ])
         return "\n".join(lines)
@@ -437,7 +438,7 @@ CONSTRAINTS (STRICT):
 
     @staticmethod
     def build_examiner_prompt(ticket: Ticket, base_branch: str, repo_path: Optional[Path] = None) -> str:
-        """Constructs a unified dual-axis review ticket for the EXAMINER station."""
+        """Constructs a unified 3-axis evidence-first review ticket for the EXAMINER station."""
         rubric = StationRegistry.load_station_rubric("examiner", repo_path=repo_path)
         target_label = _resolve_target_label(ticket)
         expected_line = (
@@ -445,6 +446,7 @@ CONSTRAINTS (STRICT):
             if getattr(ticket, "expected_files", None)
             else ""
         )
+        slug = StationRegistry._resolve_qa_slug("qa_scenario", ticket)
         prompt = f"""You are the EXAMINER station worker in Edge Brigade.
 
 DIFF INSPECTION:
@@ -453,29 +455,35 @@ Target Diff: `git diff {base_branch}..HEAD`
 REVIEW SOURCES:
 1. `coding_standards.md` in repository root.
 2. Fowler Code Smell Baseline (Mysterious Name, Duplicated Code, Feature Envy, Data Clumps, Primitive Obsession, Message Chains, Middle Man).
-3. Architectural Specification (`skills/edge-core-refactor/SKILL.md` or `edge-ui-refactor/SKILL.md`).
+3. Architectural Specification (`skills/edge-core-refactor/SKILL.md` or `edge-ui-refactor/SKILL.md` or `.edge/specs/`).
+4. Physical Execution Evidence: `tools/gate.py` status, `.edge/qa/visual/{slug}-diff.png` (if `track == "ui"`), `.edge/qa/proofs/{slug}.json` + screenshots + `db_crosscheck`, and `.lavish/` contracts.
 
 TICKET CONTEXT:
-- Refactoring Ticket: {ticket.ticket_id}
+- Ticket ID: {ticket.ticket_id}
+- Track: {getattr(ticket, 'track', 'core')}
 - Domain: {ticket.domain}
 - Target File: {target_label}{expected_line}
 
-DUAL-AXIS REVIEW DIRECTIVES:
-Axis 1 (Standards & Fowler Smells):
+3-AXIS EVIDENCE-FIRST REVIEW DIRECTIVES:
+Axis 1 (Standards & Fowler Smells -- `--axis standards`):
 1. Verify if the diff complies with `coding_standards.md` (explicit types, transaction safety, error boundaries, zero raw leaks).
-2. Spot Fowler code smells in the diff.
-3. Distinguish HARD VIOLATIONS from advisory guidance; skip deterministic checks already enforced by gate.py or compiler.
+2. Spot Fowler code smells in the diff and distinguish HARD VIOLATIONS from advisory guidance.
 
-Axis 2 (Architectural & Spec Boundaries):
-1. MigrationGate Invariant: Did the diff touch any file in `src/db/schema/*` or `drizzle/*`? (Immediate failure).
-2. Layer Leakage Gate: Did any direct queries increase in action controllers (`after_leaks <= before_leaks`, 0 in new actions)?
-3. Max CC Non-Regression: Did modified/new files stay within cyclomatic complexity bounds (no regression above baseline hotspot CC; CC <= 10 ceiling for clean/new files)?
-4. Zero-Wrapper: Are there useless pass-through services?
-5. Scope Creep: Did the diff touch anything outside the ticket domain?
+Axis 2 (Architectural & Spec Boundaries -- `--axis spec`):
+1. MigrationGate Invariant: On refactor tracks, ensure `src/db/schema/*` and `drizzle/*` are untouched.
+2. Layer Leakage & Max CC: Verify action controllers do not add DB leaks and functions stay within CC <= 10.
+3. Zero-Wrapper & Scope Creep: Flag shallow pass-through services or out-of-domain changes.
 
-REPORT DISCIPLINE:
+Axis 3 (Multimodal Behavioral & Evidence Review -- `--axis evidence`):
+1. Inspect `gate.py` verification status, `.edge/qa/visual/{slug}-diff.png` & baseline/refactored images (if `track == "ui"`), and `.edge/qa/proofs/{slug}.json` + referenced screenshots + `db_crosscheck` (if QA ran).
+2. Verify implemented behavior and visual/DOM/DB evidence actually satisfy `.edge/specs/` and `.lavish/` contracts without stubs or superficial workarounds.
+3. Record behavioral/evidence gaps via `brigade add-finding <repo> --axis evidence ...`.
+
+MANDATORY SEAL & REPORT DISCIPLINE:
 Keep findings concise (under 350 words). Categorize findings by severity (CRITICAL, WARNING, ADVISORY).
-If clean, state: 'EXAMINER REVIEW: PASS'.
+Before running `brigade advance`, you MUST seal your verdict via:
+`brigade seal-review <repo> --verdict PASS|FAIL --summary "<concise summary>" --evidence-reviewed "<paths>"`
+If clean, state: 'EXAMINER REVIEW: PASS' and seal `--verdict PASS`.
 
 ---
 
@@ -723,10 +731,10 @@ EXECUTION PROTOCOL: 4-STEP BEHAVIORAL PROOF CHAIN:
 4. Step 4: Proof Receipt Synthesis & Relay:
    - If non-blocking UX/visual defects are found, log them via:
      `python tools/brigade/cli.py qa-inspect "<query>" . --issue "<desc>" --category <category> --frontier`
-   - Write `.edge/qa/proofs/{eff_slug}.json` adhering to the required schema:
-     `visited_urls`, `user_actions_executed`, `persistence_verified: true`, `console_clean: true`, `screenshot_paths`.
-   - Run `python tools/brigade/cli.py advance .` to transition to STAGING.
-   - If critical bugs exist, record a CRITICAL review finding to automatically route to POLISH.
+   - Write `.edge/qa/proofs/{eff_slug}.json` adhering to ProofVerifier schema:
+     `visited_urls`, `user_actions_executed`, `persistence_verified: true`, `console_clean: true`, `screenshot_paths`, `host_facts_verified: true`, `db_crosscheck: {{...}}`.
+   - Run `python tools/brigade/cli.py advance .` to transition to `REVIEW` (`EXAMINER`).
+   - If critical bugs exist, record a CRITICAL review finding (`--axis qa`) to automatically route to `POLISH`.
 
 NEGATIVE BOUNDARY (STRICT):
 - You CANNOT edit or mutate production code (`src/**`, `app/**`, `lib/**`, `db/**`).
