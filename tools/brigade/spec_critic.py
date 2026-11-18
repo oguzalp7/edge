@@ -40,6 +40,7 @@ Audit for architectural leverage and debt prevention:
 Expose gaps that would force downstream implementation agents to guess:
 - Pinpoint missing type signatures, data models, validation boundaries, or lifecycle guarantees.
 - Enumerate unhandled failure modes, boundary errors, timeouts, or empty/null states.
+- Audit for missing pagination (`{ items, total, page, pageSize }` & URL `searchParams`), missing mutation idempotency / concurrency guards, missing resource-level ABAC ownership filters, missing UI 4-state (`Loading`/`Empty`/`No-Results`/`Error`) & `!res.success` optimistic rollback, and unscheduled mock (`DEFAULT_*`/`MOCK_*`) or orphan component cleanup.
 - Flag ambiguous requirements or vague acceptance criteria that require explicit decisions.
 """
 
@@ -81,11 +82,38 @@ def build_spec_critic_prompt(spec_path: Path, spec_content: str, persona_content
     )
 
 
+_QUOTA_INDICATORS = (
+    "429",
+    "quota",
+    "rate limit",
+    "resource_exhausted",
+    "exhausted",
+    "unavailable",
+)
+
+_PLANNING_TRAPS = (
+    "your request was only",
+    "planning mode is on",
+    "your message ends at",
+    "doesn't say what you want planned",
+)
+
+
+def _has_planning_or_quota_error(stdout_lower: str, stderr_lower: str) -> bool:
+    if any(k in stderr_lower for k in _QUOTA_INDICATORS):
+        return True
+    if any(t in stdout_lower for t in _PLANNING_TRAPS):
+        return True
+    if any(k in stdout_lower for k in _QUOTA_INDICATORS):
+        return any(err_word in stdout_lower for err_word in ("error", "fail", "exception"))
+    return False
+
+
 def _should_fallback(returncode: int, stdout: str, stderr: str) -> bool:
     """
     Determines if fallback model invocation should be triggered based on process execution results.
     Returns True when returncode != 0, when stdout is empty/whitespace,
-    or when stderr/stdout indicates quota/rate-limit/model unavailability.
+    or when stderr/stdout indicates quota/rate-limit/model unavailability or planning-mode CLI trap.
     """
     if returncode != 0:
         return True
@@ -97,25 +125,17 @@ def _should_fallback(returncode: int, stdout: str, stderr: str) -> bool:
     stderr_lower = stderr.lower() if stderr else ""
     stdout_lower = clean_stdout.lower()
 
-    indicators = [
-        "429",
-        "quota",
-        "rate limit",
-        "resource_exhausted",
-        "exhausted",
-        "unavailable",
-    ]
+    return _has_planning_or_quota_error(stdout_lower, stderr_lower)
 
-    # Stderr check: any quota/rate-limit/unavailability indicator in stderr
-    if any(k in stderr_lower for k in indicators):
-        return True
 
-    # Stdout check: error message indicating quota/rate-limit/unavailability
-    if any(k in stdout_lower for k in indicators):
-        if any(err_word in stdout_lower for err_word in ["error", "fail", "exception"]):
-            return True
-
-    return False
+def _resolve_spec_path(norm_repo: Path, spec_path: Union[Path, str]) -> Path:
+    raw_spec_str = str(spec_path).replace("\\", "/")
+    is_abs = (
+        raw_spec_str.startswith("/")
+        or (len(raw_spec_str) >= 2 and raw_spec_str[1] == ":")
+        or raw_spec_str.startswith("//")
+    )
+    return normalize_target_path(spec_path) if is_abs else normalize_target_path(norm_repo / spec_path)
 
 
 def run_spec_critique(
@@ -132,16 +152,7 @@ def run_spec_critique(
     Advisory invariant: Does not mutate .edge/brigade.json or lock FSM transitions.
     """
     norm_repo = normalize_target_path(repo_path)
-
-    raw_spec_str = str(spec_path).replace("\\", "/")
-    if (
-        raw_spec_str.startswith("/")
-        or (len(raw_spec_str) >= 2 and raw_spec_str[1] == ":")
-        or raw_spec_str.startswith("//")
-    ):
-        resolved_spec = normalize_target_path(spec_path)
-    else:
-        resolved_spec = normalize_target_path(norm_repo / spec_path)
+    resolved_spec = _resolve_spec_path(norm_repo, spec_path)
 
     if not resolved_spec.is_file():
         return SpecCritiqueResult(
@@ -182,11 +193,11 @@ def run_spec_critique(
     model_used = primary_model
     fallback_triggered = False
 
-    cmd = ["agy", "--mode", "plan", "--model", primary_model, "-p", prompt]
+    cmd = ["agy", "--model", primary_model, "-p", prompt]
     code, out, err = run_command(cmd, cwd=norm_repo, timeout=timeout)
 
     if _should_fallback(code, out, err) and fallback_model and fallback_model != primary_model:
-        fallback_cmd = ["agy", "--mode", "plan", "--model", fallback_model, "-p", prompt]
+        fallback_cmd = ["agy", "--model", fallback_model, "-p", prompt]
         code, out, err = run_command(fallback_cmd, cwd=norm_repo, timeout=timeout)
         fallback_triggered = True
         model_used = fallback_model
@@ -201,7 +212,7 @@ def run_spec_critique(
         except OSError:
             pass
 
-    if code == 0 and out.strip():
+    if code == 0 and out.strip() and not _should_fallback(code, out, err):
         specs_dir.mkdir(parents=True, exist_ok=True)
         gen_time = datetime.now(timezone.utc).isoformat()
         report_content = (

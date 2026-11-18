@@ -1224,6 +1224,28 @@ def _handle_run_command_wsl_guard(tool_name: str, args: dict) -> Optional[dict]:
         return wsl_guard_result
     return None
 
+_SPEC_WRITER_ALLOWED_DIRS = ("specs/", "/specs/", ".edge/", "/.edge/", ".lavish/", "/.lavish/")
+_SPEC_WRITER_ROOT_DOCS = ("coding_standards.md", "agents.md", "program_system_instructions.md", "context.md")
+_SPEC_WRITER_FORBIDDEN_CODE_SEGMENTS = (
+    "/src/", "src/",
+    "/tests/", "tests/",
+    "/test/", "test/",
+    "/app/", "app/",
+    "/lib/", "lib/",
+    "/db/", "db/",
+    "/drizzle/", "drizzle/",
+)
+
+
+def _is_spec_writer_allowed_target(target_file: str) -> bool:
+    norm = target_file.strip().replace("\\", "/").lower()
+    if any(k in norm for k in _SPEC_WRITER_ALLOWED_DIRS):
+        return True
+    if any(seg in norm for seg in _SPEC_WRITER_FORBIDDEN_CODE_SEGMENTS):
+        return False
+    return Path(norm).name in _SPEC_WRITER_ROOT_DOCS
+
+
 def handle_pre_tool(payload: dict) -> dict:
     is_afk, afk_mode = is_afk_session(payload)
     if is_afk:
@@ -1279,7 +1301,7 @@ def handle_pre_tool(payload: dict) -> dict:
 
         # D. SPEC_WRITER: Specifications & Prototypes Only
         if role == "SPEC_WRITER":
-            if not any(k in target_file for k in ["specs/", "/specs/", ".edge/", "/.edge/", ".lavish/", "/.lavish/"]):
+            if not _is_spec_writer_allowed_target(target_file):
                 return {
                     "decision": "deny",
                     "reason": (

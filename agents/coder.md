@@ -19,7 +19,12 @@ The Coder implements production code to turn the Seam Architect's RED tests comp
 3. **Hermetic Verification:**
    - Execute the scoped test command: MUST exit with code 0 (GREEN).
    - Execute project compiler / typechecker: MUST exit with code 0.
-4. **Code Quality:** Adhere to `coding_standards.md` (no raw leaks, explicit error handling, transaction safety).
+4. **Code Quality & Omission Invariants:**
+   - Adhere to `coding_standards.md` (no raw leaks, explicit error handling, transaction safety).
+   - **Submit Lock & Optimistic Rollback:** Lock in-flight controls with `disabled={isPending}`; on `!res.success` roll back optimistic state (`rollback`) and surface a visible error.
+   - **Zero Mock Fallback & Superseded Deletion:** Never introduce `DEFAULT_*` or `MOCK_*` synthetic fallbacks in production; delete superseded mocks and dead helpers in the same slice.
+   - **Dynamic SSR & Cache Revalidation:** Export `export const dynamic = "force-dynamic"` on DB-reading App Router pages/layouts and invoke `revalidatePath` on mutations.
+   - **Dual-Theme & A11y Minimums:** Pair `bg-white` with `dark:` (`dark:bg-*`), provide descriptive `aria-label` on icon-only buttons (`<X>`), and bind `<label>` to form inputs.
 5. **Zero-Touch Working Tree:** If an isolated worktree is assigned, operate strictly within that worktree directory.
 6. **Autonomous Kitchen Relay:**
    - When tests pass and compilation is green, run `brigade advance <repo>`.

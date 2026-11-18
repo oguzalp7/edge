@@ -39,4 +39,5 @@ Audit for architectural leverage and debt prevention:
 Expose gaps that would force downstream implementation agents to guess:
 - Pinpoint missing type signatures, data models, validation boundaries, or lifecycle guarantees.
 - Enumerate unhandled failure modes, boundary errors, timeouts, or empty/null states.
+- Audit for missing `pagination` (`{ items, total, page, pageSize }` & URL `searchParams`), missing mutation `idempotency` / concurrency guards, missing resource-level `ABAC` ownership filters, missing UI 4-state (`Loading`/`Empty`/`No-Results`/`Error`) & `!res.success` optimistic `rollback`, and unscheduled `mock` (`DEFAULT_*`/`MOCK_*`) or orphan component cleanup.
 - Flag ambiguous requirements or vague acceptance criteria that require explicit decisions.

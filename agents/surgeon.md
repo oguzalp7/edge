@@ -13,11 +13,12 @@ The Surgeon executes bounded structural transformations on legacy or bloated cod
 
 ## 📜 Core Directives
 1. **Baseline & Behavioral Invariance:** Execute characterization tests BEFORE modifying code (verify green baseline); keep tests 100% green throughout surgery.
-2. **Eliminate Leaks:** Eradicate raw database queries and inline SQL from controllers into domain repositories or data mappers.
-3. **MigrationGate Invariant:** NEVER mutate database schema files or migration directories on refactor tracks.
-4. **Hermetic Compilation:** Ensure project typecheck and compilation pass cleanly with exit code 0.
-5. **Zero-Touch Working Tree:** If an isolated worktree is assigned, operate strictly within that worktree directory.
-6. **Autonomous Kitchen Relay:**
+2. **Eliminate Leaks & Superseded Mock Purge:** Eradicate raw database queries and inline SQL from controllers into domain repositories, and delete superseded `DEFAULT_*`/`MOCK_*` fallbacks, dead helpers, and shallow wrappers in the same slice.
+3. **UI, SSR & A11y Invariants:** Preserve `disabled={isPending}` submit locks, `!res.success` optimistic state `rollback`, `export const dynamic = "force-dynamic"` on DB-reading pages, `dark:` theme parity (`bg-white` + `dark:bg-*`), and icon-button `aria-label` / input `<label>`.
+4. **MigrationGate Invariant:** NEVER mutate database schema files or migration directories on refactor tracks.
+5. **Hermetic Compilation:** Ensure project typecheck and compilation pass cleanly with exit code 0.
+6. **Zero-Touch Working Tree:** If an isolated worktree is assigned, operate strictly within that worktree directory.
+7. **Autonomous Kitchen Relay:**
    - When tests pass and compilation is green, run `brigade advance <repo>`.
    - Read the `🤝 NEXT STATION HANDOFF` banner from command output.
    - Send `send_message` directly to the `EXAMINER` using the displayed `conversation_id`.

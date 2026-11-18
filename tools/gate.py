@@ -33,6 +33,10 @@ from tools.rules import (
     CANONICAL_ARRAY_PATTERN,
     SHALLOW_WRAPPER_PATTERN,
     SQL_LEAK_PATTERN,
+    MOCK_FALLBACK_PATTERN,
+    TYPE_ESCAPE_PATTERN,
+    BG_WHITE_NO_DARK_PATTERN,
+    ICON_X_BUTTON_NO_ARIA_PATTERN,
 )
 from tools.audit import crapper as _crapper
 
@@ -260,6 +264,56 @@ def _is_action_controller_path(rel_path: str) -> bool:
 def _count_sql_leaks(source_text: str) -> int:
     sanitized = _strip_js_comments_and_strings(source_text)
     return len(SQL_LEAK_PATTERN.findall(sanitized))
+
+
+_NON_DIRECTIVE_LINE_COMMENT_RE: re.Pattern[str] = re.compile(
+    r"//(?!\s*@ts-(?:ignore|expect-error)\b)[^\n]*"
+)
+_BG_WHITE_TOKEN_RE: re.Pattern[str] = re.compile(r"(?<![-\w])bg-white\b")
+
+
+def _is_eligible_prod_path(
+    rel_path: str,
+    suffixes: Tuple[str, ...],
+    require_src_prefix: bool,
+) -> bool:
+    if _is_excluded_non_prod_path(rel_path):
+        return False
+    if require_src_prefix and not rel_path.startswith("src/"):
+        return False
+    return Path(rel_path).suffix.lower() in suffixes
+
+
+def _find_mock_fallback_violations(rel_path: str, content: str) -> List[str]:
+    sanitized = _strip_js_comments_and_strings(content)
+    hits: List[str] = []
+    for idx, line in enumerate(sanitized.splitlines(), start=1):
+        match = MOCK_FALLBACK_PATTERN.search(line)
+        if match:
+            hits.append(f"{rel_path}:{idx} - Production mock/default fallback '{match.group(0)}' detected.")
+    return hits
+
+
+def _find_type_escape_violations(rel_path: str, content: str) -> List[str]:
+    cleaned = _NON_DIRECTIVE_LINE_COMMENT_RE.sub("", content)
+    hits: List[str] = []
+    for idx, line in enumerate(cleaned.splitlines(), start=1):
+        match = TYPE_ESCAPE_PATTERN.search(line)
+        if match:
+            hits.append(f"{rel_path}:{idx} - Type escape '{match.group(0)}' detected.")
+    return hits
+
+
+def _find_dual_theme_and_a11y_violations(rel_path: str, content: str) -> List[str]:
+    hits: List[str] = []
+    for m in BG_WHITE_NO_DARK_PATTERN.finditer(content):
+        raw_cls = m.group(0)
+        if _BG_WHITE_TOKEN_RE.search(raw_cls) and "dark:bg-" not in raw_cls:
+            hits.append(f"{rel_path}: className contains 'bg-white' without paired 'dark:bg-*' token.")
+    for m in ICON_X_BUTTON_NO_ARIA_PATTERN.finditer(content):
+        if "aria-label" not in m.group("attrs"):
+            hits.append(f"{rel_path}: icon-only <X> <button> missing 'aria-label'.")
+    return hits
 
 
 class GateResult:
@@ -766,6 +820,89 @@ class EdgeVerificationGate:
 
         return GateResult(1, "Domain Purity Gate", True, "UI components are free of hardcoded domain constants and raw <th> headers.")
 
+    def _read_changed_prod_files(
+        self,
+        base_ref: Optional[str],
+        suffixes: Tuple[str, ...],
+        require_src_prefix: bool = False,
+    ) -> Tuple[Optional[List[Tuple[str, str]]], str]:
+        rel_paths, _, err = self._get_changed_rel_paths(base_ref or "HEAD~1")
+        if rel_paths is None:
+            return None, err
+        items: List[Tuple[str, str]] = []
+        for rel_path in rel_paths:
+            if not _is_eligible_prod_path(rel_path, suffixes, require_src_prefix):
+                continue
+            full_path = self.target_repo / rel_path
+            if full_path.is_file():
+                items.append((rel_path, full_path.read_text(encoding="utf-8", errors="replace")))
+        return items, ""
+
+    # =========================================================================
+    # STAGE: Omission & Safety Heuristic Gates
+    # =========================================================================
+    def check_mock_fallbacks(self, base_ref: Optional[str] = "HEAD~1") -> GateResult:
+        """Detects DEFAULT_* and MOCK_* synthetic fallback constants in production src/ files."""
+        files, err = self._read_changed_prod_files(
+            base_ref, (".ts", ".tsx", ".js", ".jsx"), require_src_prefix=True
+        )
+        if files is None:
+            return GateResult(1, "Mock Fallback Purity Gate", False, f"Git diff failed: {err}")
+
+        violations: List[str] = []
+        for rel_path, content in files:
+            violations.extend(_find_mock_fallback_violations(rel_path, content))
+
+        if violations:
+            return GateResult(
+                1,
+                "Mock Fallback Purity Gate",
+                False,
+                f"Found {len(violations)} synthetic mock/default fallback violation(s) in production code.",
+                violations[:10],
+            )
+        return GateResult(1, "Mock Fallback Purity Gate", True, "Zero production DEFAULT_*/MOCK_* fallbacks detected.")
+
+    def check_type_escapes(self, base_ref: Optional[str] = "HEAD~1") -> GateResult:
+        """Detects `as any`, `as unknown as`, `@ts-ignore`, and `@ts-expect-error` in changed .ts/.tsx files."""
+        files, err = self._read_changed_prod_files(base_ref, (".ts", ".tsx"), require_src_prefix=False)
+        if files is None:
+            return GateResult(1, "Type Escape Gate", False, f"Git diff failed: {err}")
+
+        violations: List[str] = []
+        for rel_path, content in files:
+            violations.extend(_find_type_escape_violations(rel_path, content))
+
+        if violations:
+            return GateResult(
+                1,
+                "Type Escape Gate",
+                False,
+                f"Found {len(violations)} TypeScript type-safety escape(s).",
+                violations[:10],
+            )
+        return GateResult(1, "Type Escape Gate", True, "Zero TypeScript type-safety escapes detected.")
+
+    def check_dual_theme_and_a11y(self, base_ref: Optional[str] = "HEAD~1") -> GateResult:
+        """Checks changed .tsx files for unpaired bg-white (missing dark:bg-*) and icon <X> buttons missing aria-label."""
+        files, err = self._read_changed_prod_files(base_ref, (".tsx",), require_src_prefix=False)
+        if files is None:
+            return GateResult(1, "Dual-Theme & A11y Heuristic Gate", False, f"Git diff failed: {err}")
+
+        violations: List[str] = []
+        for rel_path, content in files:
+            violations.extend(_find_dual_theme_and_a11y_violations(rel_path, content))
+
+        if violations:
+            return GateResult(
+                1,
+                "Dual-Theme & A11y Heuristic Gate",
+                False,
+                f"Found {len(violations)} dual-theme or accessibility heuristic warning(s).",
+                violations[:10],
+            )
+        return GateResult(1, "Dual-Theme & A11y Heuristic Gate", True, "Dual-theme and icon-button aria-label checks passed.")
+
     # =========================================================================
     # STAGE: Hermetic Verification Gate
     # =========================================================================
@@ -820,6 +957,11 @@ class EdgeVerificationGate:
             results.append(self.check_migration_gate(base_ref=base_ref))
 
         results.append(self.check_complexity_non_regression(base_ref=base_ref))
+        results.extend([
+            self.check_mock_fallbacks(base_ref=base_ref),
+            self.check_type_escapes(base_ref=base_ref),
+            self.check_dual_theme_and_a11y(base_ref=base_ref),
+        ])
 
         # Core track specific gates
         if track in ("core", "all"):

@@ -16,6 +16,7 @@ The Seam Architect identifies decoupling seams, formalizes interface contracts, 
 2. **Declare Explicit Contracts:** Define strict types and domain signatures before implementation begins.
 3. **Author RED Unit/Contract Tests:**
    - Write hermetic tests covering specification criteria.
+   - Mandate 4 negative RED tests beyond happy paths: (1) **Idempotency / Duplicate Call**, (2) **Pagination Bounds** (`{ items, total, page, pageSize }`), (3) **ABAC & Validation Fail-Fast** (unauthorized ownership scope & invalid schema/UUID), (4) **Failure Rollback & Cache Invalidation** (`{ success: false }` optimistic state `rollback` + `revalidatePath` on mutation).
    - Run the test suite: verify that newly written tests FAIL cleanly (RED baseline).
    - If tests pass before implementation, the test seam is invalid.
 4. **Handoff:** Commit the RED tests and contracts. The Coder will implement code to turn them green.

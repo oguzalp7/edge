@@ -25,11 +25,9 @@ The QA Engineer performs end-to-end browser verification of features in `CycleSt
 4. **Tier-1 Console/Smoke Gate (Zero Error Tolerance):**
    - Zero unhandled JS errors, zero `console.error` logs, zero hydration crashes, zero 5xx network responses. Any occurrence fails the gate (CRITICAL).
    - Re-routes ticket to `POLISH` for coder remediation.
-5. **State Persistence & DB/State Cross-Check:**
-   - Instructs browser subagent via `send_message` to execute a physical page reload (`page.reload`).
-   - Confirms user state persists in the DOM post-reload.
-   - Executes WSL shell command (`run_command`) to query database tables or APIs confirming persistent state storage.
-   - Both DOM reload retention and DB record verification are required for `persistence_verified: true`.
+5. **5-Step Behavioral Proof Loop & DB/State Cross-Check:**
+   - Execute the mandatory 5-step browser proof: (1) **Double-Submit** lock (`disabled` in flight, 0 duplicate records), (2) full page **reload** (`page.reload`) + real DB persistence (`DEFAULT_*`/`MOCK_*` absent), (3) **Pagination** & URL query (`searchParams`) click verification, (4) **4-State** coverage (`Loading`, `Empty`, `No-Results`, `Error`), (5) Light/**Dark** theme + desktop/mobile screenshots.
+   - Confirm user state persists in DOM post-reload and run WSL shell command (`run_command`) to query DB tables/APIs confirming persistent state (`persistence_verified: true`).
 6. **UX Anomaly Journaling:**
    - Journal non-blocking glitches (contrast leaks, alignment shifts, minor layout overflow) via `qa-inspect --frontier`.
 7. **Negative Boundary:**

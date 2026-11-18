@@ -15,10 +15,10 @@ if str(root_dir) not in sys.path:
 
 try:
     from .models import Station, StationRole, Ticket, ReviewFinding, BrigadeState
-    from .navigation import build_navigation_context
+    from .navigation import build_navigation_context, resolve_migration_paths
 except ImportError:
     from tools.brigade.models import Station, StationRole, Ticket, ReviewFinding, BrigadeState
-    from tools.brigade.navigation import build_navigation_context
+    from tools.brigade.navigation import build_navigation_context, resolve_migration_paths
 
 
 def _resolve_target_label(ticket: Ticket) -> str:
@@ -244,8 +244,9 @@ class StationRegistry:
    `refactor(ui): {ticket.description.lower()} ({ticket.ticket_id})`
 8. Output: Report git diff summary, test output, and gate verification status."""
         else:
+            schema_glob, migration_glob = resolve_migration_paths(repo_path)
             neg_constraints = "\n".join([f"- {c}" for c in ticket.negative_constraints]) or (
-                "- MigrationGate Invariant: NEVER touch `src/db/schema/*` or `drizzle/` migrations unless explicitly allowed.\n"
+                f"- MigrationGate Invariant: NEVER touch `{schema_glob}` or `{migration_glob}` migrations unless explicitly allowed.\n"
                 "- Layer Leakage Gate: Action controllers must not introduce direct DB calls (`after_leaks <= before_leaks`, 0 leaks in new actions).\n"
                 "- Max CC Non-Regression: Modified/extracted functions must not regress max cyclomatic complexity (healthy ceiling CC <= 10 for clean/new files).\n"
                 "- Structural Cleanliness: Extract business and query logic cleanly into domain repository/services.\n"
@@ -441,6 +442,7 @@ CONSTRAINTS (STRICT):
         """Constructs a unified 3-axis evidence-first review ticket for the EXAMINER station."""
         rubric = StationRegistry.load_station_rubric("examiner", repo_path=repo_path)
         target_label = _resolve_target_label(ticket)
+        schema_glob, migration_glob = resolve_migration_paths(repo_path)
         expected_line = (
             f"\n- Expected Files: {', '.join(ticket.expected_files)}"
             if getattr(ticket, "expected_files", None)
@@ -470,7 +472,7 @@ Axis 1 (Standards & Fowler Smells -- `--axis standards`):
 2. Spot Fowler code smells in the diff and distinguish HARD VIOLATIONS from advisory guidance.
 
 Axis 2 (Architectural & Spec Boundaries -- `--axis spec`):
-1. MigrationGate Invariant: On refactor tracks, ensure `src/db/schema/*` and `drizzle/*` are untouched.
+1. MigrationGate Invariant: On refactor tracks, ensure `{schema_glob}` and `{migration_glob}` are untouched.
 2. Layer Leakage & Max CC: Verify action controllers do not add DB leaks and functions stay within CC <= 10.
 3. Zero-Wrapper & Scope Creep: Flag shallow pass-through services or out-of-domain changes.
 
