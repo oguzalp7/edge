@@ -13,6 +13,7 @@ Stage: Hermetic Verification Gate (TypeScript + Unit Tests)
 """
 
 import ast
+import json
 import sys
 import os
 import re
@@ -358,6 +359,62 @@ class EdgeVerificationGate:
                         seen[norm] = None
 
         return list(seen.keys()), eff_base, ""
+
+    # =========================================================================
+    # STAGE: Navigation Check Gate
+    # =========================================================================
+    def _has_navigation_check_script(self) -> bool:
+        """Return True when target package.json defines a non-empty check:navigation script."""
+        pkg_path = self.target_repo / "package.json"
+        if not pkg_path.is_file():
+            return False
+        try:
+            data = json.loads(pkg_path.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, ValueError):
+            return False
+        if not isinstance(data, dict):
+            return False
+        scripts = data.get("scripts")
+        if not isinstance(scripts, dict):
+            return False
+        nav = scripts.get("check:navigation")
+        return isinstance(nav, str) and bool(nav.strip())
+
+    def check_navigation_gate(self) -> GateResult:
+        """Run npm run check:navigation unconditionally when configured in package.json."""
+        if not self._has_navigation_check_script():
+            return GateResult(
+                1,
+                "Navigation Check Gate",
+                True,
+                "No check:navigation script configured; skipped.",
+            )
+
+        if not (self.target_repo / "node_modules").exists():
+            return GateResult(
+                1,
+                "Navigation Check Gate",
+                False,
+                "Missing node_modules for check:navigation — symlink or run npm ci before running gate.",
+            )
+
+        code, stdout, stderr = self._run_cmd(["npm", "run", "check:navigation"], timeout=60)
+        if code == 0:
+            return GateResult(
+                1,
+                "Navigation Check Gate",
+                True,
+                "Navigation integrity check (check:navigation) passed.",
+            )
+
+        details = [line.strip() for line in (stdout + "\n" + stderr).splitlines() if line.strip()][:8]
+        return GateResult(
+            1,
+            "Navigation Check Gate",
+            False,
+            f"Navigation integrity check (check:navigation) failed (exit code {code}).",
+            details,
+        )
 
     # =========================================================================
     # STAGE: MigrationGate Invariant Gate
@@ -756,6 +813,8 @@ class EdgeVerificationGate:
             print("🚫 GATE CHECK FAILED: Ghost root directories present. Halting audit immediately.")
             print("=" * 70)
             return False
+
+        results.append(self.check_navigation_gate())
 
         if is_refactor and track != "feature":
             results.append(self.check_migration_gate(base_ref=base_ref))
