@@ -410,6 +410,140 @@ class TestStationNavigationWiringAndRubrics(unittest.TestCase):
             self.assertIn("AGENTS.md", text, f"{fname} must reference AGENTS.md")
             self.assertIn("docs/domains/", text, f"{fname} must reference docs/domains/")
 
+    def test_resolve_migration_paths_from_drizzle_config_agents_md_and_env_md(self):
+        import tools.brigade.navigation as nav_mod
+
+        self.assertTrue(
+            hasattr(nav_mod, "resolve_migration_paths"),
+            "tools.brigade.navigation must export resolve_migration_paths(repo_path)",
+        )
+        resolve_migration_paths = nav_mod.resolve_migration_paths
+
+        # 1. Default when unconfigured or None
+        unconfigured = self.temp_dir / "unconfigured_repo"
+        unconfigured.mkdir()
+        self.assertEqual(resolve_migration_paths(None), ("src/db/schema/*", "drizzle/*"))
+        self.assertEqual(resolve_migration_paths(unconfigured), ("src/db/schema/*", "drizzle/*"))
+
+        # 2. Resolved via drizzle.config.ts (out: "./src/db/migrations")
+        repo_drizzle = self.temp_dir / "repo_drizzle"
+        repo_drizzle.mkdir()
+        (repo_drizzle / "drizzle.config.ts").write_text(
+            'export default {\n  schema: "./src/db/schema",\n  out: "./src/db/migrations",\n};\n',
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            resolve_migration_paths(repo_drizzle),
+            ("src/db/schema/*", "src/db/migrations/*"),
+        )
+
+        # 3. Resolved via AGENTS.md (## 🌍 Repo Environment & Verification Facts)
+        repo_agents = self.temp_dir / "repo_agents"
+        repo_agents.mkdir()
+        (repo_agents / "AGENTS.md").write_text(
+            "# Project Agents\n\n"
+            "## 🌍 Repo Environment & Verification Facts\n"
+            "- Migrations live in `src/db/migrations/*` (never `drizzle/*`).\n"
+            "- Unit tests: `npm run test:unit`.\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            resolve_migration_paths(repo_agents),
+            ("src/db/schema/*", "src/db/migrations/*"),
+        )
+
+        # 4. Resolved via .edge/env.md
+        repo_env = self.temp_dir / "repo_env"
+        (repo_env / ".edge").mkdir(parents=True)
+        (repo_env / ".edge" / "env.md").write_text(
+            "- Schema: `src/db/schema/*`\n- Migrations: `src/db/migrations/*`\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            resolve_migration_paths(repo_env),
+            ("src/db/schema/*", "src/db/migrations/*"),
+        )
+
+    def test_surgeon_and_examiner_prompts_dynamically_inject_resolved_migration_path(self):
+        (self.repo_dir / "drizzle.config.ts").write_text(
+            'export default { schema: "./src/db/schema", out: "./src/db/migrations" };\n',
+            encoding="utf-8",
+        )
+        core_ticket = Ticket(
+            ticket_id="TICK-MIG-1",
+            track="core",
+            domain="bookings",
+            rule_id="RULE-DB-LEAK",
+            severity="CRITICAL",
+            target_file="src/actions/bookings.ts",
+            line_number=10,
+            fingerprint="fp-mig",
+            description="Extract DB queries",
+            suggested_fix="Move to repository",
+            branch_name="refactor/bookings",
+            test_seam_command="npm run test:unit",
+        )
+
+        surgeon_prompt = StationRegistry.build_surgeon_prompt(
+            core_ticket, "development", repo_path=self.repo_dir
+        )
+        examiner_prompt = StationRegistry.build_examiner_prompt(
+            core_ticket, "development", repo_path=self.repo_dir
+        )
+
+        self.assertIn("src/db/migrations/*", surgeon_prompt)
+        self.assertNotIn("or `drizzle/` migrations", surgeon_prompt)
+        self.assertIn("src/db/migrations/*", examiner_prompt)
+        self.assertNotIn("or `drizzle/*`", examiner_prompt)
+
+    def test_build_navigation_context_extracts_repo_env_facts_into_station_prompts_within_15_line_cap(self):
+        from tools.brigade.navigation import build_navigation_context
+
+        # 1. Extract from AGENTS.md under '## 🌍 Repo Environment & Verification Facts'
+        (self.repo_dir / "AGENTS.md").write_text(
+            "# Agents Constitution\n\n"
+            "## 🌍 Repo Environment & Verification Facts\n"
+            "- Migrations path: `src/db/migrations/*` (do not create `drizzle/`).\n"
+            "- Dual-theme invariant: pair `bg-white` with `dark:bg-zinc-900`.\n"
+            "- Scoped unit tests: `npx vitest run <path>`.\n\n"
+            "## Other Section\n"
+            "- Unrelated bullet that should not be extracted as env fact.\n",
+            encoding="utf-8",
+        )
+
+        nav_out = build_navigation_context(
+            self.repo_dir,
+            target_paths=["src/actions/bookings.ts"],
+            domain="bookings",
+        )
+        non_empty = [ln for ln in nav_out.splitlines() if ln.strip()]
+        self.assertLessEqual(len(non_empty), 15, f"Exceeded 15-line cap:\n{nav_out}")
+        self.assertIn("src/db/migrations/*", nav_out)
+        self.assertIn("dark:bg-zinc-900", nav_out)
+        self.assertNotIn("Unrelated bullet that should not be extracted", nav_out)
+
+        # Verify injection into station prompt via StationRegistry._with_navigation_context
+        coder_prompt = StationRegistry.build_coder_prompt(
+            self.ticket, "npx vitest run", repo_path=self.repo_dir
+        )
+        self.assertIn("### 🧭 NAVIGATION & DOMAIN CONTEXT", coder_prompt)
+        self.assertIn("src/db/migrations/*", coder_prompt)
+        self.assertIn("dark:bg-zinc-900", coder_prompt)
+
+        # 2. Extract from .edge/env.md when present
+        env_repo = self.temp_dir / "env_only_repo"
+        (env_repo / ".edge").mkdir(parents=True)
+        (env_repo / ".edge" / "env.md").write_text(
+            "- Env fact 1: Drizzle migrations at `src/db/migrations/*`\n"
+            "- Env fact 2: App port 3005\n",
+            encoding="utf-8",
+        )
+        env_nav = build_navigation_context(env_repo, target_paths=["src/index.ts"], domain="core")
+        env_lines = [ln for ln in env_nav.splitlines() if ln.strip()]
+        self.assertLessEqual(len(env_lines), 15)
+        self.assertIn("Env fact 1: Drizzle migrations at `src/db/migrations/*`", env_nav)
+        self.assertIn("Env fact 2: App port 3005", env_nav)
+
 
 if __name__ == "__main__":
     unittest.main()

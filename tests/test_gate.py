@@ -660,5 +660,156 @@ class TestNavigationCheckGate(_HermeticGitRepoTestCase):
             self.assertEqual(nav_calls, [])
 
 
+class TestDeterministicOmissionAndSafetyGates(_HermeticGitRepoTestCase):
+    """Hermetic RED tests for mock fallback, type escape, and dual-theme/a11y gates."""
+
+    def test_rules_exports_omission_and_safety_patterns(self) -> None:
+        import tools.rules as rules_mod
+
+        for attr_name in (
+            "MOCK_FALLBACK_PATTERN",
+            "TYPE_ESCAPE_PATTERN",
+            "BG_WHITE_NO_DARK_PATTERN",
+            "ICON_X_BUTTON_NO_ARIA_PATTERN",
+        ):
+            self.assertTrue(
+                hasattr(rules_mod, attr_name),
+                f"tools.rules must export {attr_name}",
+            )
+
+    def test_check_mock_fallbacks_gate(self) -> None:
+        self.assertTrue(
+            hasattr(self.gate, "check_mock_fallbacks"),
+            "EdgeVerificationGate must define check_mock_fallbacks",
+        )
+        self._write_and_commit({"README.md": "# Init\n"}, "chore: init")
+
+        # 1. Fail when production file under src/ defines or uses DEFAULT_SERVICES or MOCK_ITEMS
+        self._write_and_commit(
+            {
+                "src/lib/services/repository.ts": (
+                    "export const DEFAULT_SERVICES = [{ id: 's1', name: 'Cut' }];\n"
+                    "export const MOCK_ITEMS = [];\n"
+                    "export function getServices(rows: unknown[]) {\n"
+                    "    return rows.length ? rows : DEFAULT_SERVICES;\n"
+                    "}\n"
+                ),
+            },
+            "feat: add mock fallback in production repository",
+        )
+        res_fail = self.gate.check_mock_fallbacks("HEAD~1")
+        self.assertFalse(res_fail.passed)
+        self.assertIn("src/lib/services/repository.ts", "\n".join(res_fail.details))
+
+        # 2. Pass when clean in production, while ignoring test files and comment lines
+        self._write_and_commit(
+            {
+                "src/lib/services/repository.ts": (
+                    "// removed DEFAULT_SERVICES and MOCK_ITEMS fallback\n"
+                    "export function getServices(rows: unknown[]) {\n"
+                    "    return rows;\n"
+                    "}\n"
+                ),
+                "tests/unit/foo.test.ts": "const DEFAULT_SERVICES = [{ id: '1' }];\n",
+                "src/lib/foo.test.ts": "const MOCK_ITEMS = [{ id: '2' }];\n",
+            },
+            "fix: remove production mock fallback and keep test fixtures",
+        )
+        res_pass = self.gate.check_mock_fallbacks("HEAD~1")
+        self.assertTrue(res_pass.passed, msg=str(res_pass))
+
+    def test_check_type_escapes_gate(self) -> None:
+        self.assertTrue(
+            hasattr(self.gate, "check_type_escapes"),
+            "EdgeVerificationGate must define check_type_escapes",
+        )
+        self._write_and_commit({"README.md": "# Init\n"}, "chore: init")
+
+        # 1. Fail when changed production .ts/.tsx contains as any, as unknown as, @ts-ignore, or @ts-expect-error
+        self._write_and_commit(
+            {
+                "src/actions/booking.ts": (
+                    "// @ts-ignore\n"
+                    "export function parseInput(x: unknown) {\n"
+                    "    const a = x as any;\n"
+                    "    const b = x as unknown as string;\n"
+                    "    return { a, b };\n"
+                    "}\n"
+                ),
+                "src/components/Card.tsx": (
+                    "// @ts-expect-error\n"
+                    "export function Card() { return <div />; }\n"
+                ),
+            },
+            "feat: introduce type escapes",
+        )
+        res_fail = self.gate.check_type_escapes("HEAD~1")
+        self.assertFalse(res_fail.passed)
+        joined = "\n".join(res_fail.details)
+        self.assertIn("src/actions/booking.ts", joined)
+        self.assertIn("src/components/Card.tsx", joined)
+
+        # 2. Pass when production .ts/.tsx files are clean
+        self._write_and_commit(
+            {
+                "src/actions/booking.ts": (
+                    "export function parseInput(x: string): string {\n"
+                    "    return x.trim();\n"
+                    "}\n"
+                ),
+                "src/components/Card.tsx": (
+                    "export function Card() { return <div />; }\n"
+                ),
+            },
+            "fix: remove type escapes",
+        )
+        res_pass = self.gate.check_type_escapes("HEAD~1")
+        self.assertTrue(res_pass.passed, msg=str(res_pass))
+
+    def test_check_dual_theme_and_a11y_gate(self) -> None:
+        self.assertTrue(
+            hasattr(self.gate, "check_dual_theme_and_a11y"),
+            "EdgeVerificationGate must define check_dual_theme_and_a11y",
+        )
+        self._write_and_commit({"README.md": "# Init\n"}, "chore: init")
+
+        # 1. Fail when changed .tsx file has bg-white without dark:bg- or icon X button without aria-label
+        self._write_and_commit(
+            {
+                "src/components/Modal.tsx": (
+                    "export function Modal({ close }: { close: () => void }) {\n"
+                    "    return (\n"
+                    '        <div className="p-4 bg-white rounded">\n'
+                    '            <button onClick={close}><X className="w-4 h-4" /></button>\n'
+                    "        </div>\n"
+                    "    );\n"
+                    "}\n"
+                )
+            },
+            "feat: modal missing dark bg and aria-label",
+        )
+        res_fail = self.gate.check_dual_theme_and_a11y("HEAD~1")
+        self.assertFalse(res_fail.passed)
+        self.assertIn("src/components/Modal.tsx", "\n".join(res_fail.details))
+
+        # 2. Pass when dark:bg- and aria-label are provided
+        self._write_and_commit(
+            {
+                "src/components/Modal.tsx": (
+                    "export function Modal({ close }: { close: () => void }) {\n"
+                    "    return (\n"
+                    '        <div className="p-4 bg-white dark:bg-zinc-900 rounded">\n'
+                    '            <button aria-label="Kapat" onClick={close}><X className="w-4 h-4" /></button>\n'
+                    "        </div>\n"
+                    "    );\n"
+                    "}\n"
+                )
+            },
+            "fix: add dark:bg-zinc-900 and aria-label to modal",
+        )
+        res_pass = self.gate.check_dual_theme_and_a11y("HEAD~1")
+        self.assertTrue(res_pass.passed, msg=str(res_pass))
+
+
 if __name__ == "__main__":
     unittest.main()

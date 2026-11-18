@@ -1623,6 +1623,86 @@ class TestPersonaCompletenessAndLineBudget(unittest.TestCase):
             "skills/edge-orchestrator/SKILL.md must mention forking from spec_writer/researcher",
         )
 
+    def test_omission_audit_rubric_gates_across_all_stations(self):
+        agents_dir = self.repo_root / "agents"
+        forbidden_tokens = ("modaldialog", "radix", "shadcn", "daisyui")
+
+        for p_path in agents_dir.glob("*.md"):
+            text = p_path.read_text(encoding="utf-8")
+            lines = text.splitlines()
+            self.assertLessEqual(
+                len(lines),
+                60,
+                f"Persona {p_path.name} exceeds 60-line budget: {len(lines)} lines",
+            )
+            lowered = text.lower()
+            for tok in forbidden_tokens:
+                self.assertNotIn(tok, lowered, f"{p_path.name} contains forbidden token '{tok}'")
+
+        # 1. agents/spec-writer.md
+        sw_text = (agents_dir / "spec-writer.md").read_text(encoding="utf-8")
+        sw_lower = sw_text.lower()
+        for tok in ("200", "value sourcing", "pagination", "idempotency", "abac", "4-state", "force-dynamic"):
+            self.assertIn(tok, sw_lower, f"agents/spec-writer.md missing required rubric token '{tok}'")
+        self.assertTrue(
+            "DEFAULT_" in sw_text or "MOCK_" in sw_text,
+            "agents/spec-writer.md must contain 'DEFAULT_' or 'MOCK_'",
+        )
+
+        # 2. agents/spec-critic.md
+        sc_lower = (agents_dir / "spec-critic.md").read_text(encoding="utf-8").lower()
+        for tok in ("pagination", "idempotency", "abac", "rollback", "mock"):
+            self.assertIn(tok, sc_lower, f"agents/spec-critic.md missing required rubric token '{tok}'")
+
+        # 3. agents/seam-architect.md
+        sa_lower = (agents_dir / "seam-architect.md").read_text(encoding="utf-8").lower()
+        for tok in ("idempotency", "pagination", "abac", "rollback", "revalidatepath"):
+            self.assertIn(tok, sa_lower, f"agents/seam-architect.md missing required rubric token '{tok}'")
+
+        # 4. agents/coder.md
+        cd_text = (agents_dir / "coder.md").read_text(encoding="utf-8")
+        cd_lower = cd_text.lower()
+        self.assertIn("disabled={isPending}", cd_text, "agents/coder.md missing 'disabled={isPending}'")
+        self.assertIn("rollback", cd_lower, "agents/coder.md missing 'rollback'")
+        self.assertTrue(
+            "DEFAULT_" in cd_text or "MOCK_" in cd_text,
+            "agents/coder.md must contain 'DEFAULT_' or 'MOCK_'",
+        )
+        for tok in ("force-dynamic", "dark:", "aria-label"):
+            self.assertIn(tok, cd_lower, f"agents/coder.md missing '{tok}'")
+
+        # 5. agents/surgeon.md
+        sg_text = (agents_dir / "surgeon.md").read_text(encoding="utf-8")
+        sg_lower = sg_text.lower()
+        self.assertIn("disabled={isPending}", sg_text, "agents/surgeon.md missing 'disabled={isPending}'")
+        self.assertIn("rollback", sg_lower, "agents/surgeon.md missing 'rollback'")
+        self.assertTrue(
+            "DEFAULT_" in sg_text or "MOCK_" in sg_text,
+            "agents/surgeon.md must contain 'DEFAULT_' or 'MOCK_'",
+        )
+        for tok in ("force-dynamic", "dark:", "aria-label"):
+            self.assertIn(tok, sg_lower, f"agents/surgeon.md missing '{tok}'")
+
+        # 6. agents/examiner.md
+        ex_lower = (agents_dir / "examiner.md").read_text(encoding="utf-8").lower()
+        for tok in ("pagination", "idempotency", "abac", "rollback", "bg-white", "aria-label"):
+            self.assertIn(tok, ex_lower, f"agents/examiner.md missing required rubric token '{tok}'")
+
+        # 7. agents/qa-engineer.md
+        qa_lower = (agents_dir / "qa-engineer.md").read_text(encoding="utf-8").lower()
+        for tok in ("double-submit", "reload", "pagination", "4-state", "dark"):
+            self.assertIn(tok, qa_lower, f"agents/qa-engineer.md missing required rubric token '{tok}'")
+
+        # 8. agents/researcher.md
+        rs_text = (agents_dir / "researcher.md").read_text(encoding="utf-8")
+        rs_lower = rs_text.lower()
+        for tok in ("pagination", "abac", "idempotency"):
+            self.assertIn(tok, rs_lower, f"agents/researcher.md missing required rubric token '{tok}'")
+        self.assertTrue(
+            "DEFAULT_" in rs_text or "MOCK_" in rs_text,
+            "agents/researcher.md must contain 'DEFAULT_' or 'MOCK_'",
+        )
+
 
 class TestBrigadePromptCLI(unittest.TestCase):
     def setUp(self):

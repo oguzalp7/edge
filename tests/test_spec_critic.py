@@ -58,11 +58,11 @@ def test_primary_model_succeeds(tmp_path: Path):
         assert result.error is None
         assert mock_run.call_count == 1
 
-        # Check command args: agy --mode plan --model <model> -p <prompt>
+        # Check command args: agy --model <model> -p <prompt>
         cmd = mock_run.call_args[0][0]
-        assert len(cmd) == 7
+        assert len(cmd) == 5
         assert cmd[0] == "agy"
-        assert cmd[1:6] == ["--mode", "plan", "--model", "claude-opus-5-5-high", "-p"]
+        assert cmd[1:4] == ["--model", "claude-opus-5-5-high", "-p"]
         prompt_arg = cmd[-1]
         assert "slice-auth.md" in prompt_arg
         assert "# Slice Auth Specification" in prompt_arg
@@ -119,11 +119,13 @@ def test_primary_quota_error_triggers_fallback_success(tmp_path: Path):
 
         # Check call 1 was primary, call 2 was fallback
         call_1_cmd = mock_run.call_args_list[0][0][0]
-        assert call_1_cmd[1:6] == ["--mode", "plan", "--model", "claude-opus-5-5-high", "-p"]
+        assert len(call_1_cmd) == 5
+        assert call_1_cmd[1:4] == ["--model", "claude-opus-5-5-high", "-p"]
         assert "slice-booking.md" in call_1_cmd[-1]
 
         call_2_cmd = mock_run.call_args_list[1][0][0]
-        assert call_2_cmd[1:6] == ["--mode", "plan", "--model", "gemini-3.8-flash-high", "-p"]
+        assert len(call_2_cmd) == 5
+        assert call_2_cmd[1:4] == ["--model", "gemini-3.8-flash-high", "-p"]
         assert "slice-booking.md" in call_2_cmd[-1]
 
         # Check persisted report
@@ -253,6 +255,62 @@ def test_should_fallback_matrix():
     # Quota error in stdout
     assert _should_fallback(0, "Error: 429 quota exhausted", "") is True
     assert _should_fallback(0, "Fatal error: model unavailable", "") is True
+
+    # Planning mode CLI trap in stdout
+    assert _should_fallback(0, "Planning mode is on, but your request was only '-'", "") is True
+    assert (
+        _should_fallback(
+            0,
+            "Planning mode is on, but your message ends at '-' and doesn't say what you want planned.",
+            "",
+        )
+        is True
+    )
+
+
+def test_planning_mode_trap_stdout_triggers_fallback_and_prevents_corrupt_report(tmp_path: Path):
+    """
+    Verifies that when primary returns exit code 0 with the 'Planning mode is on, ...' trap message:
+    1. run_spec_critique triggers fallback to FALLBACK_CRITIC_MODEL.
+    2. If fallback ALSO returns the 'Planning mode is on, ...' trap message, run_spec_critique
+       returns result.success is False and does NOT write a corrupt critique file to disk.
+    """
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    spec_file = repo_dir / "slice-trap.md"
+    spec_file.write_text("# Slice Trap Specification", encoding="utf-8")
+
+    trap_msg = "Planning mode is on, but your request was only '-'"
+
+    # Case 1: Primary hits trap, fallback succeeds with valid critique
+    with patch("tools.brigade.spec_critic.run_command") as mock_run:
+        mock_run.side_effect = [
+            (0, trap_msg, ""),
+            (0, "## 1. Paraphrase Check\nFallback succeeded after planning mode trap.", ""),
+        ]
+        res_ok = run_spec_critique(repo_dir, spec_file)
+        assert res_ok.success is True
+        assert res_ok.fallback_triggered is True
+        assert res_ok.model_used == FALLBACK_CRITIC_MODEL
+        assert mock_run.call_count == 2
+
+    # Clean up report before Case 2
+    report_file = repo_dir / ".edge" / "specs" / "slice-trap-critique.md"
+    if report_file.exists():
+        report_file.unlink()
+
+    # Case 2: Both primary and fallback return the planning mode trap message
+    with patch("tools.brigade.spec_critic.run_command") as mock_run:
+        mock_run.side_effect = [
+            (0, trap_msg, ""),
+            (0, trap_msg, ""),
+        ]
+        result = run_spec_critique(repo_dir, spec_file)
+        assert result.success is False
+        assert result.fallback_triggered is True
+        assert result.report_path == ""
+        assert not report_file.exists(), "Corrupt planning-mode trap stdout must NOT be persisted to disk"
+        assert mock_run.call_count == 2
 
 
 def test_build_spec_critic_prompt():

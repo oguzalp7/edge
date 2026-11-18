@@ -248,6 +248,57 @@ class TestBrigadeGuard(unittest.TestCase):
             res = guard.handle_pre_tool(payload_allow)
             self.assertEqual(res["decision"], "allow")
 
+    def test_spec_writer_allowed_root_constitution_files_and_denied_code(self):
+        allowed_targets = [
+            "coding_standards.md",
+            "AGENTS.md",
+            "program_system_instructions.md",
+            "CONTEXT.md",
+            "/home/oguz/MS-Randevu-monolith/coding_standards.md",
+            "/home/oguz/MS-Randevu-monolith/AGENTS.md",
+            "/home/oguz/MS-Randevu-monolith/program_system_instructions.md",
+            "/home/oguz/MS-Randevu-monolith/CONTEXT.md",
+        ]
+        for target in allowed_targets:
+            for tool_name in ("write_file", "edit_file"):
+                payload = {
+                    "conversationId": "spec-w-root",
+                    "toolCall": {
+                        "name": tool_name,
+                        "args": {"Path": target},
+                    },
+                }
+                with patch.object(guard, "detect_session_role", return_value=("SPEC_WRITER", "test")):
+                    res = guard.handle_pre_tool(payload)
+                    self.assertEqual(
+                        res["decision"],
+                        "allow",
+                        f"SPEC_WRITER should be allowed to {tool_name} root constitution file '{target}', got: {res}",
+                    )
+
+        denied_targets = [
+            "src/coding_standards.md",
+            "tests/AGENTS.md",
+            "/home/oguz/MS-Randevu-monolith/src/actions/booking.ts",
+            "tests/unit/foo.test.ts",
+        ]
+        for target in denied_targets:
+            for tool_name in ("write_file", "edit_file"):
+                payload = {
+                    "conversationId": "spec-w-root",
+                    "toolCall": {
+                        "name": tool_name,
+                        "args": {"Path": target},
+                    },
+                }
+                with patch.object(guard, "detect_session_role", return_value=("SPEC_WRITER", "test")):
+                    res = guard.handle_pre_tool(payload)
+                    self.assertEqual(
+                        res["decision"],
+                        "deny",
+                        f"SPEC_WRITER must be denied from {tool_name} on '{target}', got: {res}",
+                    )
+
     def test_seam_architect_boundary(self):
         # Denied in src/ implementation
         payload_deny = {
