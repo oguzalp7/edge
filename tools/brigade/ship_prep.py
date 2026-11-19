@@ -10,6 +10,7 @@ from dataclasses import dataclass, asdict, field
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
+from urllib.parse import urlparse
 import json
 import os
 import re
@@ -32,6 +33,7 @@ BOLD_TERM_RE = re.compile(r"\*\*([^*]+)\*\*")
 _MERMAID_BLOCK_RE = re.compile(r"```mermaid\s*\n(.*?)```", re.DOTALL)
 _TABLE_SEP_RE = re.compile(r"^\|[\s:\-|]+\|$")
 _TICKET_RE = re.compile(r"\b(TICK-[A-Z0-9][A-Z0-9-]*)\b")
+_URL_USERINFO_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)([^\s/@'\"]+@)")
 _REPO_PREFIXES: Tuple[str, ...] = (
     "src/", "tools/", "skills/", "agents/", "rules/",
     "tests/", "scripts/", "specs/", "public/", "drizzle/", "prisma/",
@@ -1711,16 +1713,33 @@ def create_split_branches(
     return True, created, ""
 
 
-def parse_github_owner_repo(remote_url: str) -> Optional[Tuple[str, str]]:
-    """Extracts (owner, repo) from SSH or HTTPS GitHub remote URLs."""
-    raw = (remote_url or "").strip()
-    m = re.match(
-        r"^(?:https?://github\.com/|ssh://git@github\.com/|git@github\.com:)([^/]+)/([^/]+?)(?:\.git)?/?$",
-        raw,
-    )
-    if not m:
+def _redact_url_credentials(text: str) -> str:
+    """Masks userinfo credentials inside URL strings with '<redacted>@'."""
+    return _URL_USERINFO_RE.sub(r"\1<redacted>@", text or "")
+
+
+def _extract_github_path_pair(path: str) -> Optional[Tuple[str, str]]:
+    cleaned = path.strip().strip("/")
+    if cleaned.endswith(".git"):
+        cleaned = cleaned[:-4]
+    parts = [p for p in cleaned.split("/") if p]
+    if len(parts) != 2:
         return None
-    return m.group(1), m.group(2)
+    return parts[0], parts[1]
+
+
+def parse_github_owner_repo(remote_url: str) -> Optional[Tuple[str, str]]:
+    """Extracts (owner, repo) from SSH, SCP, or HTTPS GitHub remote URLs (including userinfo)."""
+    raw = (remote_url or "").strip()
+    if not raw:
+        return None
+    scp_match = re.match(r"^[^\s/@:]+@github\.com:(.+)$", raw)
+    if scp_match:
+        return _extract_github_path_pair(scp_match.group(1))
+    parsed = urlparse(raw)
+    if parsed.scheme not in ("http", "https", "ssh") or (parsed.hostname or "").lower() != "github.com":
+        return None
+    return _extract_github_path_pair(parsed.path)
 
 
 def _run_git_with_env(repo: Path, args: List[str], env: Dict[str, str]) -> Tuple[int, str, str]:
@@ -1793,14 +1812,14 @@ def _stage_evidence_blobs(
     for _, resolved, stage_path in shots:
         h_code, blob_sha, h_err = run_command(["git", "hash-object", "-w", "--", str(resolved)], cwd=repo)
         if h_code != 0:
-            return False, f"Failed to hash screenshot '{resolved}': {h_err}"
+            return False, f"Failed to hash screenshot '{resolved}': {_redact_url_credentials(h_err)}"
         u_code, _, u_err = _run_git_with_env(
             repo,
             ["update-index", "--add", "--cacheinfo", f"100644,{blob_sha.strip()},{stage_path}"],
             env,
         )
         if u_code != 0:
-            return False, f"Failed to stage evidence '{stage_path}': {u_err}"
+            return False, f"Failed to stage evidence '{stage_path}': {_redact_url_credentials(u_err)}"
     return True, ""
 
 
@@ -1813,29 +1832,30 @@ def _commit_and_push_evidence(
 ) -> Tuple[bool, str, str]:
     w_code, tree_sha, w_err = _run_git_with_env(repo, ["write-tree"], env)
     if w_code != 0:
-        return False, "", f"Failed to write evidence tree: {w_err}"
+        return False, "", f"Failed to write evidence tree: {_redact_url_credentials(w_err)}"
     args = ["commit-tree", tree_sha.strip()]
     if parent_sha:
         args.extend(["-p", parent_sha])
     args.extend(["-m", f"chore(qa-evidence): publish {', '.join(slugs)}"])
     c_code, c_sha, c_err = run_command(["git", *args], cwd=repo)
     if c_code != 0:
-        return False, "", f"Failed to commit evidence tree: {c_err}"
+        return False, "", f"Failed to commit evidence tree: {_redact_url_credentials(c_err)}"
     commit_sha = c_sha.strip()
     run_command(["git", "update-ref", f"refs/heads/{evidence_branch}", commit_sha], cwd=repo)
     p_code, _, p_err = run_command(["git", "push", "origin", f"refs/heads/{evidence_branch}"], cwd=repo)
     if p_code != 0:
-        return False, commit_sha, f"Failed to push '{evidence_branch}' to origin: {p_err}"
+        return False, commit_sha, f"Failed to push '{evidence_branch}' to origin: {_redact_url_credentials(p_err)}"
     return True, commit_sha, ""
 
 
 def _resolve_github_target(repo: Path) -> Tuple[bool, str, str, str]:
     r_code, remote_url, r_err = run_command(["git", "remote", "get-url", "origin"], cwd=repo)
     if r_code != 0 or not remote_url.strip():
-        return False, "", "", f"Cannot publish evidence: missing git remote 'origin' ({r_err})."
+        return False, "", "", f"Cannot publish evidence: missing git remote 'origin' ({_redact_url_credentials(r_err)})."
     parsed = parse_github_owner_repo(remote_url.strip())
     if not parsed:
-        return False, "", "", f"Cannot publish evidence: origin remote '{remote_url.strip()}' is not GitHub."
+        masked = _redact_url_credentials(remote_url.strip())
+        return False, "", "", f"Cannot publish evidence: origin remote '{masked}' is not GitHub."
     return True, parsed[0], parsed[1], ""
 
 
