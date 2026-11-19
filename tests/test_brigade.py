@@ -4905,6 +4905,286 @@ class TestEvidenceFirstReviewAndShipBridge(unittest.TestCase):
             self.fail(f"CLI 'prepare-ship' should return 1 cleanly instead of raising SystemExit: {exc}")
         self.assertEqual(ret_bad, 1)
 
+    # ------------------------------------------------------------------
+    # Spec-Anchored PR & Multi-Spec Ship Bridge (4-Pillar Hardening)
+    # ------------------------------------------------------------------
+
+    def test_ship_prep_excludes_critique_files_and_aggregates_multiple_specs_with_mermaid(self):
+        ship_prep = importlib.import_module("tools.brigade.ship_prep")
+        self.assertTrue(
+            hasattr(ship_prep, "parse_spec_document"),
+            "tools.brigade.ship_prep must export parse_spec_document",
+        )
+
+        repo_dir = Path(tempfile.mkdtemp(dir=self.test_dir))
+
+        def git(*git_args):
+            proc = subprocess.run(
+                ["git", *git_args],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            return proc.stdout.strip()
+
+        git("init", "-b", "staging")
+        git("config", "user.email", "brigade@example.com")
+        git("config", "user.name", "Edge Brigade")
+
+        (repo_dir / "README.md").write_text("# Base Repo\n", encoding="utf-8")
+        git("add", "-A")
+        git("commit", "-m", "chore: initial staging")
+
+        git("checkout", "-b", "development")
+
+        arch_dir = repo_dir / ".edge" / "archive" / "specs"
+        arch_dir.mkdir(parents=True, exist_ok=True)
+        specs_dir = repo_dir / ".edge" / "specs"
+        specs_dir.mkdir(parents=True, exist_ok=True)
+
+        (arch_dir / "slice-alpha.md").write_text(
+            "# Alpha Booking Flow\n\n"
+            "Summary: Enables multi-step customer appointment booking with slot reservation.\n\n"
+            "```mermaid\n"
+            "stateDiagram-v2\n"
+            "    Idle --> Booked\n"
+            "```\n\n"
+            "| ID | Scenario | Expected |\n"
+            "| :--- | :--- | :--- |\n"
+            "| SC-1 | Reserve slot | State transitions Idle -> Booked |\n",
+            encoding="utf-8",
+        )
+
+        (arch_dir / "slice-beta.md").write_text(
+            "# Beta Payment Refund\n\n"
+            "Summary: Processes automated refund reversal on cancelled bookings.\n\n"
+            "```mermaid\n"
+            "flowchart LR\n"
+            "    Paid --> Refunded\n"
+            "```\n",
+            encoding="utf-8",
+        )
+
+        # Critique artifact that MUST NEVER be linked as a spec
+        (specs_dir / "slice-alpha-critique.md").write_text(
+            "# Spec Critique: slice-alpha.md\n\n- **Model:** claude-opus-5-5-high\n\n## 1. Paraphrase Check\nAdvisory critique.\n",
+            encoding="utf-8",
+        )
+
+        (repo_dir / "src" / "bookings").mkdir(parents=True, exist_ok=True)
+        (repo_dir / "src" / "bookings" / "alpha.ts").write_text("export const alpha = true;\n", encoding="utf-8")
+        (repo_dir / "src" / "payments").mkdir(parents=True, exist_ok=True)
+        (repo_dir / "src" / "payments" / "beta.ts").write_text("export const beta = true;\n", encoding="utf-8")
+
+        git("add", "-A")
+        git("commit", "-m", "feat: deliver slice-alpha and slice-beta on development")
+
+        ok, result, err = ship_prep.prepare_ship_payload(repo_dir, base_branch="staging")
+        self.assertTrue(ok, f"prepare_ship_payload should succeed: {err}")
+
+        # 1. Critique file must NEVER appear in specs_linked, pr_body, or intent
+        self.assertTrue(
+            all("critique" not in s.lower() for s in result.specs_linked),
+            f"Critique files must be excluded from specs_linked: {result.specs_linked}",
+        )
+        self.assertNotIn("slice-alpha-critique.md", result.pr_body)
+        self.assertNotIn("slice-alpha-critique.md", result.intent)
+
+        # 2. Both archived specs must be discovered even when branch is 'development'
+        self.assertIn(".edge/archive/specs/slice-alpha.md", result.specs_linked)
+        self.assertIn(".edge/archive/specs/slice-beta.md", result.specs_linked)
+        self.assertTrue(
+            hasattr(result, "spec_digests"),
+            "ShipPrepResult must include spec_digests field",
+        )
+        digest_paths = [
+            (d.path if hasattr(d, "path") else d.get("path", ""))
+            for d in result.spec_digests
+        ]
+        self.assertIn(".edge/archive/specs/slice-alpha.md", digest_paths)
+        self.assertIn(".edge/archive/specs/slice-beta.md", digest_paths)
+
+        # 3. Intent must include BOTH specs so multi-slice milestones never drop scopes
+        intent_low = result.intent.lower()
+        self.assertTrue(
+            "alpha booking flow" in intent_low or "slice-alpha" in intent_low,
+            f"Intent missing alpha spec scope: {result.intent}",
+        )
+        self.assertTrue(
+            "beta payment refund" in intent_low or "slice-beta" in intent_low,
+            f"Intent missing beta spec scope: {result.intent}",
+        )
+
+        # 4. PR body embeds Mermaid blocks and spec titles directly
+        self.assertIn("Alpha Booking Flow", result.pr_body)
+        self.assertIn("Beta Payment Refund", result.pr_body)
+        self.assertIn("stateDiagram-v2", result.pr_body)
+        self.assertIn("Idle --> Booked", result.pr_body)
+        self.assertIn("flowchart LR", result.pr_body)
+        self.assertIn("Paid --> Refunded", result.pr_body)
+
+    def test_finish_slice_pr_mode_auto_merges_two_way_door_and_holds_one_way_door(self):
+        import inspect
+
+        sig = inspect.signature(self.fsm.finish_slice)
+        self.assertIn("open_pr", sig.parameters, "BrigadeFSM.finish_slice must accept open_pr: bool = False")
+        self.assertIn(
+            "auto_merge_two_way",
+            sig.parameters,
+            "BrigadeFSM.finish_slice must accept auto_merge_two_way: bool = True",
+        )
+        self.assertIs(sig.parameters["open_pr"].default, False)
+        self.assertIs(sig.parameters["auto_merge_two_way"].default, True)
+
+        # Verify CLI finish-slice parser accepts --pr and --no-auto-merge
+        with patch.object(
+            BrigadeFSM,
+            "finish_slice",
+            return_value=(True, "PR merged"),
+        ) as mock_finish:
+            with patch.object(
+                sys,
+                "argv",
+                ["brigade", "finish-slice", str(self.repo_path), "--pr", "--no-auto-merge"],
+            ):
+                rc = brigade_cli.main()
+            self.assertEqual(rc, 0)
+            mock_finish.assert_called_once_with(open_pr=True, auto_merge_two_way=False)
+
+        # Set up git marker and spec for PR body synthesis
+        (self.repo_path / ".git").mkdir(parents=True, exist_ok=True)
+        specs_dir = self.repo_path / ".edge" / "specs"
+        specs_dir.mkdir(parents=True, exist_ok=True)
+        (specs_dir / "button-ui.md").write_text(
+            "# Button UI Slice\n\n```mermaid\nflowchart LR\n    Click --> Submit\n```\n",
+            encoding="utf-8",
+        )
+
+        # --- Case A: Two-Way Door (src/components/Button.tsx) -> PR opened + auto-merged via gh pr merge ---
+        ticket_two_way = self._make_ticket(
+            ticket_id="TICK-FEAT-BUTTON-UI",
+            domain="ui",
+            target_file="src/components/Button.tsx",
+            branch_name="feat/button-ui",
+            spec_path=".edge/specs/button-ui.md",
+        )
+        self.fsm.state.base_branch = "development"
+        self.fsm.state.active_ticket = ticket_two_way
+        self.fsm.state.active_branch = "feat/button-ui"
+        self.fsm.state.current_state = CycleState.STAGING
+
+        two_way_cmds: List[List[str]] = []
+
+        def run_cmd_two_way(cmd, cwd=None, timeout=120):
+            cmd_list = [str(c) for c in cmd] if isinstance(cmd, (list, tuple)) else str(cmd).split()
+            two_way_cmds.append(cmd_list)
+            joined = " ".join(cmd_list)
+            if "status" in cmd_list and "--porcelain" in cmd_list:
+                return (0, "", "")
+            if "branch" in cmd_list and "--show-current" in cmd_list:
+                return (0, "development\n", "")
+            if "rev-parse" in cmd_list and "--verify" in cmd_list:
+                return (0, "abc1234\n", "")
+            if "diff" in cmd_list and "--name-only" in cmd_list:
+                return (0, "src/components/Button.tsx\n", "")
+            if "diff" in cmd_list and "--stat" in cmd_list:
+                return (0, "1 file changed, 10 insertions(+)\n", "")
+            if "gh" in cmd_list and "pr" in cmd_list and "create" in cmd_list:
+                return (0, "https://github.com/org/repo/pull/42\n", "")
+            if "gh" in cmd_list and "pr" in cmd_list and "merge" in cmd_list:
+                return (0, "Merged pull request #42\n", "")
+            return (0, "", "")
+
+        with (
+            patch("tools.brigade.fsm.run_command", side_effect=run_cmd_two_way),
+            patch("tools.brigade.ship_prep.run_command", side_effect=run_cmd_two_way),
+            patch("tools.brigade.fsm.return_worktree", return_value=(True, "returned")),
+        ):
+            ok_a, msg_a = self.fsm.finish_slice(open_pr=True, auto_merge_two_way=True)
+
+        self.assertTrue(ok_a, f"Two-way door finish_slice(open_pr=True) should succeed: {msg_a}")
+        pr_create_calls_a = [c for c in two_way_cmds if "gh" in c and "pr" in c and "create" in c]
+        pr_merge_calls_a = [c for c in two_way_cmds if "gh" in c and "pr" in c and "merge" in c]
+        self.assertTrue(pr_create_calls_a, f"Expected gh pr create call for Two-Way Door, got: {two_way_cmds}")
+        self.assertTrue(pr_merge_calls_a, f"Expected gh pr merge call for Two-Way Door, got: {two_way_cmds}")
+        create_args_str_a = " ".join(pr_create_calls_a[0])
+        self.assertIn("[TWO-WAY DOOR]", create_args_str_a.upper())
+
+        # --- Case B: One-Way Door (src/db/migrations/0005_add_col.sql) -> PR opened with [ONE-WAY DOOR], NOT auto-merged ---
+        (specs_dir / "db-mig.md").write_text(
+            "# DB Migration Slice\n\n```mermaid\nstateDiagram-v2\n    V1 --> V2\n```\n",
+            encoding="utf-8",
+        )
+        ticket_one_way = self._make_ticket(
+            ticket_id="TICK-FEAT-DB-MIG",
+            domain="db",
+            target_file="src/db/migrations/0005_add_col.sql",
+            branch_name="feat/db-mig",
+            spec_path=".edge/specs/db-mig.md",
+        )
+        self.fsm.state.active_ticket = ticket_one_way
+        self.fsm.state.active_branch = "feat/db-mig"
+        self.fsm.state.current_state = CycleState.STAGING
+
+        one_way_cmds: List[List[str]] = []
+
+        def run_cmd_one_way(cmd, cwd=None, timeout=120):
+            cmd_list = [str(c) for c in cmd] if isinstance(cmd, (list, tuple)) else str(cmd).split()
+            one_way_cmds.append(cmd_list)
+            if "status" in cmd_list and "--porcelain" in cmd_list:
+                return (0, "", "")
+            if "branch" in cmd_list and "--show-current" in cmd_list:
+                return (0, "development\n", "")
+            if "rev-parse" in cmd_list and "--verify" in cmd_list:
+                return (0, "abc1234\n", "")
+            if "diff" in cmd_list and "--name-only" in cmd_list:
+                return (0, "src/db/migrations/0005_add_col.sql\nsrc/db/schema/bookings.ts\n", "")
+            if "diff" in cmd_list and "--stat" in cmd_list:
+                return (0, "2 files changed, 25 insertions(+)\n", "")
+            if "gh" in cmd_list and "pr" in cmd_list and "create" in cmd_list:
+                return (0, "https://github.com/org/repo/pull/43\n", "")
+            if "gh" in cmd_list and "pr" in cmd_list and "merge" in cmd_list:
+                return (0, "Merged pull request #43\n", "")
+            return (0, "", "")
+
+        with (
+            patch("tools.brigade.fsm.run_command", side_effect=run_cmd_one_way),
+            patch("tools.brigade.ship_prep.run_command", side_effect=run_cmd_one_way),
+            patch("tools.brigade.fsm.return_worktree", return_value=(True, "returned")),
+        ):
+            ok_b, msg_b = self.fsm.finish_slice(open_pr=True, auto_merge_two_way=True)
+
+        pr_create_calls_b = [c for c in one_way_cmds if "gh" in c and "pr" in c and "create" in c]
+        pr_merge_calls_b = [c for c in one_way_cmds if "gh" in c and "pr" in c and "merge" in c]
+        self.assertTrue(pr_create_calls_b, f"Expected gh pr create call for One-Way Door, got: {one_way_cmds}")
+        self.assertEqual(len(pr_merge_calls_b), 0, "One-Way Door PR must NEVER call gh pr merge automatically!")
+        create_args_str_b = " ".join(pr_create_calls_b[0])
+        self.assertIn("[ONE-WAY DOOR]", create_args_str_b.upper())
+        self.assertIn("one-way door", msg_b.lower())
+        self.assertTrue(
+            "human review" in msg_b.lower() or "held open" in msg_b.lower() or "manual" in msg_b.lower(),
+            f"Expected One-Way Door hold diagnostic in message, got: {msg_b}",
+        )
+
+    def test_spec_writer_and_qa_engineer_rubrics_document_mermaid_workflow_alignment_within_budget(self):
+        spec_writer_path = self.repo_root / "agents" / "spec-writer.md"
+        qa_engineer_path = self.repo_root / "agents" / "qa-engineer.md"
+
+        sw_text = spec_writer_path.read_text(encoding="utf-8")
+        sw_lines = sw_text.splitlines()
+        self.assertLessEqual(len(sw_lines), 60, f"agents/spec-writer.md exceeded 60 lines ({len(sw_lines)})")
+        self.assertIn("mermaid", sw_text.lower(), "agents/spec-writer.md must require a mermaid workflow/state diagram")
+        self.assertTrue(
+            "flowchart" in sw_text.lower() or "statediagram" in sw_text.lower(),
+            "agents/spec-writer.md must reference flowchart or stateDiagram-v2",
+        )
+
+        qa_text = qa_engineer_path.read_text(encoding="utf-8")
+        qa_lines = qa_text.splitlines()
+        self.assertLessEqual(len(qa_lines), 60, f"agents/qa-engineer.md exceeded 60 lines ({len(qa_lines)})")
+        self.assertIn("mermaid", qa_text.lower(), "agents/qa-engineer.md must reference following the spec's mermaid workflow")
+
 
 if __name__ == "__main__":
     unittest.main()
