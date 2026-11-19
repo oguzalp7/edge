@@ -5,7 +5,7 @@ archived specs, ProofVerifier-validated QA receipts, ExaminerReceipt, and
 One-way vs. Two-way Door / Blast Radius classification for `no-mistakes`.
 """
 
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 import json
@@ -24,6 +24,8 @@ from tools.common import normalize_target_path, run_command
 
 INDEX_TOKEN_RE = re.compile(r"(@route|@module|@spec|Page:|Action:|Schema:)\s+([^\s|]+)")
 BOLD_TERM_RE = re.compile(r"\*\*([^*]+)\*\*")
+_MERMAID_BLOCK_RE = re.compile(r"```mermaid\s*\n(.*?)```", re.DOTALL)
+_TABLE_SEP_RE = re.compile(r"^\|[\s:\-|]+\|$")
 
 
 @dataclass
@@ -31,6 +33,15 @@ class IndexChange:
     kind: str       # "@route" | "Page" | "@module" | "Action" | "Schema" | "@spec" | "other"
     symbol: str
     raw_line: str
+
+
+@dataclass
+class SpecDigest:
+    path: str
+    title: str
+    summary: str
+    mermaid_blocks: List[str] = field(default_factory=list)
+    matrix_rows: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -49,6 +60,7 @@ class ShipPrepResult:
     scenario_contract: List[str]
     pr_body: str
     show_me_body: str
+    spec_digests: List[SpecDigest] = field(default_factory=list)
 
 
 def _extract_tokens_from_line(line: str) -> List[IndexChange]:
@@ -177,6 +189,60 @@ def _read_context_terms(repo: Path, search_tokens: List[str]) -> List[str]:
     return (matched or terms)[:12]
 
 
+def _is_critique_spec(path_str: str) -> bool:
+    low = path_str.strip().lower()
+    return low.endswith("-critique.md") or low.endswith("_critique.md") or low.endswith(".critique.md")
+
+
+def _extract_spec_title_and_summary(lines: List[str], fallback_title: str) -> Tuple[str, str]:
+    title = fallback_title
+    summary_lines: List[str] = []
+    in_fence = False
+    for raw in lines:
+        s = raw.strip()
+        if s.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence or not s:
+            continue
+        if s.startswith("# ") and title == fallback_title:
+            title = s[2:].strip()
+            continue
+        if not s.startswith(("#", "|", "---", ">")) and len(summary_lines) < 2:
+            summary_lines.append(s)
+    return title, " ".join(summary_lines)
+
+
+def _extract_spec_matrix_rows(lines: List[str], limit: int = 7) -> List[str]:
+    rows: List[str] = []
+    for raw in lines:
+        s = raw.strip()
+        if s.startswith("|") and not _TABLE_SEP_RE.match(s):
+            rows.append(s)
+            if len(rows) >= limit:
+                break
+    return rows
+
+
+def parse_spec_document(spec_path: Path, rel_path: str = "") -> SpecDigest:
+    """Parses a Markdown specification into title, summary, Mermaid blocks, and matrix rows."""
+    eff_rel = rel_path or str(spec_path).replace("\\", "/")
+    if not spec_path.is_file():
+        return SpecDigest(path=eff_rel, title=spec_path.stem, summary="")
+    text = spec_path.read_text(encoding="utf-8", errors="ignore")
+    lines = text.splitlines()
+    title, summary = _extract_spec_title_and_summary(lines, spec_path.stem)
+    mermaids = [m.group(1).strip() for m in _MERMAID_BLOCK_RE.finditer(text) if m.group(1).strip()]
+    matrix = _extract_spec_matrix_rows(lines)
+    return SpecDigest(
+        path=eff_rel,
+        title=title,
+        summary=summary,
+        mermaid_blocks=mermaids,
+        matrix_rows=matrix,
+    )
+
+
 def _scan_spec_dir(repo: Path, sub: str, tokens: List[str], seen: List[str]) -> List[str]:
     sdir = repo / sub
     if not sdir.is_dir():
@@ -184,23 +250,53 @@ def _scan_spec_dir(repo: Path, sub: str, tokens: List[str], seen: List[str]) -> 
     found: List[str] = []
     for p in sorted(sdir.glob("*.md")):
         rel = f"{sub}/{p.name}"
-        if rel in seen:
+        if rel in seen or _is_critique_spec(p.name):
             continue
         if not tokens or any(tok in p.stem.lower() for tok in tokens):
             found.append(rel)
     return found
 
 
-def _collect_linked_specs(repo: Path, index_changes: List[IndexChange], branch: str, domains: List[str]) -> List[str]:
-    linked: List[str] = []
-    for ch in index_changes:
-        if ch.kind == "@spec" and ch.symbol not in linked:
-            linked.append(ch.symbol)
+def _is_changed_spec_path(norm_path: str) -> bool:
+    if not norm_path.lower().endswith(".md") or _is_critique_spec(norm_path):
+        return False
+    if norm_path.lower().endswith("index.md"):
+        return False
+    return norm_path.startswith((".edge/archive/specs/", ".edge/specs/", "specs/"))
 
+
+def _collect_diff_and_index_specs(
+    repo: Path,
+    changed_files: List[str],
+    index_changes: List[IndexChange],
+) -> List[str]:
+    linked: List[str] = []
+    for raw_f in changed_files:
+        norm_f = _norm_rel_path(raw_f)
+        if _is_changed_spec_path(norm_f) and (repo / norm_f).is_file():
+            if norm_f not in linked:
+                linked.append(norm_f)
+    for ch in index_changes:
+        if ch.kind == "@spec" and not _is_critique_spec(ch.symbol):
+            if ch.symbol not in linked:
+                linked.append(ch.symbol)
+    return linked
+
+
+def _collect_linked_specs(
+    repo: Path,
+    index_changes: List[IndexChange],
+    branch: str,
+    domains: List[str],
+    changed_files: Optional[List[str]] = None,
+) -> List[str]:
+    linked = _collect_diff_and_index_specs(repo, list(changed_files or []), index_changes)
     slug = branch.split("/")[-1].lower().replace("_", "-") if branch else ""
     tokens = [t for t in [slug, *domains] if t]
     for sub in (".edge/archive/specs", ".edge/specs"):
         linked.extend(_scan_spec_dir(repo, sub, tokens, linked))
+    if not linked:
+        linked.extend(_scan_spec_dir(repo, ".edge/archive/specs", [], linked))
     return linked
 
 
@@ -278,20 +374,37 @@ def _verify_all_proofs(
     return verified, failed
 
 
+def _resolve_intent_targets(
+    head_branch: str,
+    index_changes: List[IndexChange],
+    changed_files: List[str],
+) -> List[str]:
+    targets = [
+        f"{c.kind} {c.symbol}"
+        for c in index_changes
+        if c.kind in ("@route", "@module", "@spec") and not _is_critique_spec(c.symbol)
+    ][:4]
+    if targets:
+        return targets
+    clean_files = [f for f in changed_files if not _is_critique_spec(f)][:3]
+    return clean_files or [head_branch or "HEAD"]
+
+
 def _build_intent_str(
     head_branch: str,
     index_changes: List[IndexChange],
     verified_proofs: List[Dict[str, Any]],
     changed_files: List[str],
     door_type: str,
+    spec_digests: Optional[List[SpecDigest]] = None,
 ) -> str:
-    targets = [f"{c.kind} {c.symbol}" for c in index_changes if c.kind in ("@route", "@module", "@spec")][:4]
-    if not targets:
-        targets = changed_files[:3] or [head_branch or "HEAD"]
+    targets = _resolve_intent_targets(head_branch, index_changes, changed_files)
+    spec_items = [f"{Path(d.path).stem}: {d.title}" for d in (spec_digests or [])[:6]]
+    spec_part = f" | Specs: {'; '.join(spec_items)}" if spec_items else ""
     proof_slugs = [p["slug"] for p in verified_proofs]
     proof_part = f" | Verified QA proofs: {', '.join(proof_slugs)}" if proof_slugs else ""
     door_short = "One-way door" if door_type.startswith("One-way") else "Two-way door"
-    raw_intent = f"Deliver {head_branch or 'slice'} ({', '.join(targets)}){proof_part} [{door_short}]"
+    raw_intent = f"Deliver {head_branch or 'slice'} ({', '.join(targets)}){spec_part}{proof_part} [{door_short}]"
     return " ".join(raw_intent.split())
 
 
@@ -378,6 +491,19 @@ def _format_danger_section(door_type: str, blast_radius: Dict[str, Any]) -> List
     return lines
 
 
+def _format_spec_digests_section(spec_digests: List[SpecDigest]) -> List[str]:
+    if not spec_digests:
+        return []
+    lines = ["", "### Specification Architecture & Workflows"]
+    for digest in spec_digests:
+        lines.append(f"#### {digest.title} (`{digest.path}`)")
+        if digest.summary:
+            lines.append(f"- {digest.summary}")
+        for m_block in digest.mermaid_blocks:
+            lines.extend(["```mermaid", m_block, "```"])
+    return lines
+
+
 def _format_markdown_sections(
     head_branch: str,
     base_branch: str,
@@ -390,9 +516,11 @@ def _format_markdown_sections(
     failed_proofs: List[Dict[str, Any]],
     examiner_receipt: Optional[Dict[str, Any]],
     gate_status: str,
+    spec_digests: Optional[List[SpecDigest]] = None,
 ) -> str:
     lines = _format_summary_section(head_branch, base_branch, blast_radius, index_changes, context_terms)
     lines.extend(_format_evidence_section(specs_linked, verified_proofs, failed_proofs, examiner_receipt, gate_status))
+    lines.extend(_format_spec_digests_section(spec_digests or []))
     lines.extend(_format_danger_section(door_type, blast_radius))
     return "\n".join(lines)
 
@@ -451,16 +579,30 @@ def prepare_ship_payload(
     door_type, blast_radius = classify_merge_danger(changed_files, diff_stat)
     search_tokens = list(dict.fromkeys([*blast_radius.get("domains", []), *(c.symbol.lower() for c in index_changes)]))
     context_terms = _read_context_terms(repo, search_tokens)
-    specs_linked = _collect_linked_specs(repo, index_changes, head_branch, blast_radius.get("domains", []))
+    specs_linked = _collect_linked_specs(
+        repo,
+        index_changes,
+        head_branch,
+        blast_radius.get("domains", []),
+        changed_files=changed_files,
+    )
+    spec_digests = [
+        parse_spec_document(repo / rel, rel_path=rel)
+        for rel in specs_linked
+        if (repo / rel).is_file()
+    ]
 
     ticket, examiner_receipt, gate_status = _load_brigade_snapshot(repo)
     verified_proofs, failed_proofs = _verify_all_proofs(repo, ticket)
 
-    intent = _build_intent_str(head_branch, index_changes, verified_proofs, changed_files, door_type)
+    intent = _build_intent_str(
+        head_branch, index_changes, verified_proofs, changed_files, door_type, spec_digests=spec_digests
+    )
     scenario_contract = _build_scenario_contract(head_branch, index_changes, verified_proofs, examiner_receipt, changed_files)
     pr_body = _format_markdown_sections(
         head_branch, base_branch, door_type, blast_radius, index_changes,
         context_terms, specs_linked, verified_proofs, failed_proofs, examiner_receipt, gate_status,
+        spec_digests=spec_digests,
     )
     cmd_line = f"no-mistakes axi run --base-branch {shlex.quote(base_branch)} --intent {shlex.quote(intent)} -y"
     show_me_body = f"{pr_body}\n\n## Ship Command\n```bash\n{cmd_line}\n```"
@@ -480,6 +622,7 @@ def prepare_ship_payload(
         scenario_contract=scenario_contract,
         pr_body=pr_body,
         show_me_body=show_me_body,
+        spec_digests=spec_digests,
     )
 
     if failed_proofs:
@@ -506,6 +649,7 @@ def format_ship_output(result: ShipPrepResult, fmt: str = "pr") -> str:
             "index_changes": [asdict(c) for c in result.index_changes],
             "context_terms": result.context_terms,
             "specs": result.specs_linked,
+            "spec_digests": [asdict(d) for d in result.spec_digests],
             "verified_proofs": result.verified_proofs,
             "failed_proofs": result.failed_proofs,
             "examiner_receipt": result.examiner_receipt,

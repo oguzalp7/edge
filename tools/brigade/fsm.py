@@ -2086,14 +2086,72 @@ class BrigadeFSM:
 
         return True, ticket, f"Slice '{name}' initiated successfully.{worktree_msg} Branch: {branch_name} (State: {state_label})."
 
-    def finish_slice(self) -> Tuple[bool, str]:
+    def _is_ticket_one_way_door(self, ticket: Ticket, ship_door_type: str) -> bool:
+        if ship_door_type.startswith("One-way"):
+            return True
+        from .ship_prep import _is_one_way_door_path
+        paths = [ticket.target_file, *(getattr(ticket, "expected_files", None) or [])]
+        return any(_is_one_way_door_path(p) for p in paths if p)
+
+    def _reset_after_slice_finish(self, ticket: Ticket) -> None:
+        if ticket.worktree_path:
+            return_worktree(self.target_repo, ticket.worktree_path, force=False)
+        self._archive_ticket_spec(ticket)
+        self.state.active_ticket = None
+        self.state.active_branch = None
+        self.state.active_worktree = None
+        self.state.review_findings = []
+        self.state.examiner_receipt = None
+        self.state.blocked_reason = None
+        self._transition(CycleState.IDLE, f"Slice {ticket.ticket_id} finished and merged cleanly.")
+
+    def _finish_slice_via_pr(self, ticket: Ticket, auto_merge_two_way: bool = True) -> Tuple[bool, str]:
+        from .ship_prep import prepare_ship_payload
+        _, ship_res, _ = prepare_ship_payload(self.target_repo, base_branch=self.state.base_branch)
+        is_one_way = self._is_ticket_one_way_door(ticket, ship_res.door_type)
+        badge = "[ONE-WAY DOOR]" if is_one_way else "[TWO-WAY DOOR]"
+        branch = ticket.branch_name or self.state.active_branch or "HEAD"
+        pr_title = f"{badge} {branch}: {ticket.description}"
+        pr_body = ship_res.pr_body or pr_title
+
+        run_command(["git", "push", "-u", "origin", branch], cwd=self.target_repo)
+        c_code, c_out, c_err = run_command(
+            [
+                "gh", "pr", "create",
+                "--base", self.state.base_branch,
+                "--head", branch,
+                "--title", pr_title,
+                "--body", pr_body,
+            ],
+            cwd=self.target_repo,
+        )
+        if c_code != 0:
+            return False, f"Failed to create GitHub PR for {branch}: {c_err or c_out}"
+
+        if is_one_way:
+            return (
+                True,
+                f"One-way door PR opened ({pr_title}) and held open for mandatory human review before merging.",
+            )
+
+        if auto_merge_two_way:
+            run_command(["gh", "pr", "merge", branch, "--auto", "--merge"], cwd=self.target_repo)
+
+        self._reset_after_slice_finish(ticket)
+        return True, f"Two-way door PR ({pr_title}) created and auto-merged into {self.state.base_branch}."
+
+    def finish_slice(self, open_pr: bool = False, auto_merge_two_way: bool = True) -> Tuple[bool, str]:
         """
         Fast-forward merges the active slice worktree into base_branch (development),
-        releases the Treehouse worktree back to pool, and resets FSM to IDLE.
+        or opens a Spec-Anchored GitHub PR when open_pr=True (auto-merging Two-Way Doors
+        and holding One-Way Doors open for mandatory human review).
         """
         ticket = self.state.active_ticket
         if not ticket:
             return False, "No active slice or ticket to finish. Brigade is IDLE."
+
+        if open_pr:
+            return self._finish_slice_via_pr(ticket, auto_merge_two_way=auto_merge_two_way)
 
         ok, msg, details = self.guard_staging_to_completed()
         if not ok:

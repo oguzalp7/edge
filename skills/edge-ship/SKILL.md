@@ -61,8 +61,13 @@ If currently on `development`, create and checkout a release/milestone branch be
 git checkout -b release/<feature-milestone>
 ```
 
-### Step 1.5: Specs-to-PR Bridge (`brigade prepare-ship`)
-Before invoking `no-mistakes`, synthesize the deterministic Specs-to-PR payload to verify all QA proof receipts via `ProofVerifier`, classify One-way vs. Two-way Door risk, lock `--intent`, and generate the **Matt Pocock / Dex Horthy** PR body (`## Summary`, `## Evidence`, `## Merge Danger`):
+### Step 1.5: Two-Tier Spec-Anchored PR & Specs-to-PR Bridge (`finish-slice --pr` & `prepare-ship`)
+1. **Tier 1 — Slice-Level PR into `development` (`brigade finish-slice <repo> --pr`):**
+   - Synthesizes a Spec-Anchored PR body (including the slice spec's embedded `mermaid` diagram, Examiner seal, and QA proof summary).
+   - **Two-Way Door (`[TWO-WAY DOOR]`):** Opens PR and automatically merges (`gh pr merge --auto --merge`) unless `--no-auto-merge` is passed.
+   - **One-Way Door (`[ONE-WAY DOOR]` — DB migrations, schema changes, SQL):** Opens PR and holds it open for mandatory human review (never auto-merged).
+2. **Tier 2 — Milestone PR into `staging` (`brigade prepare-ship`):**
+   - Before invoking `no-mistakes`, synthesize the deterministic Multi-Spec Ship payload across all slices delivered on `development..HEAD` (automatically excluding `*-critique.md` files), embedding each spec's `SpecDigest` and `mermaid` architecture/state diagrams into `## Evidence`, verifying all QA proof receipts via `ProofVerifier`, classifying One-way vs. Two-way Door risk, and locking a multi-spec `--intent`:
 
 ```bash
 # Generate PR body & validate proofs (exits 1 if any .edge/qa/proofs/*.json fails ProofVerifier)

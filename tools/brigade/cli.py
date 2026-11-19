@@ -783,7 +783,12 @@ def cmd_critique_spec(args: argparse.Namespace) -> int:
 def cmd_finish_slice(args: argparse.Namespace) -> int:
     repo_path = normalize_target_path(args.repo)
     fsm = BrigadeFSM(repo_path)
-    ok, msg = fsm.finish_slice()
+    use_pr = bool(getattr(args, "pr", False))
+    no_auto = bool(getattr(args, "no_auto_merge", False))
+    if use_pr or no_auto:
+        ok, msg = fsm.finish_slice(open_pr=use_pr, auto_merge_two_way=not no_auto)
+    else:
+        ok, msg = fsm.finish_slice()
     if not ok:
         print(f"❌ {msg}")
         return 1
@@ -1151,6 +1156,8 @@ def main() -> int:
     # finish-slice
     p_fin = subparsers.add_parser("finish-slice", help="Fast-forward merge slice into development, release worktree, and resolve ticket")
     p_fin.add_argument("repo", help="Path to target repository")
+    p_fin.add_argument("--pr", action="store_true", help="Open a Spec-Anchored GitHub PR (auto-merges Two-Way Doors; holds One-Way Doors for human review)")
+    p_fin.add_argument("--no-auto-merge", action="store_true", help="Do not auto-merge Two-Way Door PRs when --pr is used")
 
     # pause
     p_pause = subparsers.add_parser("pause", help="Safely pause brigade execution and create durable checkpoint")
