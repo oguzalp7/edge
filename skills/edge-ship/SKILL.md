@@ -13,7 +13,7 @@ user-invocable: true
 ## 🎯 Purpose & Architecture
 
 - **1 Spec = 1 PR:** Never lump unrelated completed slices into one monolithic PR. `brigade prepare-ship --split-branches` discovers each spec touched in `staging..HEAD`, validates only its scoped `.edge/qa/proofs/<spec-slug>.json` receipts, and creates `ship/<spec-slug>` off `staging`.
-- **Lean 2-Section PR Body:** Emits concise `## Summary` (branch/spec scope, Mermaid architecture digest, `specs/INDEX.md`, `CONTEXT.md`) and `## Evidence` (spec link, Gate status, Examiner seal, SHA-256 verified QA screenshots, `db_crosscheck`).
+- **Lean 2-Section PR Body:** Emits concise `## Summary` (code-only changed file count, `### Spec Expectations vs. Realization` diff + `AC`/`IC` criteria matrix, `### Architecture & Call-Stack Flow` Mermaid/call-stack blocks, `specs/INDEX.md`, `CONTEXT.md`) and `## Evidence` (spec link, Gate status, `### Examiner 3-Axis Seal` with collapsible repo-relative artifacts, `### Live QA Proof & Visual Evidence` with visited routes, collapsible E2E actions, formatted `db_crosscheck` JSON, and titled visual gallery).
 - **Target Integration Branch:** Strictly **`staging`** (triggers Coolify redeployment upon PR merge).
 - **Decoupled from `/edge-no-mistakes`:** Primary delivery uses native `brigade` + `gh` / `gh-axi` + CI. For optional external auditing, invoke `/edge-no-mistakes` separately.
 

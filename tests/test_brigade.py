@@ -6241,6 +6241,254 @@ class TestEvidenceFirstReviewAndShipBridge(unittest.TestCase):
             self.assertNotIn("x-access-token:tok123@", err_push)
             self.assertIn("github.com/org/private-repo.git", err_push)
 
+    # ------------------------------------------------------------------
+    # SPEC-EDGE-BRIGADE-005 (IC-1 .. IC-4): Spec Realization Audit & Human-Readable PR Evidence
+    # ------------------------------------------------------------------
+
+    def test_spec_realization_digest_title_normalization_and_skill_alignment(self):
+        ship_prep = importlib.import_module("tools.brigade.ship_prep")
+
+        # IC-2: Word-boundary PR title truncation
+        clean_title_fn = getattr(ship_prep, "_clean_pr_title", None)
+        self.assertIsNotNone(clean_title_fn, "tools.brigade.ship_prep must define _clean_pr_title")
+        truncated_title = clean_title_fn(
+            "content-studio-avatar-story-polish",
+            "Spec: Content Studio — Avatar, Story Preview, Edit & ABAC Polish",
+        )
+        self.assertLessEqual(len(truncated_title), 96)
+        self.assertTrue(truncated_title.endswith("..."), f"Expected '...' suffix, got: {truncated_title!r}")
+        self.assertNotIn("ABAC Po...", truncated_title)
+        prefix = "feat(content-studio-avatar-story-polish): "
+        self.assertTrue(truncated_title.startswith(prefix))
+        body_part = truncated_title[len(prefix):-3]
+        self.assertFalse(body_part.endswith(("&", "-", ":", ",", "(", "/", ";")))
+        last_word = body_part.split()[-1]
+        self.assertIn(
+            last_word,
+            {"Content", "Studio", "—", "Avatar,", "Avatar", "Story", "Preview,", "Preview", "Edit", "ABAC", "Polish"},
+            f"Title cut mid-word at {last_word!r} in {truncated_title!r}",
+        )
+
+        # IC-2: Evidence artifact exclusion predicate
+        is_ev_fn = getattr(ship_prep, "_is_evidence_artifact_path", None)
+        self.assertIsNotNone(is_ev_fn, "tools.brigade.ship_prep must define _is_evidence_artifact_path")
+        self.assertTrue(is_ev_fn(".edge/qa/screenshots/shot.png"))
+        self.assertTrue(is_ev_fn(".edge/qa/proofs/portal.json"))
+        self.assertTrue(is_ev_fn(".edge/qa/visual/diff.png"))
+        self.assertFalse(is_ev_fn("src/portal/page.tsx"))
+        self.assertFalse(is_ev_fn(".edge/archive/specs/portal.md"))
+
+        # IC-3: Repo-relative display path normalization
+        norm_fn = getattr(ship_prep, "_normalize_display_path", None)
+        self.assertIsNotNone(norm_fn, "tools.brigade.ship_prep must define _normalize_display_path")
+        self.assertEqual(
+            norm_fn("/home/oguz/.treehouse/MS-Randevu-e3e293/8/MS-Randevu/.edge/qa/proofs/portal.json"),
+            ".edge/qa/proofs/portal.json",
+        )
+        self.assertEqual(
+            norm_fn("/home/oguz/MS-Randevu-monolith/src/a.ts"),
+            "src/a.ts",
+        )
+        self.assertEqual(
+            norm_fn("/home/oguz/.treehouse/pool/slot-1/app/src/a.ts"),
+            "src/a.ts",
+        )
+
+        # IC-1: SpecDigest callstack_blocks & acceptance_criteria
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            spec_file = Path(tmp_dir) / "portal-polish.md"
+            spec_file.write_text(
+                "---\n"
+                "expected_files:\n"
+                "  - src/portal/page.tsx\n"
+                "  - src/portal/missing.ts\n"
+                "---\n\n"
+                "# Portal Polish Spec\n\n"
+                "Summary: Delivers portal polish and call-stack audit.\n\n"
+                "## 1. Acceptance Criteria\n\n"
+                "| ID | Title | Expectation |\n"
+                "| :--- | :--- | :--- |\n"
+                "| AC-01 | Portal Filter | Filter updates rendered portal cards |\n"
+                "| IC-1 | Repository Sync | Create portal item via repository |\n\n"
+                "## 4. Call-Stack Tree & Responsive Layout Flow\n\n"
+                "```text\n"
+                "Page -> Action -> Repository -> DB\n"
+                "```\n",
+                encoding="utf-8",
+            )
+            digest = ship_prep.parse_spec_document(spec_file, rel_path=".edge/archive/specs/portal-polish.md")
+            self.assertTrue(hasattr(digest, "callstack_blocks"), "SpecDigest must define callstack_blocks")
+            self.assertTrue(hasattr(digest, "acceptance_criteria"), "SpecDigest must define acceptance_criteria")
+            self.assertTrue(
+                any("Page -> Action -> Repository" in blk for blk in digest.callstack_blocks),
+                f"Expected callstack block captured, got: {digest.callstack_blocks}",
+            )
+            crit_ids = [c.get("id") for c in digest.acceptance_criteria]
+            self.assertIn("AC-01", crit_ids)
+            self.assertIn("IC-1", crit_ids)
+
+        # IC-4: skills/edge-ship/SKILL.md alignment
+        skill_text = (self.repo_root / "skills" / "edge-ship" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("Spec Expectations vs. Realization", skill_text)
+        self.assertIn("Examiner 3-Axis Seal", skill_text)
+
+    def test_realization_audit_and_human_readable_pr_report_end_to_end(self):
+        ship_prep = importlib.import_module("tools.brigade.ship_prep")
+        ExaminerReceipt = getattr(brigade_models, "ExaminerReceipt", None)
+        self.assertIsNotNone(ExaminerReceipt)
+
+        RealizationAudit = getattr(ship_prep, "RealizationAudit", None)
+        self.assertIsNotNone(RealizationAudit, "tools.brigade.ship_prep must define RealizationAudit")
+        compute_audit_fn = getattr(ship_prep, "compute_realization_audit", None)
+        self.assertIsNotNone(compute_audit_fn, "tools.brigade.ship_prep must define compute_realization_audit")
+
+        with tempfile.TemporaryDirectory() as tmp_root:
+            repo_dir = Path(tmp_root)
+
+            def git(*git_args):
+                proc = subprocess.run(
+                    ["git", *git_args],
+                    cwd=repo_dir,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                return proc.stdout.strip()
+
+            git("init", "-b", "staging")
+            git("config", "user.email", "brigade@example.com")
+            git("config", "user.name", "Edge Brigade")
+
+            (repo_dir / "README.md").write_text("# Base\n", encoding="utf-8")
+            (repo_dir / "specs").mkdir(parents=True, exist_ok=True)
+            (repo_dir / "specs" / "INDEX.md").write_text("# Navigation Index\n", encoding="utf-8")
+            git("add", "-A")
+            git("commit", "-m", "chore: base staging")
+
+            git("checkout", "-b", "development")
+
+            arch_dir = repo_dir / ".edge" / "archive" / "specs"
+            arch_dir.mkdir(parents=True, exist_ok=True)
+            (arch_dir / "portal-polish.md").write_text(
+                "---\n"
+                "expected_files:\n"
+                "  - src/portal/page.tsx\n"
+                "  - src/portal/missing.ts\n"
+                "---\n\n"
+                "# Portal Polish\n\n"
+                "Summary: Polish portal list and persistence.\n\n"
+                "## 1. Acceptance Criteria\n\n"
+                "| ID | Title | Expectation |\n"
+                "| :--- | :--- | :--- |\n"
+                "| AC-01 | Portal Filter | Filter portal cards on page |\n"
+                "| IC-1 | Repository Save | Persist portal record via action |\n\n"
+                "## 4. Call-Stack Tree & Responsive Layout Flow\n\n"
+                "```text\n"
+                "Page -> Action -> Repository -> DB\n"
+                "```\n",
+                encoding="utf-8",
+            )
+
+            (repo_dir / "src" / "portal").mkdir(parents=True, exist_ok=True)
+            (repo_dir / "src" / "portal" / "page.tsx").write_text("export const PortalPage = () => null;\n", encoding="utf-8")
+            (repo_dir / "src" / "SettlementSimulatorStudio.tsx").write_text(
+                "export const SettlementSimulatorStudio = () => null;\n",
+                encoding="utf-8",
+            )
+
+            shots_dir = repo_dir / ".edge" / "qa" / "screenshots"
+            shots_dir.mkdir(parents=True, exist_ok=True)
+            (shots_dir / "01-portal-favorites-desktop.png").write_bytes(self._make_solid_png(4, 4, (20, 40, 80)))
+            (shots_dir / "02-portal-after.png").write_bytes(self._make_solid_png(4, 4, (80, 120, 160)))
+
+            proofs_dir = repo_dir / ".edge" / "qa" / "proofs"
+            proofs_dir.mkdir(parents=True, exist_ok=True)
+            (proofs_dir / "portal-polish.json").write_text(
+                json.dumps({
+                    "slug": "portal-polish",
+                    "visited_urls": [
+                        "http://localhost:3000/portal/favorites",
+                        "http://localhost:3000/portal/explore",
+                    ],
+                    "user_actions_executed": [
+                        "Filter portal cards on page",
+                        "Reload page and verify state",
+                    ],
+                    "persistence_verified": True,
+                    "console_clean": True,
+                    "screenshot_paths": [
+                        ".edge/qa/screenshots/01-portal-favorites-desktop.png",
+                        ".edge/qa/screenshots/02-portal-after.png",
+                    ],
+                    "host_facts_verified": True,
+                    "db_crosscheck": {"portal_items": 3, "favorites": 1},
+                    "directives_checklist": {
+                        "AC-01": "Filter portal cards on page verified",
+                    },
+                }),
+                encoding="utf-8",
+            )
+
+            fsm_local = BrigadeFSM(repo_dir)
+            fsm_local.state.examiner_receipt = ExaminerReceipt(
+                verdict="PASS",
+                summary="3-axis audit passed cleanly",
+                ticket_id="TICK-FEAT-PORTAL",
+                evidence_reviewed=[
+                    "/home/oguz/.treehouse/MS-Randevu-e3e293/8/MS-Randevu/.edge/qa/proofs/portal.json",
+                    "/home/oguz/MS-Randevu-monolith/src/a.ts",
+                ],
+            )
+            fsm_local.save()
+
+            git("add", "-A")
+            git("commit", "-m", "feat(portal-polish): implement portal polish")
+
+            ok, result, err = ship_prep.prepare_ship_payload(repo_dir, base_branch="staging")
+            self.assertTrue(ok, f"prepare_ship_payload failed: {err}")
+            self.assertEqual(len(result.spec_plans), 1)
+            plan = result.spec_plans[0]
+
+            # IC-2: RealizationAudit fields & exclusion of evidence artifacts from actual_code_files
+            audit = getattr(plan, "realization_audit", None)
+            self.assertIsNotNone(audit, "SpecShipPlan must populate realization_audit")
+            self.assertNotIn(".edge/qa/proofs/portal-polish.json", audit.actual_code_files)
+            self.assertNotIn(".edge/qa/screenshots/01-portal-favorites-desktop.png", audit.actual_code_files)
+            self.assertIn("src/portal/page.tsx", audit.realized_files)
+            self.assertIn("src/portal/missing.ts", audit.untouched_expected_files)
+            self.assertIn("src/SettlementSimulatorStudio.tsx", audit.unplanned_extra_files)
+            self.assertIn("```diff", audit.file_tree_diff)
+            self.assertIn("+ src/portal/page.tsx", audit.file_tree_diff)
+            self.assertIn("~ src/SettlementSimulatorStudio.tsx", audit.file_tree_diff)
+            self.assertIn("! src/portal/missing.ts", audit.file_tree_diff)
+
+            crit_map = {r["id"]: r for r in audit.criteria_rows}
+            self.assertIn("AC-01", crit_map)
+            self.assertIn("IC-1", crit_map)
+
+            # IC-1, IC-2, IC-3: PR body structure and readability
+            for body in (plan.pr_body, plan.show_me_body):
+                self.assertIn(f"({len(audit.actual_code_files)} code file(s) changed)", body)
+                self.assertIn("### Spec Expectations vs. Realization", body)
+                self.assertIn("### Architecture & Call-Stack Flow", body)
+                self.assertIn("Page -> Action -> Repository", body)
+                self.assertIn("| ID | Spec Expectation | Status | Realized Evidence / Notes |", body)
+                self.assertIn("### Examiner 3-Axis Seal", body)
+                self.assertIn("<details><summary>📂 Reviewed Artifacts", body)
+                self.assertIn(".edge/qa/proofs/portal.json", body)
+                self.assertIn("src/a.ts", body)
+                self.assertNotIn("/home/oguz/.treehouse/", body)
+                self.assertNotIn("/home/oguz/MS-Randevu-monolith/", body)
+                self.assertIn("### Live QA Proof & Visual Evidence", body)
+                self.assertIn("- **Visited Routes:**", body)
+                self.assertIn("<details><summary>⚡ Executed E2E Actions", body)
+                self.assertIn("<details><summary>🗄️ Database & State Cross-Check", body)
+                self.assertIn('  "portal_items": 3', body)
+                self.assertNotIn("urls=['", body)
+                self.assertNotIn("actions=['", body)
+                self.assertNotIn("db_crosscheck={", body)
+                self.assertNotIn("## Merge Danger", body)
+
 
 if __name__ == "__main__":
     unittest.main()

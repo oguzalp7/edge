@@ -43,6 +43,24 @@ _INLINE_PATH_RE = re.compile(
 )
 
 
+_EVIDENCE_ARTIFACT_PREFIXES: Tuple[str, ...] = (
+    ".edge/qa/screenshots/",
+    ".edge/qa/proofs/",
+    ".edge/qa/visual/",
+)
+_CALLSTACK_HEADING_RE = re.compile(
+    r"^(#{1,4})\s+.*(?:call[-\s]?stack|responsive\s+layout\s+flow|architecture|flow|component\s+tree|file\s+tree)",
+    re.IGNORECASE,
+)
+_HEADING_LEVEL_RE = re.compile(r"^(#{1,6})\s+(.*)$")
+_CRIT_ID_RE = re.compile(r"\b((?:AC|IC)-\d+)\b")
+_FENCE_BLOCK_RE = re.compile(r"```([a-zA-Z0-9_-]*)\s*\n(.*?)```", re.DOTALL)
+_TREEHOUSE_SLOT_RE = re.compile(r"^.*/\.treehouse/pool/slot-\d+/[^/]+/")
+_KNOWN_ROOT_RE = re.compile(
+    r"^.*/(?=(?:\.edge|src|tools|skills|agents|rules|tests|scripts|specs|public|drizzle|prisma)/)"
+)
+
+
 @dataclass
 class IndexChange:
     kind: str       # "@route" | "Page" | "@module" | "Action" | "Schema" | "@spec" | "other"
@@ -57,6 +75,18 @@ class SpecDigest:
     summary: str
     mermaid_blocks: List[str] = field(default_factory=list)
     matrix_rows: List[str] = field(default_factory=list)
+    callstack_blocks: List[str] = field(default_factory=list)
+    acceptance_criteria: List[Dict[str, str]] = field(default_factory=list)
+
+
+@dataclass
+class RealizationAudit:
+    actual_code_files: List[str] = field(default_factory=list)
+    realized_files: List[str] = field(default_factory=list)
+    untouched_expected_files: List[str] = field(default_factory=list)
+    unplanned_extra_files: List[str] = field(default_factory=list)
+    file_tree_diff: str = ""
+    criteria_rows: List[Dict[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -75,6 +105,7 @@ class SpecShipPlan:
     show_me_body: str = ""
     ticket_id: Optional[str] = None
     commit_shas: List[str] = field(default_factory=list)
+    realization_audit: Optional[RealizationAudit] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -104,6 +135,48 @@ class ShipPrepResult:
 
 def _clean_slug(raw: str) -> str:
     return (raw or "").strip().lower().replace("_", "-")
+
+
+def _is_evidence_artifact_path(norm_path: str) -> bool:
+    low = _norm_rel_path(norm_path).lower()
+    return any(low.startswith(pref) for pref in _EVIDENCE_ARTIFACT_PREFIXES)
+
+
+def _strip_repo_prefix(s: str, repo: Optional[Path]) -> str:
+    if repo is None:
+        return s
+    for cand in (str(repo).replace("\\", "/").rstrip("/"),):
+        if cand and s.startswith(cand + "/"):
+            return s[len(cand) + 1:]
+    try:
+        from tools.common.paths import to_wsl_path
+        wsl_repo = to_wsl_path(repo).rstrip("/")
+        if wsl_repo and s.startswith(wsl_repo + "/"):
+            return s[len(wsl_repo) + 1:]
+    except Exception:
+        pass
+    return s
+
+
+def _normalize_display_path(raw_path: str, repo: Optional[Path] = None) -> str:
+    s = str(raw_path or "").strip().replace("\\", "/")
+    if not s:
+        return ""
+    s = re.sub(r"^//wsl(?:\.localhost|\$)/[^/]+", "", s)
+    s = re.sub(r"^[A-Za-z]:/", lambda m: f"/mnt/{m.group(0)[0].lower()}/", s)
+    s = _strip_repo_prefix(s, repo)
+    s = _TREEHOUSE_SLOT_RE.sub("", s)
+    s = _KNOWN_ROOT_RE.sub("", s)
+    s = re.sub(r"^/home/[^/]+/[^/]+/", "", s)
+    return s.lstrip("./") if s.startswith("./") else s
+
+
+def _format_screenshot_title(raw_path_or_url: str) -> str:
+    clean = str(raw_path_or_url or "").split("?")[0].strip()
+    stem = Path(clean).stem if clean else ""
+    stem = re.sub(r"^\d+[-_]+", "", stem)
+    words = [w.capitalize() for w in re.split(r"[-_\s]+", stem) if w]
+    return " ".join(words) or "Screenshot"
 
 
 def _norm_rel_path(raw: str) -> str:
@@ -656,8 +729,167 @@ def _extract_spec_matrix_rows(lines: List[str], limit: int = 7) -> List[str]:
     return rows
 
 
+def _is_flow_or_tree_line(line: str) -> bool:
+    return any(g in line for g in ("├──", "└──", "│", "->", "→"))
+
+
+def _flush_flow_buf(buf: List[str], blocks: List[str]) -> None:
+    text = "\n".join(buf).strip()
+    if text and text not in blocks:
+        blocks.append(text)
+    buf.clear()
+
+
+def _collect_section_callstacks(section_lines: List[str]) -> List[str]:
+    blocks: List[str] = []
+    flow_buf: List[str] = []
+    in_fence = False
+    fence_lang = ""
+    fence_buf: List[str] = []
+    for raw in section_lines:
+        s = raw.strip()
+        if s.startswith("```"):
+            _flush_flow_buf(flow_buf, blocks)
+            if not in_fence:
+                in_fence, fence_lang, fence_buf = True, s[3:].strip().lower(), []
+            else:
+                if fence_lang != "mermaid":
+                    blk = "\n".join(fence_buf).strip()
+                    if blk and blk not in blocks:
+                        blocks.append(blk)
+                in_fence = False
+            continue
+        if in_fence:
+            fence_buf.append(raw.rstrip())
+        elif _is_flow_or_tree_line(s):
+            flow_buf.append(raw.rstrip())
+        else:
+            _flush_flow_buf(flow_buf, blocks)
+    _flush_flow_buf(flow_buf, blocks)
+    return blocks
+
+
+def _collect_heading_callstack_blocks(lines: List[str]) -> List[str]:
+    blocks: List[str] = []
+    sec_lines: List[str] = []
+    sec_level: Optional[int] = None
+    for raw in lines:
+        s = raw.strip()
+        hm = _HEADING_LEVEL_RE.match(s)
+        if _CALLSTACK_HEADING_RE.match(s):
+            blocks.extend(_collect_section_callstacks(sec_lines))
+            sec_lines, sec_level = [], len(hm.group(1)) if hm else 2
+            continue
+        if sec_level is not None and ((hm and len(hm.group(1)) <= sec_level) or s == "---"):
+            blocks.extend(_collect_section_callstacks(sec_lines))
+            sec_lines, sec_level = [], None
+            continue
+        if sec_level is not None:
+            sec_lines.append(raw)
+    if sec_level is not None:
+        blocks.extend(_collect_section_callstacks(sec_lines))
+    return blocks
+
+
+def _is_fallback_callstack_block(lang: str, body: str) -> bool:
+    if lang == "mermaid" or not body:
+        return False
+    if "├──" in body or "└──" in body:
+        return True
+    arrow_lines = sum(1 for ln in body.splitlines() if "->" in ln or "→" in ln)
+    return arrow_lines >= 2
+
+
+def _extract_callstack_blocks(text: str, lines: List[str], has_mermaid: bool = False) -> List[str]:
+    blocks = _collect_heading_callstack_blocks(lines)
+    if not blocks and not has_mermaid:
+        for m in _FENCE_BLOCK_RE.finditer(text):
+            lang, body = m.group(1).strip().lower(), m.group(2).strip()
+            if _is_fallback_callstack_block(lang, body) and body not in blocks:
+                blocks.append(body)
+    unique: List[str] = []
+    for b in blocks:
+        if b not in unique:
+            unique.append(b)
+    return unique[:3]
+
+
+def _parse_crit_table_row(s: str) -> Optional[Dict[str, str]]:
+    if not s.startswith("|") or _TABLE_SEP_RE.match(s):
+        return None
+    cells = [c.strip() for c in s.strip("|").split("|")]
+    if not cells:
+        return None
+    m = _CRIT_ID_RE.search(cells[0])
+    if not m:
+        return None
+    cid = m.group(1)
+    if len(cells) >= 3:
+        title = cells[1].strip("`*") or cid
+        exp = cells[2].strip("`*") or title
+    elif len(cells) == 2:
+        title, exp = cid, cells[1].strip("`*")
+    else:
+        title, exp = cid, cells[0]
+    return {"id": cid, "title": title, "expectation": exp}
+
+
+def _parse_crit_line_item(s: str) -> Optional[Tuple[Dict[str, str], bool]]:
+    if s.startswith("|") or not _CRIT_ID_RE.search(s):
+        return None
+    m = _CRIT_ID_RE.search(s)
+    assert m is not None
+    cid = m.group(1)
+    is_heading = bool(_HEADING_LEVEL_RE.match(s))
+    cleaned = re.sub(r"^#{1,6}\s+|^[-*]\s+", "", s).replace("**", "").replace("`", "").strip()
+    after_id = cleaned.split(cid, 1)[1].lstrip(" :.-)").strip()
+    if ":" in after_id:
+        title_p, exp_p = after_id.split(":", 1)
+        return {"id": cid, "title": title_p.strip("() ") or cid, "expectation": exp_p.strip() or title_p.strip()}, is_heading and not exp_p.strip()
+    return {"id": cid, "title": after_id.strip("() ") or cid, "expectation": after_id.strip() or cid}, is_heading
+
+
+def _collect_heading_bullets(lines: List[str], start_idx: int) -> str:
+    bullets: List[str] = []
+    for raw in lines[start_idx + 1:]:
+        st = raw.strip()
+        if not st:
+            continue
+        if st.startswith("#") or st == "---":
+            break
+        if st.startswith(("- ", "* ")):
+            bullets.append(st[2:].replace("**", "").strip())
+            if len(bullets) >= 2:
+                break
+    return "; ".join(bullets)
+
+
+def _extract_acceptance_criteria(lines: List[str]) -> List[Dict[str, str]]:
+    criteria: List[Dict[str, str]] = []
+    seen_ids: set = set()
+    for idx, raw in enumerate(lines):
+        s = raw.strip()
+        if not s:
+            continue
+        entry = _parse_crit_table_row(s)
+        needs_bullets = False
+        if entry is None:
+            parsed = _parse_crit_line_item(s)
+            if parsed:
+                entry, needs_bullets = parsed
+        if not entry or entry["id"] in seen_ids:
+            continue
+        if needs_bullets:
+            sub = _collect_heading_bullets(lines, idx)
+            if sub:
+                entry["expectation"] = sub
+        seen_ids.add(entry["id"])
+        criteria.append(entry)
+    return criteria
+
+
 def parse_spec_document(spec_path: Path, rel_path: str = "") -> SpecDigest:
-    """Parses a Markdown specification into title, summary, Mermaid blocks, and matrix rows."""
+    """Parses a Markdown specification into title, summary, Mermaid, call-stack blocks, and criteria."""
     eff_rel = rel_path or str(spec_path).replace("\\", "/")
     if not spec_path.is_file():
         return SpecDigest(path=eff_rel, title=spec_path.stem, summary="")
@@ -666,12 +898,16 @@ def parse_spec_document(spec_path: Path, rel_path: str = "") -> SpecDigest:
     title, summary = _extract_spec_title_and_summary(lines, spec_path.stem)
     mermaids = [m.group(1).strip() for m in _MERMAID_BLOCK_RE.finditer(text) if m.group(1).strip()]
     matrix = _extract_spec_matrix_rows(lines)
+    callstacks = _extract_callstack_blocks(text, lines, has_mermaid=bool(mermaids))
+    criteria = _extract_acceptance_criteria(lines)
     return SpecDigest(
         path=eff_rel,
         title=title,
         summary=summary,
         mermaid_blocks=mermaids,
         matrix_rows=matrix,
+        callstack_blocks=callstacks,
+        acceptance_criteria=criteria,
     )
 
 
@@ -974,6 +1210,7 @@ def _parse_proof_raw_meta(
         "spec_slug": spec_slug or _clean_slug(Path(rel_path).stem),
         "ticket_id": tid,
         "screenshot_urls": _extract_str_list(raw.get("screenshot_urls")),
+        "directives_checklist": raw.get("directives_checklist"),
     }
 
 
@@ -1001,6 +1238,7 @@ def _verify_proof_raw_text(
             "screenshot_urls": meta["screenshot_urls"],
             "screenshot_hashes": det.get("screenshot_hashes", {}),
             "db_crosscheck": det.get("db_crosscheck", {}),
+            "directives_checklist": meta.get("directives_checklist"),
             "persistence_verified": True,
             "console_clean": True,
         }
@@ -1218,17 +1456,205 @@ def _build_scenario_contract(
     return [f"Changed: {f}" for f in changed_files[:8]] or [f"Branch: {head_branch}"]
 
 
+def _is_meta_spec_or_index(path_str: str, spec_path: str) -> bool:
+    norm = _norm_rel_path(path_str)
+    if norm == _norm_rel_path(spec_path) or norm == "specs/INDEX.md":
+        return True
+    return norm.startswith((".edge/specs/", ".edge/archive/specs/"))
+
+
+def _matches_any_expected(path_str: str, expected_files: List[str]) -> bool:
+    norm = _norm_rel_path(path_str)
+    return any(fnmatch(norm, pat) or norm == pat for pat in expected_files)
+
+
+def _classify_audit_files(
+    plan: SpecShipPlan,
+    actual_code_files: List[str],
+) -> Tuple[List[str], List[str], List[str]]:
+    realized: List[str] = []
+    untouched: List[str] = []
+    for raw_exp in plan.expected_files:
+        pat = _norm_rel_path(raw_exp)
+        hits = [f for f in actual_code_files if fnmatch(f, pat) or f == pat]
+        if hits:
+            for h in hits:
+                if h not in realized:
+                    realized.append(h)
+        elif not any(ch in pat for ch in "*?[") and not _is_broad_path(pat):
+            if pat not in untouched:
+                untouched.append(pat)
+
+    unplanned = [
+        f for f in actual_code_files
+        if not _is_meta_spec_or_index(f, plan.spec_path) and not _matches_any_expected(f, plan.expected_files)
+    ]
+    return realized, untouched, unplanned
+
+
+def _build_file_tree_diff(
+    realized: List[str],
+    unplanned: List[str],
+    untouched: List[str],
+) -> str:
+    diff_lines = [f"+ {f} (expected)" for f in realized]
+    diff_lines.extend(f"~ {f} (unplanned)" for f in unplanned)
+    diff_lines.extend(f"! {f} (expected but untouched)" for f in untouched)
+    if not diff_lines:
+        return ""
+    if len(diff_lines) > 30:
+        extra = len(diff_lines) - 30
+        diff_lines = [*diff_lines[:30], f"... (+{extra} more)"]
+    return "```diff\n" + "\n".join(diff_lines) + "\n```"
+
+
+def _collect_proof_evidence_text(verified_proofs: List[Dict[str, Any]]) -> Tuple[List[str], List[str]]:
+    checklist_items: List[str] = []
+    action_items: List[str] = []
+    for p in verified_proofs:
+        dc = p.get("directives_checklist")
+        if isinstance(dc, dict):
+            checklist_items.extend(f"{k}: {v}" for k, v in dc.items())
+        elif isinstance(dc, list):
+            checklist_items.extend(str(item) for item in dc)
+        action_items.extend(str(a) for a in p.get("user_actions_executed", []) or [])
+        action_items.extend(str(u) for u in p.get("visited_urls", []) or [])
+        db_cc = p.get("db_crosscheck")
+        if isinstance(db_cc, dict):
+            action_items.extend(str(k) for k in db_cc.keys())
+    return checklist_items, action_items
+
+
+def _tokens_overlap(crit_id: str, exp_text: str, haystack: str) -> bool:
+    if crit_id.lower() in haystack:
+        return True
+    words = [w for w in re.findall(r"[a-z0-9]{4,}", exp_text.lower())]
+    if not words:
+        return False
+    hits = sum(1 for w in words if w in haystack)
+    return hits >= min(2, len(words))
+
+
+def _evaluate_single_criterion(
+    crit: Dict[str, str],
+    checklist_items: List[str],
+    action_items: List[str],
+    code_haystack: str,
+    has_pass_seal: bool,
+    has_realized: bool,
+) -> Dict[str, str]:
+    cid = crit["id"]
+    exp = crit.get("expectation") or crit.get("title") or cid
+    chk_hay = "\n".join(checklist_items).lower()
+    act_hay = "\n".join(action_items).lower()
+    if _tokens_overlap(cid, exp, chk_hay):
+        return {"id": cid, "expectation": exp, "status": "✅ Verified", "evidence": "QA directives_checklist"}
+    if _tokens_overlap(cid, exp, act_hay):
+        return {"id": cid, "expectation": exp, "status": "✅ Verified", "evidence": "QA action / route / DB cross-check"}
+    if has_pass_seal and has_realized:
+        return {"id": cid, "expectation": exp, "status": "✅ Verified", "evidence": "Examiner PASS seal & realized files"}
+    if _tokens_overlap(cid, exp, code_haystack) or has_pass_seal:
+        return {"id": cid, "expectation": exp, "status": "☑️ Implemented", "evidence": "Diff / code realization"}
+    return {"id": cid, "expectation": exp, "status": "⚠️ Unverified", "evidence": "No matching proof or code trace"}
+
+
+def _build_criteria_rows(
+    digest: Optional[SpecDigest],
+    plan: SpecShipPlan,
+    examiner_receipt: Optional[Dict[str, Any]],
+    actual_code_files: List[str],
+    realized_files: List[str],
+) -> List[Dict[str, str]]:
+    if not digest or not digest.acceptance_criteria:
+        return []
+    checklist_items, action_items = _collect_proof_evidence_text(plan.verified_proofs)
+    has_pass = bool(examiner_receipt and str(examiner_receipt.get("verdict") or "").upper() == "PASS")
+    code_parts = [*actual_code_files, *(f"{c.kind} {c.symbol}" for c in plan.index_changes)]
+    if examiner_receipt:
+        code_parts.append(str(examiner_receipt.get("summary") or ""))
+    code_haystack = "\n".join(code_parts).lower()
+    return [
+        _evaluate_single_criterion(c, checklist_items, action_items, code_haystack, has_pass, bool(realized_files))
+        for c in digest.acceptance_criteria
+    ]
+
+
+def compute_realization_audit(
+    plan: SpecShipPlan,
+    digest: Optional[SpecDigest],
+    examiner_receipt: Optional[Dict[str, Any]],
+) -> RealizationAudit:
+    """Computes code-only file counts, expected vs. actual file diff, and AC/IC criteria matrix."""
+    actual_code_files = [
+        _norm_rel_path(p) for p in plan.matched_files if not _is_evidence_artifact_path(p)
+    ]
+    realized, untouched, unplanned = _classify_audit_files(plan, actual_code_files)
+    file_tree_diff = _build_file_tree_diff(realized, unplanned, untouched)
+    criteria_rows = _build_criteria_rows(digest, plan, examiner_receipt, actual_code_files, realized)
+    return RealizationAudit(
+        actual_code_files=actual_code_files,
+        realized_files=realized,
+        untouched_expected_files=untouched,
+        unplanned_extra_files=unplanned,
+        file_tree_diff=file_tree_diff,
+        criteria_rows=criteria_rows,
+    )
+
+
+def _format_realization_subsection(audit: Optional[RealizationAudit]) -> List[str]:
+    if not audit:
+        return []
+    lines = [
+        "",
+        "### Spec Expectations vs. Realization",
+        (
+            f"- **Files:** `{len(audit.realized_files)}` realized · "
+            f"`{len(audit.untouched_expected_files)}` untouched expected · "
+            f"`{len(audit.unplanned_extra_files)}` unplanned scope delta"
+        ),
+    ]
+    if audit.file_tree_diff:
+        lines.append(audit.file_tree_diff)
+    if audit.criteria_rows:
+        lines.extend([
+            "| ID | Spec Expectation | Status | Realized Evidence / Notes |",
+            "| :--- | :--- | :--- | :--- |",
+        ])
+        for row in audit.criteria_rows:
+            exp_clean = str(row["expectation"]).replace("|", "\\|")
+            ev_clean = str(row["evidence"]).replace("|", "\\|")
+            lines.append(f"| `{row['id']}` | {exp_clean} | {row['status']} | {ev_clean} |")
+    return lines
+
+
+def _format_architecture_subsection(spec_digests: List[SpecDigest]) -> List[str]:
+    mermaids: List[str] = []
+    callstacks: List[str] = []
+    for digest in spec_digests:
+        mermaids.extend(digest.mermaid_blocks[:2])
+        callstacks.extend(digest.callstack_blocks[:3])
+    if not mermaids and not callstacks:
+        return []
+    lines = ["", "### Architecture & Call-Stack Flow"]
+    for m_block in mermaids[:2]:
+        lines.extend(["```mermaid", m_block, "```"])
+    for c_block in callstacks[:3]:
+        lines.extend(["```text", c_block, "```"])
+    return lines
+
+
 def _format_summary_section(
     head_branch: str,
     base_branch: str,
-    changed_count: int,
+    code_count: int,
     index_changes: List[IndexChange],
     context_terms: List[str],
     spec_digests: List[SpecDigest],
+    audit: Optional[RealizationAudit] = None,
 ) -> List[str]:
     lines = [
         "## Summary",
-        f"- **Branch:** `{head_branch}` -> `{base_branch}` ({changed_count} file(s) changed)",
+        f"- **Branch:** `{head_branch}` -> `{base_branch}` ({code_count} code file(s) changed)",
     ]
     if index_changes:
         idx_summary = ", ".join(f"`{c.kind} {c.symbol}`" for c in index_changes[:8])
@@ -1237,21 +1663,56 @@ def _format_summary_section(
         lines.append(f"- **Domain Vocabulary (`CONTEXT.md`):** {', '.join(context_terms)}")
     for digest in spec_digests:
         lines.append(f"- **Spec (`{digest.path}`):** {digest.title}" + (f" — {digest.summary}" if digest.summary else ""))
-        for m_block in digest.mermaid_blocks[:2]:
-            lines.extend(["```mermaid", m_block, "```"])
+    lines.extend(_format_realization_subsection(audit))
+    lines.extend(_format_architecture_subsection(spec_digests))
+    return lines
+
+
+def _format_examiner_seal_block(examiner_receipt: Optional[Dict[str, Any]]) -> List[str]:
+    if not examiner_receipt:
+        return []
+    verdict = str(examiner_receipt.get("verdict") or "").upper()
+    icon = "✅" if verdict == "PASS" else "❌"
+    summary = str(examiner_receipt.get("summary") or "").strip()
+    lines = [
+        "",
+        "### Examiner 3-Axis Seal",
+        f"- **Verdict:** {icon} `{verdict}` — {summary}",
+    ]
+    raw_ev = examiner_receipt.get("evidence_reviewed") or []
+    norm_ev = list(dict.fromkeys(_normalize_display_path(str(p)) for p in raw_ev if str(p).strip()))
+    if norm_ev:
+        lines.extend([f"<details><summary>📂 Reviewed Artifacts ({len(norm_ev)} files)</summary>", ""])
+        lines.extend(f"- `{p}`" for p in norm_ev)
+        lines.extend(["", "</details>"])
     return lines
 
 
 def _format_proof_line(p: Dict[str, Any]) -> List[str]:
     shots = len(p.get("screenshot_hashes", {}))
     out = [
-        f"- **QA Proof `{p['slug']}` (Verified):** urls={p['visited_urls']}, "
-        f"actions={p['user_actions_executed']}, screenshots={shots} (SHA-256 verified), "
-        f"db_crosscheck={json.dumps(p['db_crosscheck'])}"
+        f"- **QA Proof `{p['slug']}`:** ✅ Verified (`persistence_verified: true`, `console_clean: true`, `{shots}` SHA-256 verified screenshot(s))"
     ]
-    for url in p.get("screenshot_urls", []) or []:
-        fname = Path(str(url).split("?")[0]).name or "screenshot.png"
-        out.append(f"  - ![{fname}]({url})")
+    visited = p.get("visited_urls") or []
+    if visited:
+        routes = " · ".join(f"`{u}`" for u in visited)
+        out.append(f"- **Visited Routes:** {routes}")
+    actions = p.get("user_actions_executed") or []
+    if actions:
+        out.extend([f"<details><summary>⚡ Executed E2E Actions ({len(actions)} steps)</summary>", ""])
+        out.extend(f"{idx}. {act}" for idx, act in enumerate(actions, 1))
+        out.extend(["", "</details>"])
+    db_cc = p.get("db_crosscheck")
+    if db_cc:
+        pretty_json = json.dumps(db_cc, indent=2, ensure_ascii=False)
+        out.extend(["<details><summary>🗄️ Database & State Cross-Check</summary>", "", "```json", pretty_json, "```", "", "</details>"])
+    urls = p.get("screenshot_urls") or []
+    if urls:
+        out.extend(["", "#### Visual Evidence Gallery"])
+        for url in urls:
+            title = _format_screenshot_title(str(url))
+            fname = Path(str(url).split("?")[0]).name or "screenshot.png"
+            out.extend([f"- **{title}**", f"  ![{fname}]({url})"])
     return out
 
 
@@ -1266,20 +1727,20 @@ def _format_evidence_section(
     if specs_linked:
         lines.append(f"- **Specs:** {', '.join(f'`{s}`' for s in specs_linked)}")
     lines.append(f"- **Gate Status:** {gate_status}")
-    if examiner_receipt:
-        ev = ", ".join(examiner_receipt.get("evidence_reviewed", [])) or "diff"
-        lines.append(f"- **Examiner Seal:** `{examiner_receipt.get('verdict')}` — {examiner_receipt.get('summary')} (reviewed: {ev})")
-    for p in verified_proofs:
-        lines.extend(_format_proof_line(p))
-    for fp in failed_proofs:
-        lines.append(f"- **QA Proof `{fp['slug']}` (FAILED - {fp['error']}):** {fp['message']}")
+    lines.extend(_format_examiner_seal_block(examiner_receipt))
+    if verified_proofs or failed_proofs:
+        lines.extend(["", "### Live QA Proof & Visual Evidence"])
+        for p in verified_proofs:
+            lines.extend(_format_proof_line(p))
+        for fp in failed_proofs:
+            lines.append(f"- **QA Proof `{fp['slug']}` (FAILED - {fp['error']}):** {fp['message']}")
     return lines
 
 
 def _format_markdown_sections(
     head_branch: str,
     base_branch: str,
-    changed_count: int,
+    code_count: int,
     index_changes: List[IndexChange],
     context_terms: List[str],
     specs_linked: List[str],
@@ -1288,10 +1749,11 @@ def _format_markdown_sections(
     examiner_receipt: Optional[Dict[str, Any]],
     gate_status: str,
     spec_digests: Optional[List[SpecDigest]] = None,
+    audit: Optional[RealizationAudit] = None,
 ) -> str:
     """Renders lean 2-section PR body (## Summary + ## Evidence only; no ## Merge Danger)."""
     lines = _format_summary_section(
-        head_branch, base_branch, changed_count, index_changes, context_terms, spec_digests or []
+        head_branch, base_branch, code_count, index_changes, context_terms, spec_digests or [], audit=audit
     )
     lines.extend(_format_evidence_section(specs_linked, verified_proofs, failed_proofs, examiner_receipt, gate_status))
     return "\n".join(lines)
@@ -1321,7 +1783,20 @@ def _clean_pr_title(spec_slug: str, raw_title: str) -> str:
     cleaned = re.sub(r"^[^\w\s]+\s*", "", raw_title or "").strip()
     cleaned = re.sub(r"^(Edge Brigade Specification|Specification|Spec)\s*:\s*", "", cleaned, flags=re.IGNORECASE).strip()
     summary = cleaned or f"deliver {spec_slug}"
-    return f"feat({spec_slug}): {summary}"[:96]
+    prefix = f"feat({spec_slug}): "
+    full = f"{prefix}{summary}"
+    if len(full) <= 96:
+        return full
+    budget = 93 - len(prefix)
+    if budget <= 0:
+        return full[:93].rstrip() + "..."
+    candidate = summary[:budget]
+    if len(summary) > budget and not summary[budget].isspace() and " " in candidate:
+        candidate = candidate.rsplit(" ", 1)[0]
+    trimmed = candidate.rstrip(" &-:,/;(\t")
+    if not trimmed:
+        trimmed = summary[:budget].rstrip()
+    return f"{prefix}{trimmed}..."
 
 
 def _proof_belongs_to_plan(
@@ -1388,11 +1863,14 @@ def _render_plan_bodies(
     plan_receipt: Optional[Dict[str, Any]],
     gate_status: str,
 ) -> None:
+    if plan.realization_audit is None:
+        plan.realization_audit = compute_realization_audit(plan, plan.spec_digest, plan_receipt)
+    code_count = len(plan.realization_audit.actual_code_files)
     digests = [plan.spec_digest] if plan.spec_digest else []
     pr_body = _format_markdown_sections(
-        plan.pr_branch, base_branch, len(plan.matched_files), plan.index_changes,
+        plan.pr_branch, base_branch, code_count, plan.index_changes,
         context_terms, [plan.spec_path], plan.verified_proofs, plan.failed_proofs,
-        plan_receipt, gate_status, digests,
+        plan_receipt, gate_status, digests, audit=plan.realization_audit,
     )
     ship_cmd = (
         f"git push -u origin {shlex.quote(plan.pr_branch)}\n"
@@ -1440,6 +1918,7 @@ def _build_single_spec_plan(
         spec_digest=digest,
         ticket_id=ticket_id,
     )
+    plan.realization_audit = compute_realization_audit(plan, digest, examiner_receipt)
     _render_plan_bodies(plan, base_branch, context_terms, examiner_receipt, gate_status)
     return plan
 
@@ -1956,7 +2435,7 @@ def _render_top_level_bodies(
     selected_plans: List[SpecShipPlan],
     head_branch: str,
     base_branch: str,
-    changed_count: int,
+    changed_files: List[str],
     index_changes: List[IndexChange],
     context_terms: List[str],
     specs_linked: List[str],
@@ -1968,8 +2447,9 @@ def _render_top_level_bodies(
 ) -> Tuple[str, str]:
     if sel_slug and len(selected_plans) == 1:
         return selected_plans[0].pr_body, selected_plans[0].show_me_body
+    code_count = len([f for f in changed_files if not _is_evidence_artifact_path(f)])
     pr_body = _format_markdown_sections(
-        head_branch, base_branch, changed_count, index_changes,
+        head_branch, base_branch, code_count, index_changes,
         context_terms, specs_linked, verified_proofs, failed_proofs, examiner_receipt, gate_status, spec_digests,
     )
     ship_cmd = f"gh pr create --base {shlex.quote(base_branch)} --head {shlex.quote(head_branch)}"
@@ -2081,7 +2561,7 @@ def _assemble_ship_result(
 ) -> ShipPrepResult:
     spec_digests = [p.spec_digest for p in selected_plans if p.spec_digest]
     pr_body, show_me_body = _render_top_level_bodies(
-        sel_slug, selected_plans, head_branch, base_branch, len(changed_files),
+        sel_slug, selected_plans, head_branch, base_branch, changed_files,
         index_changes, context_terms, specs_linked, verified_proofs, failed_proofs, examiner_receipt, gate_status, spec_digests,
     )
     return ShipPrepResult(
@@ -2168,7 +2648,9 @@ def prepare_ship_payload(
         return False, res_pub_err, pub_err
 
     for plan in selected_plans:
-        _render_plan_bodies(plan, base_branch, context_terms, plan_receipts.get(plan.spec_slug), gate_status)
+        p_rec = plan_receipts.get(plan.spec_slug)
+        plan.realization_audit = compute_realization_audit(plan, plan.spec_digest, p_rec)
+        _render_plan_bodies(plan, base_branch, context_terms, p_rec, gate_status)
 
     result = _assemble_ship_result(
         base_branch, head_branch, door_type, blast_radius, index_changes, context_terms,
