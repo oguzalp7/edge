@@ -48,6 +48,14 @@ _EVIDENCE_ARTIFACT_PREFIXES: Tuple[str, ...] = (
     ".edge/qa/proofs/",
     ".edge/qa/visual/",
 )
+_SLICE_BRANCH_PREFIXES: Tuple[str, ...] = (
+    "feat/",
+    "fix/",
+    "refactor/",
+    "hotfix/",
+    "chore/",
+    "ship/",
+)
 _CALLSTACK_HEADING_RE = re.compile(
     r"^(#{1,4})\s+.*(?:call[-\s]?stack|responsive\s+layout\s+flow|architecture|flow|component\s+tree|file\s+tree)",
     re.IGNORECASE,
@@ -284,12 +292,59 @@ def classify_merge_danger(changed_files: List[str], diff_stat: str = "") -> Tupl
     return door_type, blast_radius
 
 
-def _resolve_base_ref(repo: Path, base_branch: str) -> Optional[str]:
-    for cand in (base_branch, f"origin/{base_branch}"):
+def _get_head_branch(repo: Path) -> str:
+    code, out, _ = run_command(["git", "branch", "--show-current"], cwd=repo)
+    return (out.strip() or "HEAD") if code == 0 else "HEAD"
+
+
+def _resolve_base_ref(
+    repo: Path,
+    base_branch: str,
+    head_branch: Optional[str] = None,
+) -> Optional[str]:
+    raw = (base_branch or "").strip()
+    if not raw:
+        return None
+    clean_base = raw[7:] if raw.startswith("origin/") else raw
+    if raw.startswith("origin/"):
+        cands = (raw, clean_base)
+    else:
+        eff_head = head_branch if head_branch is not None else _get_head_branch(repo)
+        if eff_head == clean_base or clean_base == "staging":
+            cands = (f"origin/{clean_base}", clean_base)
+        else:
+            cands = (clean_base, f"origin/{clean_base}")
+    for cand in cands:
         code, _, _ = run_command(["git", "rev-parse", "--verify", cand], cwd=repo)
         if code == 0:
             return cand
     return None
+
+
+def validate_branch_topology(
+    base_branch: str,
+    head_branch: str,
+    split_branches: bool = False,
+) -> Tuple[bool, str]:
+    """Enforces development-first PR topology: slice branches and --split-branches cannot target staging."""
+    raw_base = (base_branch or "").strip()
+    clean_base = raw_base[7:] if raw_base.startswith("origin/") else raw_base
+    if clean_base != "staging":
+        return True, ""
+    if split_branches:
+        return (
+            False,
+            "Branch topology violation: per-spec split branches (ship/<slug>) must target "
+            "'development' first (--base development), never 'staging' directly.",
+        )
+    clean_head = (head_branch or "").strip()
+    if clean_head.startswith(_SLICE_BRANCH_PREFIXES):
+        return (
+            False,
+            f"Branch topology violation: slice branch '{clean_head}' cannot target 'staging' directly. "
+            "Open per-spec PR to 'development' first, then promote 'development' -> 'staging'.",
+        )
+    return True, ""
 
 
 def _collect_bold_terms_from_file(fpath: Path, terms: List[str]) -> None:
@@ -1656,6 +1711,27 @@ def _format_architecture_subsection(spec_digests: List[SpecDigest]) -> List[str]
     return lines
 
 
+def _format_included_specs_subsection(included_plans: List[SpecShipPlan]) -> List[str]:
+    if not included_plans:
+        return []
+    lines = ["", "### Included Specs & Realization"]
+    for plan in included_plans:
+        title = plan.spec_digest.title if plan.spec_digest and plan.spec_digest.title else plan.spec_slug
+        audit = plan.realization_audit
+        if audit is not None:
+            stats = (
+                f"{len(audit.actual_code_files)} code file(s), "
+                f"{len(audit.realized_files)} realized / "
+                f"{len(audit.untouched_expected_files)} untouched / "
+                f"{len(audit.unplanned_extra_files)} unplanned"
+            )
+        else:
+            stats = f"{len(plan.matched_files)} matched file(s)"
+        proof_badge = f"✅ {len(plan.verified_proofs)} proof(s)" if plan.verified_proofs else "—"
+        lines.append(f"- **{title}** (`{plan.spec_slug}`, branch `{plan.pr_branch}`): {stats} · QA: {proof_badge}")
+    return lines
+
+
 def _format_summary_section(
     head_branch: str,
     base_branch: str,
@@ -1664,6 +1740,7 @@ def _format_summary_section(
     context_terms: List[str],
     spec_digests: List[SpecDigest],
     audit: Optional[RealizationAudit] = None,
+    included_plans: Optional[List[SpecShipPlan]] = None,
 ) -> List[str]:
     lines = [
         "## Summary",
@@ -1677,6 +1754,8 @@ def _format_summary_section(
     for digest in spec_digests:
         lines.append(f"- **Spec (`{digest.path}`):** {digest.title}" + (f" — {digest.summary}" if digest.summary else ""))
     lines.extend(_format_realization_subsection(audit))
+    if audit is None and included_plans:
+        lines.extend(_format_included_specs_subsection(included_plans))
     lines.extend(_format_architecture_subsection(spec_digests))
     return lines
 
@@ -1763,10 +1842,18 @@ def _format_markdown_sections(
     gate_status: str,
     spec_digests: Optional[List[SpecDigest]] = None,
     audit: Optional[RealizationAudit] = None,
+    included_plans: Optional[List[SpecShipPlan]] = None,
 ) -> str:
     """Renders lean 2-section PR body (## Summary + ## Evidence only; no ## Merge Danger)."""
     lines = _format_summary_section(
-        head_branch, base_branch, code_count, index_changes, context_terms, spec_digests or [], audit=audit
+        head_branch,
+        base_branch,
+        code_count,
+        index_changes,
+        context_terms,
+        spec_digests or [],
+        audit=audit,
+        included_plans=included_plans,
     )
     lines.extend(_format_evidence_section(specs_linked, verified_proofs, failed_proofs, examiner_receipt, gate_status))
     return "\n".join(lines)
@@ -2510,8 +2597,18 @@ def _render_top_level_bodies(
         return selected_plans[0].pr_body, selected_plans[0].show_me_body
     code_count = len([f for f in changed_files if not _is_evidence_artifact_path(f)])
     pr_body = _format_markdown_sections(
-        head_branch, base_branch, code_count, index_changes,
-        context_terms, specs_linked, verified_proofs, failed_proofs, examiner_receipt, gate_status, spec_digests,
+        head_branch,
+        base_branch,
+        code_count,
+        index_changes,
+        context_terms,
+        specs_linked,
+        verified_proofs,
+        failed_proofs,
+        examiner_receipt,
+        gate_status,
+        spec_digests,
+        included_plans=selected_plans,
     )
     ship_cmd = f"gh pr create --base {shlex.quote(base_branch)} --head {shlex.quote(head_branch)}"
     return pr_body, f"{pr_body}\n\n## Ship Command\n```bash\n{ship_cmd}\n```"
@@ -2655,7 +2752,7 @@ def _compute_search_tokens(blast_radius: Dict[str, Any], index_changes: List[Ind
 
 def prepare_ship_payload(
     repo_path: Path,
-    base_branch: str = "staging",
+    base_branch: str = "development",
     strict_proofs: bool = False,
     spec_slug: Optional[str] = None,
     split_branches: bool = False,
@@ -2664,9 +2761,14 @@ def prepare_ship_payload(
 ) -> Tuple[bool, ShipPrepResult, str]:
     """Collects per-spec ship plans, scoped ProofVerifier results, optional evidence publishing, and PR bodies."""
     repo = normalize_target_path(repo_path)
-    eff_base = _resolve_base_ref(repo, base_branch)
+    head_branch = _get_head_branch(repo)
+    topo_ok, topo_err = validate_branch_topology(base_branch, head_branch, split_branches=split_branches)
+    if not topo_ok:
+        return False, _empty_result(base_branch, head_branch), topo_err
+
+    eff_base = _resolve_base_ref(repo, base_branch, head_branch=head_branch)
     if not eff_base:
-        return False, _empty_result(base_branch), f"Git base branch '{base_branch}' not found in {repo}."
+        return False, _empty_result(base_branch, head_branch), f"Git base branch '{base_branch}' not found in {repo}."
 
     diff_ok, head_branch, changed_files, diff_stat, idx_diff, diff_err = _collect_git_diff_bundle(repo, eff_base)
     if not diff_ok:

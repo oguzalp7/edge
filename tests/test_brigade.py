@@ -4855,7 +4855,7 @@ class TestEvidenceFirstReviewAndShipBridge(unittest.TestCase):
             )
             return proc.stdout.strip()
 
-        git("init", "-b", "staging")
+        git("init", "-b", "development")
         git("config", "user.email", "brigade@example.com")
         git("config", "user.name", "Edge Brigade")
 
@@ -4863,7 +4863,7 @@ class TestEvidenceFirstReviewAndShipBridge(unittest.TestCase):
         (self.repo_path / "specs" / "INDEX.md").write_text("# Navigation Index\n", encoding="utf-8")
         (self.repo_path / "CONTEXT.md").write_text("# Context\n- **Booking**: Customer reservation.\n", encoding="utf-8")
         git("add", "-A")
-        git("commit", "-m", "chore: base staging")
+        git("commit", "-m", "chore: base development")
 
         git("checkout", "-b", "feat/bookings-flow")
         (self.repo_path / "specs" / "INDEX.md").write_text(
@@ -4916,7 +4916,7 @@ class TestEvidenceFirstReviewAndShipBridge(unittest.TestCase):
         git("add", "-A")
         git("commit", "-m", "feat(bookings): implement booking flow")
 
-        ok, result, err = ship_prep.prepare_ship_payload(self.repo_path, base_branch="staging")
+        ok, result, err = ship_prep.prepare_ship_payload(self.repo_path, base_branch="development")
         self.assertTrue(ok, f"prepare_ship_payload should succeed: {err}")
         self.assertTrue(result.intent.strip())
         self.assertNotIn("\n", result.intent.strip())
@@ -4947,7 +4947,7 @@ class TestEvidenceFirstReviewAndShipBridge(unittest.TestCase):
                     "prepare-ship",
                     str(self.repo_path),
                     "--base",
-                    "staging",
+                    "development",
                     "--format",
                     "json",
                     "--out",
@@ -4963,7 +4963,7 @@ class TestEvidenceFirstReviewAndShipBridge(unittest.TestCase):
         for key in ("intent", "scenario_contract", "pr_body", "door_type", "blast_radius", "verified_proofs", "failed_proofs"):
             self.assertIn(key, payload)
 
-        # Broken QA proof receipt changed in staging..HEAD -> prepare-ship fails (exit 1)
+        # Broken QA proof receipt changed in development..HEAD -> prepare-ship fails (exit 1)
         (proofs_dir / "broken.json").write_text(
             json.dumps({
                 "slug": "broken",
@@ -4979,7 +4979,7 @@ class TestEvidenceFirstReviewAndShipBridge(unittest.TestCase):
         )
         git("add", ".edge/qa/proofs/broken.json")
         git("commit", "-m", "test: add broken scoped proof")
-        ok_bad, res_bad, _ = ship_prep.prepare_ship_payload(self.repo_path, base_branch="staging")
+        ok_bad, res_bad, _ = ship_prep.prepare_ship_payload(self.repo_path, base_branch="development")
         self.assertFalse(ok_bad, "Broken QA proof must fail prepare_ship_payload")
         self.assertTrue(len(res_bad.failed_proofs) >= 1)
 
@@ -4987,7 +4987,7 @@ class TestEvidenceFirstReviewAndShipBridge(unittest.TestCase):
             with patch.object(
                 sys,
                 "argv",
-                ["brigade", "prepare-ship", str(self.repo_path), "--base", "staging"],
+                ["brigade", "prepare-ship", str(self.repo_path), "--base", "development"],
             ):
                 ret_bad = brigade_cli.main()
         except SystemExit as exc:
@@ -5295,7 +5295,11 @@ class TestEvidenceFirstReviewAndShipBridge(unittest.TestCase):
         self.assertIn("spec_slug", sig.parameters, "prepare_ship_payload must accept spec_slug")
         self.assertIn("split_branches", sig.parameters, "prepare_ship_payload must accept split_branches")
 
-        repo_dir = Path(tempfile.mkdtemp(dir=self.test_dir))
+        tmp_parent = Path(tempfile.mkdtemp(dir=self.test_dir))
+        bare_dir = tmp_parent / "origin.git"
+        repo_dir = tmp_parent / "repo"
+        repo_dir.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "--bare", str(bare_dir)], check=True, capture_output=True)
 
         def git(*git_args):
             proc = subprocess.run(
@@ -5307,11 +5311,12 @@ class TestEvidenceFirstReviewAndShipBridge(unittest.TestCase):
             )
             return proc.stdout.strip()
 
-        git("init", "-b", "staging")
+        git("init", "-b", "development")
         git("config", "user.email", "brigade@example.com")
         git("config", "user.name", "Edge Brigade")
+        git("remote", "add", "origin", bare_dir.as_uri())
 
-        # Base staging commit with a stale/malformed historical proof that MUST NOT block future slices
+        # Base origin/development commit with a stale/malformed historical proof that MUST NOT block future slices
         (repo_dir / "README.md").write_text("# Base Repo\n", encoding="utf-8")
         (repo_dir / "specs").mkdir(parents=True, exist_ok=True)
         (repo_dir / "specs" / "INDEX.md").write_text("# Navigation Index\n", encoding="utf-8")
@@ -5319,9 +5324,8 @@ class TestEvidenceFirstReviewAndShipBridge(unittest.TestCase):
         proofs_dir.mkdir(parents=True, exist_ok=True)
         (proofs_dir / "legacy-broken.json").write_text("{malformed-legacy-json", encoding="utf-8")
         git("add", "-A")
-        git("commit", "-m", "chore: staging base with legacy broken proof")
-
-        git("checkout", "-b", "development")
+        git("commit", "-m", "chore: origin/development base with legacy broken proof")
+        git("push", "-u", "origin", "development")
 
         arch_dir = repo_dir / ".edge" / "archive" / "specs"
         arch_dir.mkdir(parents=True, exist_ok=True)
@@ -5384,7 +5388,7 @@ class TestEvidenceFirstReviewAndShipBridge(unittest.TestCase):
         git("commit", "-m", "feat: deliver alpha and beta slices on development")
 
         # 1. Scoped ProofVerifier ignores legacy-broken.json & builds 2 SpecShipPlans
-        ok, result, err = ship_prep.prepare_ship_payload(repo_dir, base_branch="staging")
+        ok, result, err = ship_prep.prepare_ship_payload(repo_dir, base_branch="development")
         self.assertTrue(ok, f"prepare_ship_payload must ignore legacy-broken.json and succeed: {err}")
         self.assertEqual(result.failed_proofs, [], f"legacy-broken.json must not fail scoped proofs: {result.failed_proofs}")
         self.assertTrue(hasattr(result, "spec_plans"), "ShipPrepResult must include spec_plans")
@@ -5414,13 +5418,13 @@ class TestEvidenceFirstReviewAndShipBridge(unittest.TestCase):
         self.assertIn("ship/alpha", alpha_plan.show_me_body)
         self.assertNotIn("no-mistakes axi run", alpha_plan.show_me_body)
 
-        # 3. CLI --spec alpha --format pr
+        # 3. CLI --spec alpha --format pr (defaults to --base development)
         stdout_buf = io.StringIO()
         try:
             with patch.object(
                 sys,
                 "argv",
-                ["brigade", "prepare-ship", str(repo_dir), "--base", "staging", "--spec", "alpha", "--format", "pr"],
+                ["brigade", "prepare-ship", str(repo_dir), "--base", "development", "--spec", "alpha", "--format", "pr"],
             ), redirect_stdout(stdout_buf):
                 rc_spec = brigade_cli.main()
         except SystemExit as exc:
@@ -5433,13 +5437,13 @@ class TestEvidenceFirstReviewAndShipBridge(unittest.TestCase):
         self.assertNotIn("Beta Flow Slice", spec_out)
         self.assertNotIn("## Merge Danger", spec_out)
 
-        # 4. CLI --split-branches --format json creates isolated ship/alpha & ship/beta off staging and restores HEAD
+        # 4. CLI --split-branches --format json creates isolated ship/alpha & ship/beta off origin/development and restores HEAD
         json_buf = io.StringIO()
         try:
             with patch.object(
                 sys,
                 "argv",
-                ["brigade", "prepare-ship", str(repo_dir), "--base", "staging", "--split-branches", "--format", "json"],
+                ["brigade", "prepare-ship", str(repo_dir), "--base", "development", "--split-branches", "--format", "json"],
             ), redirect_stdout(json_buf):
                 rc_split = brigade_cli.main()
         except SystemExit as exc:
@@ -5474,7 +5478,7 @@ class TestEvidenceFirstReviewAndShipBridge(unittest.TestCase):
             with patch.object(
                 sys,
                 "argv",
-                ["brigade", "prepare-ship", str(repo_dir), "--base", "staging", "--spec", "does-not-exist"],
+                ["brigade", "prepare-ship", str(repo_dir), "--base", "development", "--spec", "does-not-exist"],
             ):
                 rc_missing = brigade_cli.main()
         except SystemExit as exc:
@@ -5668,7 +5672,11 @@ class TestEvidenceFirstReviewAndShipBridge(unittest.TestCase):
         )
 
         with tempfile.TemporaryDirectory() as tmp_root:
-            repo_dir = Path(tmp_root)
+            tmp_path = Path(tmp_root)
+            bare_dir = tmp_path / "origin.git"
+            repo_dir = tmp_path / "repo"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["git", "init", "--bare", str(bare_dir)], check=True, capture_output=True)
 
             def git(*git_args):
                 proc = subprocess.run(
@@ -5680,9 +5688,10 @@ class TestEvidenceFirstReviewAndShipBridge(unittest.TestCase):
                 )
                 return proc.stdout.strip()
 
-            git("init", "-b", "staging")
+            git("init", "-b", "development")
             git("config", "user.email", "brigade@example.com")
             git("config", "user.name", "Edge Brigade")
+            git("remote", "add", "origin", bare_dir.as_uri())
 
             (repo_dir / "README.md").write_text("# Base\n", encoding="utf-8")
             (repo_dir / "src" / "app" / "(portal)" / "portal").mkdir(parents=True, exist_ok=True)
@@ -5690,9 +5699,8 @@ class TestEvidenceFirstReviewAndShipBridge(unittest.TestCase):
                 "export const base = 1;\n", encoding="utf-8"
             )
             git("add", "-A")
-            git("commit", "-m", "chore: staging base")
-
-            git("checkout", "-b", "development")
+            git("commit", "-m", "chore: origin/development base")
+            git("push", "-u", "origin", "development")
 
             # Spec 1 using ONLY Markdown tables (no YAML expected_files / ## Expected Files)
             arch_dir = repo_dir / ".edge" / "archive" / "specs"
@@ -5796,7 +5804,7 @@ class TestEvidenceFirstReviewAndShipBridge(unittest.TestCase):
             git("commit", "-m", "test(QA): [TICK-TWO] verify mobile nav")
 
             ok, result, err = ship_prep.prepare_ship_payload(
-                repo_dir, base_branch="staging", split_branches=True
+                repo_dir, base_branch="development", split_branches=True
             )
             self.assertTrue(ok, f"prepare_ship_payload(split_branches=True) failed: {err}")
             self.assertEqual(sorted(result.split_branches_created), ["ship/slug-one", "ship/slug-two"])
@@ -6488,6 +6496,205 @@ class TestEvidenceFirstReviewAndShipBridge(unittest.TestCase):
                 self.assertNotIn("actions=['", body)
                 self.assertNotIn("db_crosscheck={", body)
                 self.assertNotIn("## Merge Danger", body)
+
+    # ------------------------------------------------------------------
+    # SPEC-EDGE-BRIGADE-006 (IC-1 .. IC-4): Development-First PR Topology & Two-Tier Release Flow
+    # ------------------------------------------------------------------
+
+    def test_development_first_pr_topology_and_two_tier_release_flow(self):
+        import inspect
+        import io
+        from contextlib import redirect_stdout
+
+        ship_prep = importlib.import_module("tools.brigade.ship_prep")
+
+        # IC-1: Default base_branch must be "development"
+        sig_payload = inspect.signature(ship_prep.prepare_ship_payload)
+        self.assertEqual(
+            sig_payload.parameters["base_branch"].default,
+            "development",
+            "prepare_ship_payload must default base_branch to 'development'",
+        )
+
+        # IC-1: _resolve_base_ref accepts head_branch
+        sig_ref = inspect.signature(ship_prep._resolve_base_ref)
+        self.assertIn(
+            "head_branch",
+            sig_ref.parameters,
+            "_resolve_base_ref must accept head_branch for remote-first resolution",
+        )
+
+        # IC-2: Hard Branch Topology Guard (validate_branch_topology)
+        validate_fn = getattr(ship_prep, "validate_branch_topology", None)
+        self.assertIsNotNone(
+            validate_fn,
+            "tools.brigade.ship_prep must define validate_branch_topology",
+        )
+
+        ok_split_stg, msg_split_stg = validate_fn("staging", "development", split_branches=True)
+        self.assertFalse(ok_split_stg)
+        self.assertIn("Branch topology violation", msg_split_stg)
+
+        for slice_branch in (
+            "feat/my-slice",
+            "fix/bug-1",
+            "refactor/core",
+            "hotfix/urgent",
+            "chore/deps",
+            "ship/alpha",
+        ):
+            ok_slice, msg_slice = validate_fn("staging", slice_branch, split_branches=False)
+            self.assertFalse(ok_slice, f"Slice branch {slice_branch} must be blocked from staging")
+            self.assertIn("Branch topology violation", msg_slice)
+
+        self.assertEqual(validate_fn("development", "feat/my-slice", split_branches=False), (True, ""))
+        self.assertEqual(validate_fn("development", "development", split_branches=True), (True, ""))
+        self.assertEqual(validate_fn("staging", "development", split_branches=False), (True, ""))
+
+        # IC-1, IC-2, IC-3: End-to-end Smart Base Resolution, Guard Enforcement, Tier 1 & Tier 2 Flow
+        with tempfile.TemporaryDirectory() as tmp_root:
+            tmp_path = Path(tmp_root)
+            bare_dir = tmp_path / "origin.git"
+            repo_dir = tmp_path / "repo"
+            local_only_dir = tmp_path / "local_only"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            local_only_dir.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["git", "init", "--bare", str(bare_dir)], check=True, capture_output=True)
+
+            def git_in(target_dir: Path, *git_args):
+                proc = subprocess.run(
+                    ["git", *git_args],
+                    cwd=target_dir,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                return proc.stdout.strip()
+
+            # Local-only fallback test repo (no origin remote)
+            git_in(local_only_dir, "init", "-b", "staging")
+            git_in(local_only_dir, "config", "user.email", "brigade@example.com")
+            git_in(local_only_dir, "config", "user.name", "Edge Brigade")
+            (local_only_dir / "README.md").write_text("# Local\n", encoding="utf-8")
+            git_in(local_only_dir, "add", "README.md")
+            git_in(local_only_dir, "commit", "-m", "init")
+            git_in(local_only_dir, "checkout", "-b", "development")
+            self.assertEqual(
+                ship_prep._resolve_base_ref(local_only_dir, "development", head_branch="development"),
+                "development",
+            )
+            self.assertEqual(
+                ship_prep._resolve_base_ref(local_only_dir, "staging", head_branch="development"),
+                "staging",
+            )
+
+            # Repo with origin remote
+            git_in(repo_dir, "init", "-b", "staging")
+            git_in(repo_dir, "config", "user.email", "brigade@example.com")
+            git_in(repo_dir, "config", "user.name", "Edge Brigade")
+            git_in(repo_dir, "remote", "add", "origin", bare_dir.as_uri())
+
+            (repo_dir / "README.md").write_text("# Base\n", encoding="utf-8")
+            (repo_dir / "specs").mkdir(parents=True, exist_ok=True)
+            (repo_dir / "specs" / "INDEX.md").write_text("# Index\n", encoding="utf-8")
+            git_in(repo_dir, "add", "-A")
+            git_in(repo_dir, "commit", "-m", "chore: initial staging")
+            git_in(repo_dir, "push", "-u", "origin", "staging")
+
+            git_in(repo_dir, "checkout", "-b", "development")
+            git_in(repo_dir, "push", "-u", "origin", "development")
+
+            # Add 2 delivered specs on development ahead of origin/development and origin/staging
+            arch_dir = repo_dir / ".edge" / "archive" / "specs"
+            arch_dir.mkdir(parents=True, exist_ok=True)
+            (arch_dir / "alpha.md").write_text(
+                "---\nexpected_files:\n  - src/alpha.ts\n---\n# Alpha Slice\n\nSummary: Alpha feature.\n",
+                encoding="utf-8",
+            )
+            (arch_dir / "beta.md").write_text(
+                "---\nexpected_files:\n  - src/beta.ts\n---\n# Beta Slice\n\nSummary: Beta feature.\n",
+                encoding="utf-8",
+            )
+            (repo_dir / "src").mkdir(parents=True, exist_ok=True)
+            (repo_dir / "src" / "alpha.ts").write_text("export const alpha = 1;\n", encoding="utf-8")
+            (repo_dir / "src" / "beta.ts").write_text("export const beta = 2;\n", encoding="utf-8")
+            git_in(repo_dir, "add", "-A")
+            git_in(repo_dir, "commit", "-m", "feat: deliver alpha and beta on development")
+
+            # IC-1: Remote-first base ref resolution
+            self.assertEqual(
+                ship_prep._resolve_base_ref(repo_dir, "development", head_branch="development"),
+                "origin/development",
+            )
+            self.assertEqual(
+                ship_prep._resolve_base_ref(repo_dir, "staging", head_branch="development"),
+                "origin/staging",
+            )
+
+            # IC-2: Blocked prepare_ship_payload & CLI when staging + split_branches=True
+            ok_blk, _, err_blk = ship_prep.prepare_ship_payload(
+                repo_dir, base_branch="staging", split_branches=True
+            )
+            self.assertFalse(ok_blk)
+            self.assertIn("Branch topology violation", err_blk)
+
+            try:
+                with patch.object(
+                    sys,
+                    "argv",
+                    ["brigade", "prepare-ship", str(repo_dir), "--base", "staging", "--split-branches"],
+                ):
+                    rc_blk = brigade_cli.main()
+            except SystemExit as exc:
+                self.fail(f"CLI topology violation should exit 1 cleanly: {exc}")
+            self.assertEqual(rc_blk, 1)
+
+            # IC-3 Tier 1: default --base development (no --base flag) works cleanly
+            json_tier1_buf = io.StringIO()
+            try:
+                with patch.object(
+                    sys,
+                    "argv",
+                    ["brigade", "prepare-ship", str(repo_dir), "--split-branches", "--format", "json"],
+                ), redirect_stdout(json_tier1_buf):
+                    rc_tier1 = brigade_cli.main()
+            except SystemExit as exc:
+                self.fail(f"CLI Tier 1 default '--base development' exited abnormally: {exc}")
+            self.assertEqual(rc_tier1, 0)
+            tier1_payload = json.loads(json_tier1_buf.getvalue())
+            self.assertEqual(tier1_payload["base_branch"], "development")
+            self.assertEqual(sorted(tier1_payload["split_branches_created"]), ["ship/alpha", "ship/beta"])
+            self.assertIn("gh pr create --base development", tier1_payload["spec_plans"][0]["show_me_body"])
+
+            # IC-3 Tier 2: development -> staging consolidated Release PR (split_branches=False)
+            ok_t2, res_t2, err_t2 = ship_prep.prepare_ship_payload(
+                repo_dir, base_branch="staging", split_branches=False
+            )
+            self.assertTrue(ok_t2, f"Tier 2 development -> staging Release PR should succeed: {err_t2}")
+            self.assertIn("gh pr create --base staging --head development", res_t2.show_me_body)
+            self.assertIn("## Summary", res_t2.pr_body)
+            self.assertIn("## Evidence", res_t2.pr_body)
+            self.assertIn("### Included Specs & Realization", res_t2.pr_body)
+            self.assertIn("Alpha Slice", res_t2.pr_body)
+            self.assertIn("Beta Slice", res_t2.pr_body)
+
+            # IC-2: Slice branch targeting staging directly is blocked
+            git_in(repo_dir, "checkout", "-b", "feat/my-slice")
+            self.assertEqual(
+                ship_prep._resolve_base_ref(repo_dir, "development", head_branch="feat/my-slice"),
+                "development",
+            )
+            ok_slice_blk, _, err_slice_blk = ship_prep.prepare_ship_payload(
+                repo_dir, base_branch="staging"
+            )
+            self.assertFalse(ok_slice_blk)
+            self.assertIn("Branch topology violation", err_slice_blk)
+
+        # IC-4: skills/edge-ship/SKILL.md documents Tier 1, Tier 2, and --base development
+        skill_text = (self.repo_root / "skills" / "edge-ship" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("Tier 1", skill_text)
+        self.assertIn("Tier 2", skill_text)
+        self.assertIn("--base development", skill_text)
 
 
 if __name__ == "__main__":

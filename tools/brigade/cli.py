@@ -318,7 +318,7 @@ def _write_atomic_text(out_path: Path, content: str) -> None:
 
 def cmd_prepare_ship(args: argparse.Namespace) -> int:
     repo_path = normalize_target_path(args.repo)
-    base_branch = getattr(args, "base", "staging") or "staging"
+    base_branch = getattr(args, "base", "development") or "development"
     fmt = getattr(args, "format", "pr") or "pr"
     strict_proofs = bool(getattr(args, "strict_proofs", False))
     spec_slug = getattr(args, "spec", None)
@@ -1210,7 +1210,7 @@ def main() -> int:
     # prepare-ship
     p_ship = subparsers.add_parser("prepare-ship", help="Synthesize per-spec Specs-to-PR ship plans and split branches")
     p_ship.add_argument("repo", help="Path to target repository")
-    p_ship.add_argument("--base", default="staging", help="Base branch to diff against (default: staging)")
+    p_ship.add_argument("--base", default="development", help="Base branch to diff against (default: development)")
     p_ship.add_argument("--spec", default=None, help="Filter to a single changed spec slug")
     p_ship.add_argument("--split-branches", action="store_true", help="Create isolated ship/<spec-slug> branches off base")
     p_ship.add_argument(
