@@ -5498,6 +5498,649 @@ class TestEvidenceFirstReviewAndShipBridge(unittest.TestCase):
         self.assertIn("gh issue create", nm_text)
         self.assertIn("frontier-axi", nm_text)
 
+    # ------------------------------------------------------------------
+    # SPEC-EDGE-BRIGADE-005 (IC-1 .. IC-5): Gitignored .edge/, Commit Splitting & Visual PR Evidence
+    # ------------------------------------------------------------------
+
+    def test_SPEC_EDGE_BRIGADE_005_ic1_gitignored_spec_discovery_and_ticket_resolution(self):
+        ship_prep = importlib.import_module("tools.brigade.ship_prep")
+        resolve_ticket_fn = getattr(ship_prep, "_resolve_spec_ticket_ids", None)
+        self.assertIsNotNone(
+            resolve_ticket_fn,
+            "tools.brigade.ship_prep must define _resolve_spec_ticket_ids (SPEC-EDGE-BRIGADE-005 IC-1)",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_root:
+            repo_dir = Path(tmp_root)
+
+            def git(*git_args):
+                proc = subprocess.run(
+                    ["git", *git_args],
+                    cwd=repo_dir,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                return proc.stdout.strip()
+
+            git("init", "-b", "staging")
+            git("config", "user.email", "brigade@example.com")
+            git("config", "user.name", "Edge Brigade")
+
+            (repo_dir / ".gitignore").write_text(".edge/\n", encoding="utf-8")
+            (repo_dir / "README.md").write_text("# Base\n", encoding="utf-8")
+            git("add", ".gitignore", "README.md")
+            git("commit", "-m", "chore: base staging with .edge ignored")
+
+            git("checkout", "-b", "development")
+
+            # Commits in staging..HEAD without committing .edge/ specs
+            (repo_dir / "src" / "components" / "portfolio").mkdir(parents=True, exist_ok=True)
+            (repo_dir / "src" / "components" / "portfolio" / "PortfolioStudio.tsx").write_text(
+                "export const PortfolioStudio = () => null;\n", encoding="utf-8"
+            )
+            (repo_dir / "src" / "actions").mkdir(parents=True, exist_ok=True)
+            (repo_dir / "src" / "actions" / "portal-stories.ts").write_text(
+                "export async function updatePortalStoryAction() {}\n", encoding="utf-8"
+            )
+            git("add", "src")
+            git("commit", "-m", "feat(polish): [TICK-FEAT-CONTENT-STU-POLISH] avatar and story polish")
+
+            (repo_dir / "src" / "components" / "portal").mkdir(parents=True, exist_ok=True)
+            (repo_dir / "src" / "components" / "portal" / "LookbookCard.tsx").write_text(
+                "export const LookbookCard = () => null;\n", encoding="utf-8"
+            )
+            git("add", "src")
+            git("commit", "-m", "feat(portal): 3:4 grid and object-top framing")
+
+            # Untracked gitignored specs under .edge/archive/specs/ (no TICK-* literal in markdown!)
+            arch_dir = repo_dir / ".edge" / "archive" / "specs"
+            arch_dir.mkdir(parents=True, exist_ok=True)
+            (arch_dir / "content-studio-avatar-story-polish.md").write_text(
+                "# Spec: Content Studio Avatar & Story Polish\n\n"
+                "| AC | Scope | File |\n"
+                "| :--- | :--- | :--- |\n"
+                "| AC-01 | Avatar | `src/components/portfolio/PortfolioStudio.tsx` |\n"
+                "| AC-03 | Story | `src/actions/portal-stories.ts` |\n",
+                encoding="utf-8",
+            )
+            (arch_dir / "content-studio-avatar-story-polish-critique.md").write_text(
+                "# Critique: Content Studio\n\n`src/actions/portal-stories.ts`\n",
+                encoding="utf-8",
+            )
+            (arch_dir / "portal-grid-aspect-and-mobile-nav-polish.md").write_text(
+                "# Spec: Portal Grid & Mobile Nav Polish\n\n"
+                "| AC | Scope | File |\n"
+                "| :--- | :--- | :--- |\n"
+                "| AC-01 | Grid | `src/components/portal/LookbookCard.tsx` |\n",
+                encoding="utf-8",
+            )
+            (arch_dir / "unrelated-old.md").write_text(
+                "# Old Unrelated Spec\n\n"
+                "---\nexpected_files:\n  - src/legacy/never_touched.ts\n---\n",
+                encoding="utf-8",
+            )
+
+            # Untracked proof JSON + brigade.json history for reverse ticket resolution
+            proofs_dir = repo_dir / ".edge" / "qa" / "proofs"
+            proofs_dir.mkdir(parents=True, exist_ok=True)
+            (proofs_dir / "portal.json").write_text(
+                json.dumps({
+                    "slug": "portal",
+                    "spec": ".edge/specs/portal-grid-aspect-and-mobile-nav-polish.md",
+                    "ticket_id": "TICK-FEAT-PORTAL-GRID-POLISH",
+                    "visited_urls": ["http://localhost:3000/portal/explore"],
+                    "user_actions_executed": ["open"],
+                    "persistence_verified": True,
+                    "console_clean": True,
+                    "screenshot_paths": [],
+                    "host_facts_verified": True,
+                    "db_crosscheck": {"cells": 1},
+                }),
+                encoding="utf-8",
+            )
+
+            brigade_state = {
+                "version": "2.0.0",
+                "repo_path": str(repo_dir),
+                "base_branch": "development",
+                "current_state": "IDLE",
+                "active_ticket": None,
+                "examiner_receipt": None,
+                "history": [
+                    {
+                        "timestamp": "2026-11-19T03:00:00Z",
+                        "from_state": "REVIEW",
+                        "to_state": "STAGING",
+                        "success": True,
+                        "message": "Sealed TICK-FEAT-CONTENT-STU-POLISH",
+                        "details": {
+                            "ticket_id": "TICK-FEAT-CONTENT-STU-POLISH",
+                            "examiner_receipt": {
+                                "verdict": "PASS",
+                                "summary": "Avatar & story polish passed",
+                                "evidence_reviewed": [
+                                    ".edge/archive/specs/content-studio-avatar-story-polish.md",
+                                    "src/actions/portal-stories.ts",
+                                ],
+                            },
+                        },
+                    }
+                ],
+            }
+            (repo_dir / ".edge" / "brigade.json").write_text(
+                json.dumps(brigade_state, indent=2), encoding="utf-8"
+            )
+
+            changed_files = git("diff", "--name-only", "staging..HEAD").splitlines()
+            discovered = ship_prep.discover_changed_specs(repo_dir, "staging", changed_files, [])
+
+            self.assertEqual(
+                sorted(discovered),
+                sorted([
+                    ".edge/archive/specs/content-studio-avatar-story-polish.md",
+                    ".edge/archive/specs/portal-grid-aspect-and-mobile-nav-polish.md",
+                ]),
+                f"Expected only the 2 matching gitignored archive specs, got: {discovered}",
+            )
+            self.assertNotIn(".edge/archive/specs/unrelated-old.md", discovered)
+            self.assertNotIn(".edge/archive/specs/content-studio-avatar-story-polish-critique.md", discovered)
+
+            history_receipts = {
+                "TICK-FEAT-CONTENT-STU-POLISH": brigade_state["history"][0]["details"]["examiner_receipt"]
+            }
+            ticket_map = resolve_ticket_fn(repo_dir, "staging", discovered, history_receipts)
+            self.assertEqual(
+                ticket_map.get(".edge/archive/specs/content-studio-avatar-story-polish.md"),
+                "TICK-FEAT-CONTENT-STU-POLISH",
+            )
+            self.assertEqual(
+                ticket_map.get(".edge/archive/specs/portal-grid-aspect-and-mobile-nav-polish.md"),
+                "TICK-FEAT-PORTAL-GRID-POLISH",
+            )
+
+    def test_SPEC_EDGE_BRIGADE_005_ic2_table_extraction_globs_and_commit_split_branches(self):
+        ship_prep = importlib.import_module("tools.brigade.ship_prep")
+        extract_tables_fn = getattr(ship_prep, "_extract_table_paths", None)
+        self.assertIsNotNone(
+            extract_tables_fn,
+            "tools.brigade.ship_prep must define _extract_table_paths (SPEC-EDGE-BRIGADE-005 IC-2)",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_root:
+            repo_dir = Path(tmp_root)
+
+            def git(*git_args):
+                proc = subprocess.run(
+                    ["git", *git_args],
+                    cwd=repo_dir,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                return proc.stdout.strip()
+
+            git("init", "-b", "staging")
+            git("config", "user.email", "brigade@example.com")
+            git("config", "user.name", "Edge Brigade")
+
+            (repo_dir / "README.md").write_text("# Base\n", encoding="utf-8")
+            (repo_dir / "src" / "app" / "(portal)" / "portal").mkdir(parents=True, exist_ok=True)
+            (repo_dir / "src" / "app" / "(portal)" / "portal" / "page.tsx").write_text(
+                "export const base = 1;\n", encoding="utf-8"
+            )
+            git("add", "-A")
+            git("commit", "-m", "chore: staging base")
+
+            git("checkout", "-b", "development")
+
+            # Spec 1 using ONLY Markdown tables (no YAML expected_files / ## Expected Files)
+            arch_dir = repo_dir / ".edge" / "archive" / "specs"
+            arch_dir.mkdir(parents=True, exist_ok=True)
+            (arch_dir / "slug-one.md").write_text(
+                "# Slice One Spec\n\n"
+                "## 1. AC\n"
+                "| AC | Scope | Contract |\n"
+                "| :--- | :--- | :--- |\n"
+                "| AC-01 | Migration | Add column in `src/db/migrations/0017_*.sql` |\n\n"
+                "## 2. Inventory\n"
+                "| Layer | File |\n"
+                "| :--- | :--- |\n"
+                "| Core | `src/slice1/studio.ts` |\n",
+                encoding="utf-8",
+            )
+
+            extracted_one = ship_prep._extract_spec_expected_files(arch_dir / "slug-one.md")
+            self.assertIn("src/db/migrations/0017_*.sql", extracted_one)
+            self.assertIn("src/slice1/studio.ts", extracted_one)
+
+            # Slice 1 commits: [TICK-ONE], fix(polish):, and untagged test(portal):
+            (repo_dir / "src" / "db" / "migrations").mkdir(parents=True, exist_ok=True)
+            (repo_dir / "src" / "db" / "migrations" / "0017_avatar_poster.sql").write_text(
+                "ALTER TABLE profiles ADD COLUMN avatar_url text;\n", encoding="utf-8"
+            )
+            (repo_dir / "src" / "slice1").mkdir(parents=True, exist_ok=True)
+            (repo_dir / "src" / "slice1" / "studio.ts").write_text("export const v = 1;\n", encoding="utf-8")
+            shots_dir = repo_dir / ".edge" / "qa" / "screenshots"
+            shots_dir.mkdir(parents=True, exist_ok=True)
+            (shots_dir / "s1.png").write_bytes(self._make_solid_png(4, 4, (10, 20, 30)))
+            proofs_dir = repo_dir / ".edge" / "qa" / "proofs"
+            proofs_dir.mkdir(parents=True, exist_ok=True)
+            (proofs_dir / "portal.json").write_text(
+                json.dumps({
+                    "slug": "portal",
+                    "spec": ".edge/specs/slug-one.md",
+                    "ticket_id": "TICK-ONE",
+                    "visited_urls": ["http://localhost:3000/dashboard/content"],
+                    "user_actions_executed": ["save avatar"],
+                    "persistence_verified": True,
+                    "console_clean": True,
+                    "screenshot_paths": [".edge/qa/screenshots/s1.png"],
+                    "host_facts_verified": True,
+                    "db_crosscheck": {"slice": 1},
+                }),
+                encoding="utf-8",
+            )
+            git("add", "-A")
+            git("commit", "-m", "feat(studio): [TICK-ONE] migration, studio and slice-1 proof")
+
+            (repo_dir / "src" / "slice1" / "studio.ts").write_text("export const v = 2;\n", encoding="utf-8")
+            git("add", "src/slice1/studio.ts")
+            git("commit", "-m", "fix(polish): harden studio guard")
+
+            (repo_dir / "tests" / "unit").mkdir(parents=True, exist_ok=True)
+            (repo_dir / "tests" / "unit" / "studio.test.ts").write_text(
+                "import '../src/slice1/studio';\n", encoding="utf-8"
+            )
+            git("add", "tests/unit/studio.test.ts")
+            git("commit", "-m", "test(portal): add untagged studio regression test")
+
+            # Spec 2 + Slice 2 commits: [TICK-TWO] modifying shared portal.json + non-overlapping page.tsx
+            (arch_dir / "slug-two.md").write_text(
+                "# Slice Two Spec\n\n"
+                "## 1. AC\n"
+                "| AC | Scope | Contract |\n"
+                "| :--- | :--- | :--- |\n"
+                "| AC-01 | Layout | Update `src/app/(portal)/layout.tsx` and `src/app/(portal)/portal/page.tsx` |\n",
+                encoding="utf-8",
+            )
+            (repo_dir / "src" / "app" / "(portal)" / "layout.tsx").write_text(
+                "export default function Layout() { return null; }\n", encoding="utf-8"
+            )
+            (repo_dir / "src" / "app" / "(portal)" / "portal" / "page.tsx").write_text(
+                "export const base = 2;\n", encoding="utf-8"
+            )
+            (shots_dir / "s2.png").write_bytes(self._make_solid_png(4, 4, (50, 60, 70)))
+            (proofs_dir / "portal.json").write_text(
+                json.dumps({
+                    "slug": "portal",
+                    "spec": ".edge/specs/slug-two.md",
+                    "ticket_id": "TICK-TWO",
+                    "visited_urls": ["http://localhost:3000/portal/explore"],
+                    "user_actions_executed": ["open grid"],
+                    "persistence_verified": True,
+                    "console_clean": True,
+                    "screenshot_paths": [".edge/qa/screenshots/s2.png"],
+                    "host_facts_verified": True,
+                    "db_crosscheck": {"slice": 2},
+                }),
+                encoding="utf-8",
+            )
+            git("add", "-A")
+            git("commit", "-m", "feat(portal): [TICK-TWO] layout, portal page and slice-2 proof")
+
+            (repo_dir / "src" / "app" / "(portal)" / "layout.tsx").write_text(
+                "export default function Layout() { return 'v2'; }\n", encoding="utf-8"
+            )
+            git("add", "src/app/(portal)/layout.tsx")
+            git("commit", "-m", "test(QA): [TICK-TWO] verify mobile nav")
+
+            ok, result, err = ship_prep.prepare_ship_payload(
+                repo_dir, base_branch="staging", split_branches=True
+            )
+            self.assertTrue(ok, f"prepare_ship_payload(split_branches=True) failed: {err}")
+            self.assertEqual(sorted(result.split_branches_created), ["ship/slug-one", "ship/slug-two"])
+            self.assertEqual(git("branch", "--show-current"), "development")
+
+            slug1_tree = set(git("ls-tree", "-r", "--name-only", "ship/slug-one").splitlines())
+            self.assertIn("src/db/migrations/0017_avatar_poster.sql", slug1_tree)
+            self.assertIn("src/slice1/studio.ts", slug1_tree)
+            self.assertIn("tests/unit/studio.test.ts", slug1_tree)
+            self.assertNotIn("src/app/(portal)/layout.tsx", slug1_tree)
+            slug1_proof = json.loads(git("show", "ship/slug-one:.edge/qa/proofs/portal.json"))
+            self.assertEqual(slug1_proof["ticket_id"], "TICK-ONE")
+
+            slug2_tree = set(git("ls-tree", "-r", "--name-only", "ship/slug-two").splitlines())
+            self.assertIn("src/app/(portal)/layout.tsx", slug2_tree)
+            self.assertIn("src/app/(portal)/portal/page.tsx", slug2_tree)
+            self.assertNotIn("src/slice1/studio.ts", slug2_tree)
+            slug2_proof = json.loads(git("show", "ship/slug-two:.edge/qa/proofs/portal.json"))
+            self.assertEqual(slug2_proof["ticket_id"], "TICK-TWO")
+
+    def test_SPEC_EDGE_BRIGADE_005_ic3_ic4_historical_proof_blobs_and_examiner_receipt_recovery(self):
+        ship_prep = importlib.import_module("tools.brigade.ship_prep")
+        extract_receipts_fn = getattr(ship_prep, "_extract_examiner_receipts_by_ticket", None)
+        self.assertIsNotNone(
+            extract_receipts_fn,
+            "tools.brigade.ship_prep must define _extract_examiner_receipts_by_ticket (SPEC-EDGE-BRIGADE-005 IC-4)",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_root:
+            repo_dir = Path(tmp_root)
+
+            def git(*git_args):
+                proc = subprocess.run(
+                    ["git", *git_args],
+                    cwd=repo_dir,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                return proc.stdout.strip()
+
+            git("init", "-b", "staging")
+            git("config", "user.email", "brigade@example.com")
+            git("config", "user.name", "Edge Brigade")
+            (repo_dir / "README.md").write_text("# Base\n", encoding="utf-8")
+            git("add", "README.md")
+            git("commit", "-m", "chore: staging base")
+
+            git("checkout", "-b", "development")
+
+            arch_dir = repo_dir / ".edge" / "archive" / "specs"
+            arch_dir.mkdir(parents=True, exist_ok=True)
+            (arch_dir / "slug-one.md").write_text(
+                "---\nexpected_files:\n  - src/one.ts\n---\n# Slice One\n", encoding="utf-8"
+            )
+            (arch_dir / "slug-two.md").write_text(
+                "---\nexpected_files:\n  - src/two.ts\n---\n# Slice Two\n", encoding="utf-8"
+            )
+
+            shots_dir = repo_dir / ".edge" / "qa" / "screenshots"
+            shots_dir.mkdir(parents=True, exist_ok=True)
+            (shots_dir / "s1.png").write_bytes(self._make_solid_png(4, 4, (11, 22, 33)))
+            (shots_dir / "s2.png").write_bytes(self._make_solid_png(4, 4, (44, 55, 66)))
+
+            proofs_dir = repo_dir / ".edge" / "qa" / "proofs"
+            proofs_dir.mkdir(parents=True, exist_ok=True)
+
+            # Commit A: Slice 1 writes portal.json
+            (repo_dir / "src").mkdir(parents=True, exist_ok=True)
+            (repo_dir / "src" / "one.ts").write_text("export const one = 1;\n", encoding="utf-8")
+            (proofs_dir / "portal.json").write_text(
+                json.dumps({
+                    "slug": "portal",
+                    "spec": ".edge/specs/slug-one.md",
+                    "ticket_id": "TICK-ONE",
+                    "visited_urls": ["http://localhost:3000/one"],
+                    "user_actions_executed": ["verify one"],
+                    "persistence_verified": True,
+                    "console_clean": True,
+                    "screenshot_paths": [".edge/qa/screenshots/s1.png"],
+                    "host_facts_verified": True,
+                    "db_crosscheck": {"one": 1},
+                }),
+                encoding="utf-8",
+            )
+            git("add", "-A")
+            git("commit", "-m", "feat: [TICK-ONE] deliver slice one")
+
+            # Commit B: Slice 2 overwrites the same .edge/qa/proofs/portal.json path
+            (repo_dir / "src" / "two.ts").write_text("export const two = 2;\n", encoding="utf-8")
+            (proofs_dir / "portal.json").write_text(
+                json.dumps({
+                    "slug": "portal",
+                    "spec": ".edge/specs/slug-two.md",
+                    "ticket_id": "TICK-TWO",
+                    "visited_urls": ["http://localhost:3000/two"],
+                    "user_actions_executed": ["verify two"],
+                    "persistence_verified": True,
+                    "console_clean": True,
+                    "screenshot_paths": [".edge/qa/screenshots/s2.png"],
+                    "host_facts_verified": True,
+                    "db_crosscheck": {"two": 2},
+                }),
+                encoding="utf-8",
+            )
+            git("add", "-A")
+            git("commit", "-m", "feat: [TICK-TWO] deliver slice two")
+
+            # Simulate finish-slice resetting state.examiner_receipt = None while keeping history entries
+            brigade_state = {
+                "version": "2.0.0",
+                "repo_path": str(repo_dir),
+                "base_branch": "development",
+                "current_state": "IDLE",
+                "active_ticket": None,
+                "examiner_receipt": None,
+                "history": [
+                    {
+                        "timestamp": "2026-11-19T01:00:00Z",
+                        "from_state": "REVIEW",
+                        "to_state": "STAGING",
+                        "success": True,
+                        "message": "Landed TICK-ONE",
+                        "details": {
+                            "ticket_id": "TICK-ONE",
+                            "examiner_receipt": {
+                                "verdict": "PASS",
+                                "summary": "Slice 1 Examiner Seal",
+                                "evidence_reviewed": [".edge/archive/specs/slug-one.md", "src/one.ts"],
+                            },
+                        },
+                    },
+                    {
+                        "timestamp": "2026-11-19T02:00:00Z",
+                        "from_state": "REVIEW",
+                        "to_state": "STAGING",
+                        "success": True,
+                        "message": "Landed TICK-TWO",
+                        "details": {
+                            "ticket_id": "TICK-TWO",
+                            "examiner_receipt": {
+                                "verdict": "PASS",
+                                "summary": "Slice 2 Examiner Seal",
+                                "evidence_reviewed": [".edge/archive/specs/slug-two.md", "src/two.ts"],
+                            },
+                        },
+                    },
+                ],
+            }
+            (repo_dir / ".edge" / "brigade.json").write_text(
+                json.dumps(brigade_state, indent=2), encoding="utf-8"
+            )
+
+            ok, result, err = ship_prep.prepare_ship_payload(repo_dir, base_branch="staging")
+            self.assertTrue(ok, f"prepare_ship_payload failed: {err}")
+            self.assertEqual(result.failed_proofs, [])
+            self.assertEqual(len(result.verified_proofs), 2, f"Expected both proofs recovered: {result.verified_proofs}")
+
+            proofs_by_ticket = {p.get("ticket_id"): p for p in result.verified_proofs}
+            self.assertEqual(proofs_by_ticket["TICK-ONE"].get("spec_slug"), "slug-one")
+            self.assertEqual(proofs_by_ticket["TICK-ONE"].get("path"), ".edge/qa/proofs/portal.json")
+            self.assertEqual(proofs_by_ticket["TICK-TWO"].get("spec_slug"), "slug-two")
+            self.assertEqual(proofs_by_ticket["TICK-TWO"].get("path"), ".edge/qa/proofs/portal.json")
+
+            plans_by_slug = {p.spec_slug: p for p in result.spec_plans}
+            self.assertEqual(len(plans_by_slug["slug-one"].verified_proofs), 1)
+            self.assertEqual(plans_by_slug["slug-one"].verified_proofs[0].get("ticket_id"), "TICK-ONE")
+            self.assertIn("Slice 1 Examiner Seal", plans_by_slug["slug-one"].pr_body)
+            self.assertNotIn("Slice 2 Examiner Seal", plans_by_slug["slug-one"].pr_body)
+
+            self.assertEqual(len(plans_by_slug["slug-two"].verified_proofs), 1)
+            self.assertEqual(plans_by_slug["slug-two"].verified_proofs[0].get("ticket_id"), "TICK-TWO")
+            self.assertIn("Slice 2 Examiner Seal", plans_by_slug["slug-two"].pr_body)
+            self.assertNotIn("Slice 1 Examiner Seal", plans_by_slug["slug-two"].pr_body)
+
+    def test_SPEC_EDGE_BRIGADE_005_ic5_publish_evidence_orphan_branch_and_pr_images(self):
+        import inspect
+        import io
+        from contextlib import redirect_stdout
+
+        ship_prep = importlib.import_module("tools.brigade.ship_prep")
+        publish_fn = getattr(ship_prep, "publish_screenshots_to_evidence_branch", None)
+        parse_fn = getattr(ship_prep, "parse_github_owner_repo", None)
+        self.assertIsNotNone(publish_fn, "tools.brigade.ship_prep must define publish_screenshots_to_evidence_branch")
+        self.assertIsNotNone(parse_fn, "tools.brigade.ship_prep must define parse_github_owner_repo")
+
+        sig = inspect.signature(ship_prep.prepare_ship_payload)
+        self.assertIn("publish_evidence", sig.parameters)
+        self.assertIn("evidence_branch", sig.parameters)
+
+        # Verify parse_github_owner_repo handles SSH & HTTPS remotes
+        self.assertEqual(parse_fn("git@github.com:o/r.git"), ("o", "r"))
+        self.assertEqual(parse_fn("https://github.com/o/r.git"), ("o", "r"))
+
+        with tempfile.TemporaryDirectory() as tmp_root:
+            tmp_path = Path(tmp_root)
+            bare_dir = tmp_path / "origin.git"
+            repo_dir = tmp_path / "repo"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+
+            subprocess.run(["git", "init", "--bare", str(bare_dir)], check=True, capture_output=True)
+
+            def git(*git_args):
+                proc = subprocess.run(
+                    ["git", *git_args],
+                    cwd=repo_dir,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                return proc.stdout.strip()
+
+            git("init", "-b", "staging")
+            git("config", "user.email", "brigade@example.com")
+            git("config", "user.name", "Edge Brigade")
+            git("remote", "add", "origin", bare_dir.as_uri())
+
+            (repo_dir / "README.md").write_text("# Base\n", encoding="utf-8")
+            git("add", "README.md")
+            git("commit", "-m", "chore: staging base")
+            git("push", "-u", "origin", "staging")
+
+            git("checkout", "-b", "development")
+
+            arch_dir = repo_dir / ".edge" / "archive" / "specs"
+            arch_dir.mkdir(parents=True, exist_ok=True)
+            (arch_dir / "slug-one.md").write_text(
+                "---\nexpected_files:\n  - src/one.ts\n---\n# Slice One\n", encoding="utf-8"
+            )
+            (arch_dir / "slug-two.md").write_text(
+                "---\nexpected_files:\n  - src/two.ts\n---\n# Slice Two\n", encoding="utf-8"
+            )
+            (repo_dir / "src").mkdir(parents=True, exist_ok=True)
+            (repo_dir / "src" / "one.ts").write_text("export const one = 1;\n", encoding="utf-8")
+            (repo_dir / "src" / "two.ts").write_text("export const two = 2;\n", encoding="utf-8")
+
+            shots_dir = repo_dir / ".edge" / "qa" / "screenshots"
+            shots_dir.mkdir(parents=True, exist_ok=True)
+            (shots_dir / "shot1.png").write_bytes(self._make_solid_png(4, 4, (12, 34, 56)))
+            (shots_dir / "shot2.png").write_bytes(self._make_solid_png(4, 4, (78, 90, 12)))
+
+            proofs_dir = repo_dir / ".edge" / "qa" / "proofs"
+            proofs_dir.mkdir(parents=True, exist_ok=True)
+            (proofs_dir / "slug-one.json").write_text(
+                json.dumps({
+                    "slug": "slug-one",
+                    "visited_urls": ["http://localhost:3000/one"],
+                    "user_actions_executed": ["click"],
+                    "persistence_verified": True,
+                    "console_clean": True,
+                    "screenshot_paths": [".edge/qa/screenshots/shot1.png"],
+                    "host_facts_verified": True,
+                    "db_crosscheck": {"one": 1},
+                }),
+                encoding="utf-8",
+            )
+            (proofs_dir / "slug-two.json").write_text(
+                json.dumps({
+                    "slug": "slug-two",
+                    "visited_urls": ["http://localhost:3000/two"],
+                    "user_actions_executed": ["click"],
+                    "persistence_verified": True,
+                    "console_clean": True,
+                    "screenshot_paths": [".edge/qa/screenshots/shot2.png"],
+                    "host_facts_verified": True,
+                    "db_crosscheck": {"two": 2},
+                }),
+                encoding="utf-8",
+            )
+            git("add", "-A")
+            git("commit", "-m", "feat: deliver slug-one and slug-two with screenshots")
+
+            # Backward compatibility when publish_evidence=False (no inline image markdown)
+            ok_no_pub, res_no_pub, err_no_pub = ship_prep.prepare_ship_payload(
+                repo_dir, base_branch="staging", publish_evidence=False
+            )
+            self.assertTrue(ok_no_pub, f"prepare_ship_payload(publish_evidence=False) failed: {err_no_pub}")
+            self.assertNotIn("?raw=true", res_no_pub.pr_body)
+
+            # Sequential accumulation on orphan branch edge-qa-evidence via publish_screenshots_to_evidence_branch
+            plan_one = ship_prep.SpecShipPlan(
+                spec_slug="slug-one",
+                spec_path=".edge/archive/specs/slug-one.md",
+                pr_branch="ship/slug-one",
+                pr_title="feat(slug-one): Slice One",
+                verified_proofs=[{"slug": "slug-one", "screenshot_paths": [".edge/qa/screenshots/shot1.png"]}],
+            )
+            plan_two = ship_prep.SpecShipPlan(
+                spec_slug="slug-two",
+                spec_path=".edge/archive/specs/slug-two.md",
+                pr_branch="ship/slug-two",
+                pr_title="feat(slug-two): Slice Two",
+                verified_proofs=[{"slug": "slug-two", "screenshot_paths": [".edge/qa/screenshots/shot2.png"]}],
+            )
+
+            with patch.object(ship_prep, "parse_github_owner_repo", return_value=("o", "r")):
+                publish_fn(repo_dir, "edge-qa-evidence", [plan_one], [repo_dir])
+                first_sha = git("rev-parse", "refs/heads/edge-qa-evidence")
+
+                # Publish ONLY plan_two in a second call to prove _seed_evidence_parent_tree retains plan_one
+                publish_fn(repo_dir, "edge-qa-evidence", [plan_two], [repo_dir])
+                second_sha = git("rev-parse", "refs/heads/edge-qa-evidence")
+
+                ok_pub, res_pub, err_pub = ship_prep.prepare_ship_payload(
+                    repo_dir,
+                    base_branch="staging",
+                    publish_evidence=True,
+                    evidence_branch="edge-qa-evidence",
+                )
+
+            self.assertTrue(ok_pub, f"prepare_ship_payload(publish_evidence=True) failed: {err_pub}")
+            self.assertEqual(git("branch", "--show-current"), "development")
+            self.assertEqual(git("status", "--porcelain"), "")
+
+            parents_line = git("rev-list", "--parents", "-n", "1", second_sha)
+            self.assertIn(first_sha, parents_line.split()[1:], "Second evidence commit must chain -p <first_sha>")
+
+            evidence_tree = set(git("ls-tree", "-r", "--name-only", second_sha).splitlines())
+            self.assertIn("evidence/slug-one/shot1.png", evidence_tree)
+            self.assertIn("evidence/slug-two/shot2.png", evidence_tree)
+
+            third_sha = git("rev-parse", "refs/heads/edge-qa-evidence")
+            plans_by_slug = {p.spec_slug: p for p in res_pub.spec_plans}
+            expected_img_1 = f"![shot1.png](https://github.com/o/r/blob/{third_sha}/evidence/slug-one/shot1.png?raw=true)"
+            expected_img_2 = f"![shot2.png](https://github.com/o/r/blob/{third_sha}/evidence/slug-two/shot2.png?raw=true)"
+            for body in (plans_by_slug["slug-one"].pr_body, plans_by_slug["slug-one"].show_me_body):
+                self.assertIn("## Evidence", body)
+                self.assertIn(expected_img_1, body)
+            self.assertIn(expected_img_1, res_pub.pr_body)
+            self.assertIn(expected_img_2, res_pub.pr_body)
+
+        # CLI --help & SKILL.md assertions
+        help_buf = io.StringIO()
+        with patch.object(sys, "argv", ["brigade", "prepare-ship", "--help"]), redirect_stdout(help_buf):
+            with self.assertRaises(SystemExit) as cm:
+                brigade_cli.main()
+            self.assertEqual(cm.exception.code, 0)
+        help_text = help_buf.getvalue()
+        self.assertIn("--publish-evidence", help_text)
+        self.assertIn("--evidence-branch", help_text)
+
+        skill_text = (self.repo_root / "skills" / "edge-ship" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("--publish-evidence", skill_text)
+
 
 if __name__ == "__main__":
     unittest.main()
