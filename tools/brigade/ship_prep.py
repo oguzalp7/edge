@@ -138,8 +138,12 @@ def _clean_slug(raw: str) -> str:
 
 
 def _is_evidence_artifact_path(norm_path: str) -> bool:
-    low = _norm_rel_path(norm_path).lower()
-    return any(low.startswith(pref) for pref in _EVIDENCE_ARTIFACT_PREFIXES)
+    rel = _normalize_display_path(norm_path).lstrip("/")
+    low = rel.lower()
+    return any(
+        low.startswith(pref) or f"/{pref}" in low
+        for pref in _EVIDENCE_ARTIFACT_PREFIXES
+    )
 
 
 def _strip_repo_prefix(s: str, repo: Optional[Path]) -> str:
@@ -1579,15 +1583,24 @@ def _build_criteria_rows(
     ]
 
 
+def _extract_actual_code_files(matched_files: List[str]) -> List[str]:
+    actual: List[str] = []
+    for raw_path in matched_files:
+        if _is_evidence_artifact_path(raw_path):
+            continue
+        norm = _normalize_display_path(raw_path).lstrip("/")
+        if norm and norm not in actual:
+            actual.append(norm)
+    return actual
+
+
 def compute_realization_audit(
     plan: SpecShipPlan,
     digest: Optional[SpecDigest],
     examiner_receipt: Optional[Dict[str, Any]],
 ) -> RealizationAudit:
     """Computes code-only file counts, expected vs. actual file diff, and AC/IC criteria matrix."""
-    actual_code_files = [
-        _norm_rel_path(p) for p in plan.matched_files if not _is_evidence_artifact_path(p)
-    ]
+    actual_code_files = _extract_actual_code_files(plan.matched_files)
     realized, untouched, unplanned = _classify_audit_files(plan, actual_code_files)
     file_tree_diff = _build_file_tree_diff(realized, unplanned, untouched)
     criteria_rows = _build_criteria_rows(digest, plan, examiner_receipt, actual_code_files, realized)
@@ -2037,6 +2050,54 @@ def _apply_slice_commits_to_plans(
         for cf in exc_files.get(plan.spec_slug, []):
             if not cf.startswith(".edge/") and cf not in plan.matched_files:
                 plan.matched_files.append(cf)
+        plan.index_changes = _filter_plan_index_changes(
+            index_changes, plan.spec_slug, plan.spec_path, plan.matched_files
+        )
+
+
+def _read_existing_ship_branch_files(
+    repo: Path,
+    eff_base: str,
+    pr_branch: str,
+) -> Optional[List[str]]:
+    rc, _, _ = run_command(
+        ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{pr_branch}"],
+        cwd=repo,
+    )
+    if rc != 0:
+        return None
+    d_rc, d_out, _ = run_command(
+        ["git", "diff", "--name-only", f"{eff_base}..{pr_branch}"],
+        cwd=repo,
+    )
+    if d_rc != 0 or not d_out.strip():
+        return None
+    return [_norm_rel_path(line) for line in d_out.splitlines() if line.strip()]
+
+
+def _merge_branch_code_files(matched_files: List[str], branch_files: List[str]) -> List[str]:
+    meta = [
+        _norm_rel_path(p) for p in matched_files
+        if _norm_rel_path(p).startswith(".edge/") and not _is_evidence_artifact_path(p)
+    ]
+    code = [
+        bf for bf in branch_files
+        if not bf.startswith(".edge/") and not _is_evidence_artifact_path(bf)
+    ]
+    return list(dict.fromkeys([*meta, *code]))
+
+
+def _scope_plans_to_existing_ship_branches(
+    repo: Path,
+    eff_base: str,
+    plans: List[SpecShipPlan],
+    index_changes: List[IndexChange],
+) -> None:
+    for plan in plans:
+        branch_files = _read_existing_ship_branch_files(repo, eff_base, plan.pr_branch)
+        if not branch_files:
+            continue
+        plan.matched_files = _merge_branch_code_files(plan.matched_files, branch_files)
         plan.index_changes = _filter_plan_index_changes(
             index_changes, plan.spec_slug, plan.spec_path, plan.matched_files
         )
@@ -2630,6 +2691,8 @@ def prepare_ship_payload(
     )
     exclusive, has_shared, exc_files = _resolve_spec_commits(repo, eff_base, all_plans, ticket_map)
     _apply_slice_commits_to_plans(all_plans, exclusive, has_shared, exc_files, index_changes)
+    if not split_branches:
+        _scope_plans_to_existing_ship_branches(repo, eff_base, all_plans, index_changes)
 
     sel_ok, selected_plans, sel_slug, sel_err = _select_spec_plans(all_plans, spec_slug, eff_base)
     if not sel_ok:
