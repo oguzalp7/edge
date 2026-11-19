@@ -6141,6 +6141,106 @@ class TestEvidenceFirstReviewAndShipBridge(unittest.TestCase):
         skill_text = (self.repo_root / "skills" / "edge-ship" / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("--publish-evidence", skill_text)
 
+    def test_parse_github_owner_repo_supports_userinfo_urls(self):
+        ship_prep = importlib.import_module("tools.brigade.ship_prep")
+
+        self.assertEqual(
+            ship_prep.parse_github_owner_repo(
+                "https://x-access-token:tok123@github.com/org/private-repo.git"
+            ),
+            ("org", "private-repo"),
+        )
+        self.assertEqual(
+            ship_prep.parse_github_owner_repo("https://user@github.com/org/repo.git"),
+            ("org", "repo"),
+        )
+        self.assertEqual(
+            ship_prep.parse_github_owner_repo("ssh://git@github.com/org/repo.git"),
+            ("org", "repo"),
+        )
+        self.assertEqual(
+            ship_prep.parse_github_owner_repo("git@github.com:org/repo.git"),
+            ("org", "repo"),
+        )
+        self.assertEqual(
+            ship_prep.parse_github_owner_repo("https://github.com/org/repo.git"),
+            ("org", "repo"),
+        )
+        self.assertIsNone(
+            ship_prep.parse_github_owner_repo(
+                "https://x-access-token:tok123@gitlab.com/org/repo.git"
+            )
+        )
+
+    def test_publish_evidence_redacts_credentials_from_userinfo_and_git_errors(self):
+        ship_prep = importlib.import_module("tools.brigade.ship_prep")
+
+        with tempfile.TemporaryDirectory() as tmp_root:
+            repo_dir = Path(tmp_root)
+
+            def git(*git_args):
+                proc = subprocess.run(
+                    ["git", *git_args],
+                    cwd=repo_dir,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                return proc.stdout.strip()
+
+            git("init", "-b", "development")
+            git("config", "user.email", "brigade@example.com")
+            git("config", "user.name", "Edge Brigade")
+
+            shots_dir = repo_dir / ".edge" / "qa" / "screenshots"
+            shots_dir.mkdir(parents=True, exist_ok=True)
+            (shots_dir / "shot1.png").write_bytes(self._make_solid_png(4, 4, (10, 20, 30)))
+
+            plan = ship_prep.SpecShipPlan(
+                spec_slug="auth-fix",
+                spec_path=".edge/archive/specs/auth-fix.md",
+                pr_branch="ship/auth-fix",
+                pr_title="feat(auth-fix): Auth Fix",
+                verified_proofs=[
+                    {
+                        "slug": "auth-fix",
+                        "screenshot_paths": [".edge/qa/screenshots/shot1.png"],
+                    }
+                ],
+            )
+
+            # Case 1: Non-GitHub remote containing credentialed userinfo must redact token
+            git("remote", "add", "origin", "https://x-access-token:tok123@gitlab.com/org/repo.git")
+            ok_non_gh, err_non_gh = ship_prep.publish_screenshots_to_evidence_branch(
+                repo_dir, "edge-qa-evidence", [plan], [repo_dir]
+            )
+            self.assertFalse(ok_non_gh)
+            self.assertNotIn("tok123", err_non_gh)
+            self.assertNotIn("x-access-token:tok123@", err_non_gh)
+            self.assertIn("gitlab.com/org/repo.git", err_non_gh)
+
+            # Case 2: Credentialed GitHub remote where git push stderr echoes credentialed URL
+            git("remote", "set-url", "origin", "https://x-access-token:tok123@github.com/org/private-repo.git")
+            real_run_command = ship_prep.run_command
+
+            def fake_run_command(cmd, cwd=None, **kwargs):
+                if isinstance(cmd, list) and len(cmd) >= 2 and cmd[0] == "git" and cmd[1] == "push":
+                    return (
+                        1,
+                        "",
+                        "fatal: Authentication failed for 'https://x-access-token:tok123@github.com/org/private-repo.git/'",
+                    )
+                return real_run_command(cmd, cwd=cwd, **kwargs)
+
+            with patch.object(ship_prep, "run_command", side_effect=fake_run_command):
+                ok_push, err_push = ship_prep.publish_screenshots_to_evidence_branch(
+                    repo_dir, "edge-qa-evidence", [plan], [repo_dir]
+                )
+            self.assertFalse(ok_push)
+            self.assertNotIn("tok123", err_push)
+            self.assertNotIn("x-access-token:tok123@", err_push)
+            self.assertIn("github.com/org/private-repo.git", err_push)
+
 
 if __name__ == "__main__":
     unittest.main()
