@@ -323,6 +323,8 @@ def cmd_prepare_ship(args: argparse.Namespace) -> int:
     strict_proofs = bool(getattr(args, "strict_proofs", False))
     spec_slug = getattr(args, "spec", None)
     split_branches = bool(getattr(args, "split_branches", False))
+    publish_evidence = bool(getattr(args, "publish_evidence", False))
+    evidence_branch = getattr(args, "evidence_branch", "edge-qa-evidence") or "edge-qa-evidence"
 
     ok, result, err = prepare_ship_payload(
         repo_path=repo_path,
@@ -330,6 +332,8 @@ def cmd_prepare_ship(args: argparse.Namespace) -> int:
         strict_proofs=strict_proofs,
         spec_slug=spec_slug,
         split_branches=split_branches,
+        publish_evidence=publish_evidence,
+        evidence_branch=evidence_branch,
     )
     rendered = format_ship_output(result, fmt=fmt)
 
@@ -1209,6 +1213,16 @@ def main() -> int:
     p_ship.add_argument("--base", default="staging", help="Base branch to diff against (default: staging)")
     p_ship.add_argument("--spec", default=None, help="Filter to a single changed spec slug")
     p_ship.add_argument("--split-branches", action="store_true", help="Create isolated ship/<spec-slug> branches off base")
+    p_ship.add_argument(
+        "--publish-evidence",
+        action="store_true",
+        help="Publish verified QA screenshots to an orphan evidence branch and embed permanent URLs in PR bodies",
+    )
+    p_ship.add_argument(
+        "--evidence-branch",
+        default="edge-qa-evidence",
+        help="Target orphan branch for published QA screenshot evidence (default: edge-qa-evidence)",
+    )
     p_ship.add_argument("--format", choices=["pr", "show-me", "json"], default="pr", help="Output format (default: pr)")
     p_ship.add_argument("--out", help="Optional output file path (written atomically)")
     p_ship.add_argument("--strict-proofs", action="store_true", help="Require at least one verified QA proof or ExaminerReceipt")

@@ -39,10 +39,10 @@ python3 tools/drift/cli.py check .
 ```
 
 ### Step 2: Per-Spec Branch & PR Plan Synthesis (`brigade prepare-ship`)
-Discover changed specs in `staging..HEAD`, run scoped `ProofVerifier` validation (ignoring stale historical proofs), and materialize isolated `ship/<spec-slug>` branches:
+Discover changed specs in `staging..HEAD` (including gitignored `.edge/` specs matched via ticket IDs or modified files), run scoped `ProofVerifier` validation (recovering historical proofs & Examiner Seals when multiple slices share proof paths), optionally publish QA screenshots onto an orphan evidence branch (`--publish-evidence`), and materialize isolated `ship/<spec-slug>` branches:
 ```bash
-# Split all changed specs into isolated ship/<spec-slug> branches and emit JSON plans
-python3 tools/brigade/cli.py prepare-ship . --base staging --split-branches --format json --out .edge/ship-payload.json
+# Split all changed specs into isolated ship/<spec-slug> branches, publish visual evidence, and emit JSON plans
+python3 tools/brigade/cli.py prepare-ship . --base staging --split-branches --publish-evidence --evidence-branch edge-qa-evidence --format json --out .edge/ship-payload.json
 
 # Or inspect / target a single spec slice
 python3 tools/brigade/cli.py prepare-ship . --base staging --spec <spec-slug> --format pr
