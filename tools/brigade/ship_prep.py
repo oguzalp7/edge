@@ -32,7 +32,6 @@ BOLD_TERM_RE = re.compile(r"\*\*([^*]+)\*\*")
 _MERMAID_BLOCK_RE = re.compile(r"```mermaid\s*\n(.*?)```", re.DOTALL)
 _TABLE_SEP_RE = re.compile(r"^\|[\s:\-|]+\|$")
 _TICKET_RE = re.compile(r"\b(TICK-[A-Z0-9][A-Z0-9-]*)\b")
-_PHASE_TAG_RE = re.compile(r"\((?:polish|gate|qa|red)\)", re.IGNORECASE)
 _REPO_PREFIXES: Tuple[str, ...] = (
     "src/", "tools/", "skills/", "agents/", "rules/",
     "tests/", "scripts/", "specs/", "public/", "drizzle/", "prisma/",
@@ -214,21 +213,32 @@ def _resolve_base_ref(repo: Path, base_branch: str) -> Optional[str]:
     return None
 
 
+def _collect_bold_terms_from_file(fpath: Path, terms: List[str]) -> None:
+    if not fpath.is_file():
+        return
+    for line in fpath.read_text(encoding="utf-8", errors="ignore").splitlines():
+        for match in BOLD_TERM_RE.finditer(line):
+            term = match.group(1).strip()
+            if term and term not in terms:
+                terms.append(term)
+
+
+def _filter_matching_terms(terms: List[str], search_tokens: List[str]) -> List[str]:
+    matched: List[str] = []
+    for t in terms:
+        low_t = t.lower()
+        if any(tok in low_t for tok in search_tokens):
+            matched.append(t)
+    return (matched or terms)[:12]
+
+
 def _read_context_terms(repo: Path, search_tokens: List[str]) -> List[str]:
     terms: List[str] = []
     for fname in ("CONTEXT.md", "GLOSSARY.md"):
-        fpath = repo / fname
-        if not fpath.is_file():
-            continue
-        for line in fpath.read_text(encoding="utf-8", errors="ignore").splitlines():
-            for match in BOLD_TERM_RE.finditer(line):
-                term = match.group(1).strip()
-                if term and term not in terms:
-                    terms.append(term)
+        _collect_bold_terms_from_file(repo / fname, terms)
     if not search_tokens:
         return terms[:12]
-    matched = [t for t in terms if any(tok in t.lower() for tok in search_tokens)]
-    return (matched or terms)[:12]
+    return _filter_matching_terms(terms, search_tokens)
 
 
 def _is_critique_spec(path_str: str) -> bool:
@@ -259,6 +269,25 @@ def _resolve_spec_on_disk(repo: Path, raw_path: str) -> Optional[str]:
     return None
 
 
+def _is_broad_path(pat: str, repo: Optional[Path] = None) -> bool:
+    norm = _norm_rel_path(pat)
+    if norm.endswith(("/", "/*", "/**")) or "/**" in norm:
+        return True
+    name = Path(norm).name
+    if name in ("*", "**"):
+        return True
+    if "*" not in norm and "." not in name:
+        return not (repo is not None and (repo / norm).is_file())
+    return False
+
+
+def _base_commit_timestamp(repo: Path, eff_base: str) -> int:
+    code, out, _ = run_command(["git", "show", "-s", "--format=%ct", eff_base], cwd=repo)
+    if code == 0 and out.strip().isdigit():
+        return int(out.strip())
+    return 0
+
+
 def _extract_ticket_from_proof_json(raw_text: str) -> Optional[Tuple[str, str]]:
     try:
         data = json.loads(raw_text)
@@ -271,6 +300,17 @@ def _extract_ticket_from_proof_json(raw_text: str) -> Optional[Tuple[str, str]]:
     if tid.startswith("TICK-") and raw_spec:
         return _clean_slug(Path(raw_spec).stem), tid
     return None
+
+
+def _extract_spec_slug_from_proof_json(raw_text: str) -> Optional[str]:
+    try:
+        data = json.loads(raw_text)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    raw_spec = str(data.get("spec") or "").strip()
+    return _clean_slug(Path(raw_spec).stem) if raw_spec else None
 
 
 def _read_commit_proof_tickets(repo: Path, sha: str) -> Dict[str, str]:
@@ -291,7 +331,7 @@ def _read_commit_proof_tickets(repo: Path, sha: str) -> Dict[str, str]:
     return found
 
 
-def _collect_proof_ticket_map(repo: Path, eff_base: str) -> Dict[str, str]:
+def _collect_proof_ticket_map(repo: Path, eff_base: str, base_ts: int = 0) -> Dict[str, str]:
     mapping: Dict[str, str] = {}
     code, log_out, _ = run_command(
         ["git", "log", "--reverse", "--format=%H", f"{eff_base}..HEAD", "--", ".edge/qa/proofs/"],
@@ -306,10 +346,30 @@ def _collect_proof_ticket_map(repo: Path, eff_base: str) -> Dict[str, str]:
         for pf in sorted(proofs_dir.glob("*.json")):
             if pf.name.endswith("-visual.json"):
                 continue
+            if base_ts and int(pf.stat().st_mtime) < base_ts:
+                continue
             parsed = _extract_ticket_from_proof_json(pf.read_text(encoding="utf-8", errors="ignore"))
             if parsed:
                 mapping[parsed[0]] = parsed[1]
     return mapping
+
+
+def _collect_diff_proof_slugs(
+    repo: Path,
+    eff_base: str,
+    changed_files: List[str],
+    base_ts: int,
+) -> set:
+    slugs = set(_collect_proof_ticket_map(repo, eff_base, base_ts=base_ts).keys())
+    for cf in changed_files:
+        norm = _norm_rel_path(cf)
+        if norm.startswith(".edge/qa/proofs/") and norm.endswith(".json") and not norm.endswith("-visual.json"):
+            pf = repo / norm
+            if pf.is_file():
+                slug = _extract_spec_slug_from_proof_json(pf.read_text(encoding="utf-8", errors="ignore"))
+                if slug:
+                    slugs.add(slug)
+    return slugs
 
 
 def _receipt_matches_spec(rec: Dict[str, Any], spec_rel: str, spec_slug: str) -> bool:
@@ -346,22 +406,25 @@ def _commit_ticket_file_index(repo: Path, eff_base: str) -> List[Tuple[str, List
 def _match_commit_ticket_for_spec(
     spec_file: Path,
     commit_tickets: List[Tuple[str, List[str]]],
+    bound_tids: set,
+    repo: Path,
 ) -> Optional[str]:
-    expected = _extract_spec_expected_files(spec_file)
+    expected = [p for p in _extract_spec_expected_files(spec_file) if not _is_broad_path(p, repo)]
     if not expected:
         return None
     for tid, c_files in commit_tickets:
+        if tid in bound_tids:
+            continue
         if _match_expected_files(expected, c_files):
             return tid
     return None
 
 
-def _resolve_single_spec_ticket(
+def _resolve_explicit_spec_ticket(
     repo: Path,
     spec_rel: str,
     proof_tickets: Dict[str, str],
     history_receipts: Dict[str, Dict[str, Any]],
-    commit_tickets: List[Tuple[str, List[str]]],
 ) -> Optional[str]:
     spec_file = repo / spec_rel
     spec_slug = _clean_slug(spec_file.stem)
@@ -374,7 +437,7 @@ def _resolve_single_spec_ticket(
         m = _TICKET_RE.search(spec_file.read_text(encoding="utf-8", errors="ignore"))
         if m:
             return m.group(1)
-    return _match_commit_ticket_for_spec(spec_file, commit_tickets)
+    return None
 
 
 def _resolve_spec_ticket_ids(
@@ -383,17 +446,27 @@ def _resolve_spec_ticket_ids(
     spec_paths: List[str],
     history_receipts: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, str]:
-    """Reverse-resolves TICK-* IDs for specs via proof JSON, brigade history, .md text, and git commits."""
+    """Reverse-resolves TICK-* IDs (explicit anchors first, then unbound commit file overlap)."""
     if not spec_paths:
         return {}
-    proof_tickets = _collect_proof_ticket_map(repo, eff_base)
-    commit_tickets = _commit_ticket_file_index(repo, eff_base)
+    base_ts = _base_commit_timestamp(repo, eff_base)
+    proof_tickets = _collect_proof_ticket_map(repo, eff_base, base_ts=base_ts)
     hist = history_receipts or {}
     resolved: Dict[str, str] = {}
+    unresolved: List[str] = []
     for spec_rel in spec_paths:
-        tid = _resolve_single_spec_ticket(repo, spec_rel, proof_tickets, hist, commit_tickets)
+        tid = _resolve_explicit_spec_ticket(repo, spec_rel, proof_tickets, hist)
         if tid:
             resolved[spec_rel] = tid
+        else:
+            unresolved.append(spec_rel)
+    if unresolved:
+        commit_tickets = _commit_ticket_file_index(repo, eff_base)
+        bound_tids = set(resolved.values())
+        for spec_rel in unresolved:
+            tid = _match_commit_ticket_for_spec(repo / spec_rel, commit_tickets, bound_tids, repo)
+            if tid:
+                resolved[spec_rel] = tid
     return resolved
 
 
@@ -410,35 +483,70 @@ def _list_disk_spec_candidates(repo: Path) -> List[str]:
     return candidates
 
 
-def _ticket_in_history_for_diff(
+def _ticket_anchored_for_spec(
+    repo: Path,
+    rel: str,
+    spec_slug: str,
+    log_body: str,
     tid: Optional[str],
     history_receipts: Dict[str, Dict[str, Any]],
-    changed_files: List[str],
 ) -> bool:
-    if not tid or tid not in history_receipts:
+    if not tid or tid not in log_body:
         return False
-    ev = [str(x) for x in (history_receipts[tid].get("evidence_reviewed") or [])]
-    return bool(_match_expected_files(ev, changed_files))
+    rec = history_receipts.get(tid)
+    if rec and _receipt_matches_spec(rec, rel, spec_slug):
+        return True
+    spec_file = repo / rel
+    return bool(spec_file.is_file() and tid in spec_file.read_text(encoding="utf-8", errors="ignore"))
 
 
-def _spec_matches_diff(
+def _spec_has_diff_anchor(
     repo: Path,
     rel: str,
     log_body: str,
-    changed_files: List[str],
     ticket_map: Dict[str, str],
     history_receipts: Dict[str, Dict[str, Any]],
+    diff_proof_slugs: set,
 ) -> bool:
     spec_slug = _clean_slug(Path(rel).stem)
-    tid = ticket_map.get(rel)
-    if tid and tid in log_body:
-        return True
     if spec_slug and spec_slug in log_body.lower():
         return True
-    if _ticket_in_history_for_diff(tid, history_receipts, changed_files):
+    if rel in log_body or spec_slug in diff_proof_slugs:
         return True
+    return _ticket_anchored_for_spec(repo, rel, spec_slug, log_body, ticket_map.get(rel), history_receipts)
+
+
+def _specific_matched_files(repo: Path, rel: str, changed_files: List[str]) -> List[str]:
     expected = _extract_spec_expected_files(repo / rel)
-    return bool(expected and _match_expected_files(expected, changed_files))
+    specific: List[str] = []
+    for pat in expected:
+        if not _is_broad_path(pat, repo):
+            specific.append(pat)
+    return _match_expected_files(specific, changed_files) if specific else []
+
+
+def _unanchored_spec_eligible(
+    repo: Path,
+    rel: str,
+    changed_files: List[str],
+    covered_files: set,
+    base_ts: int,
+    has_anchors: bool,
+    diff_proof_slugs: set,
+) -> bool:
+    hits = _specific_matched_files(repo, rel, changed_files)
+    if not hits:
+        return False
+    if not has_anchors:
+        return True
+    spec_file = repo / rel
+    if rel.startswith(".edge/archive/specs/") and base_ts and int(spec_file.stat().st_mtime) < base_ts:
+        return False
+    spec_slug = _clean_slug(spec_file.stem)
+    old_proof = repo / ".edge" / "qa" / "proofs" / f"{spec_slug}.json"
+    if old_proof.is_file() and spec_slug not in diff_proof_slugs:
+        return False
+    return any(h not in covered_files for h in hits)
 
 
 def _scan_disk_specs_for_diff(
@@ -447,13 +555,31 @@ def _scan_disk_specs_for_diff(
     changed_files: List[str],
     ticket_map: Dict[str, str],
     history_receipts: Optional[Dict[str, Dict[str, Any]]] = None,
+    has_git_specs: bool = False,
 ) -> List[str]:
-    """Scans gitignored .edge specs on disk and returns those matching eff_base..HEAD."""
+    """Scans gitignored .edge specs on disk (anchored specs first, bounded unanchored fallback)."""
     _, log_body, _ = run_command(["git", "log", "--format=%B", f"{eff_base}..HEAD"], cwd=repo)
     hist = history_receipts or {}
-    matched: List[str] = []
-    for rel in _list_disk_spec_candidates(repo):
-        if _spec_matches_diff(repo, rel, log_body, changed_files, ticket_map, hist):
+    base_ts = _base_commit_timestamp(repo, eff_base)
+    diff_proof_slugs = _collect_diff_proof_slugs(repo, eff_base, changed_files, base_ts)
+    all_candidates = _list_disk_spec_candidates(repo)
+
+    anchored: List[str] = []
+    unanchored: List[str] = []
+    for rel in all_candidates:
+        if _spec_has_diff_anchor(repo, rel, log_body, ticket_map, hist, diff_proof_slugs):
+            anchored.append(rel)
+        else:
+            unanchored.append(rel)
+
+    covered_files: set = set()
+    for rel in anchored:
+        covered_files.update(_specific_matched_files(repo, rel, changed_files))
+
+    has_anchors = bool(anchored or has_git_specs)
+    matched = list(anchored)
+    for rel in unanchored:
+        if _unanchored_spec_eligible(repo, rel, changed_files, covered_files, base_ts, has_anchors, diff_proof_slugs):
             matched.append(rel)
     return matched
 
@@ -485,14 +611,16 @@ def discover_changed_specs(
         ["git", "diff", "--name-only", f"{eff_base}..HEAD", "--", ".edge/specs/", ".edge/archive/specs/"],
         cwd=repo,
     )
-    candidates: List[str] = [line.strip() for line in spec_diff_out.splitlines() if line.strip()]
-    candidates.extend(changed_files)
+    git_specs = [line.strip() for line in spec_diff_out.splitlines() if line.strip() and _is_valid_spec_candidate(line)]
+    candidates: List[str] = [*git_specs, *changed_files]
     candidates.extend(ch.symbol for ch in index_changes if ch.kind == "@spec")
 
     eff_hist = history_receipts if history_receipts is not None else _load_brigade_history_snapshot(repo)[3]
     disk_specs = _list_disk_spec_candidates(repo)
     eff_tickets = ticket_map if ticket_map is not None else _resolve_spec_ticket_ids(repo, eff_base, disk_specs, eff_hist)
-    candidates.extend(_scan_disk_specs_for_diff(repo, eff_base, changed_files, eff_tickets, eff_hist))
+    candidates.extend(
+        _scan_disk_specs_for_diff(repo, eff_base, changed_files, eff_tickets, eff_hist, has_git_specs=bool(git_specs))
+    )
     return _deduplicate_spec_candidates(repo, candidates)
 
 
@@ -631,14 +759,19 @@ def _extract_table_paths(lines: List[str]) -> List[str]:
     return found
 
 
+def _append_glob_matches(pat: str, norm_changed: List[str], expanded: List[str]) -> None:
+    for cf in norm_changed:
+        if fnmatch(cf, pat) and cf not in expanded:
+            expanded.append(cf)
+
+
 def _expand_expected_globs(patterns: List[str], changed_files: List[str]) -> List[str]:
     """Expands globbed spec patterns (e.g. 0017_*.sql) against changed files."""
     expanded: List[str] = []
     norm_changed = [_norm_rel_path(cf) for cf in changed_files]
     for pat in patterns:
         if any(ch in pat for ch in "*?["):
-            hits = [cf for cf in norm_changed if fnmatch(cf, pat)]
-            expanded.extend(h for h in hits if h not in expanded)
+            _append_glob_matches(pat, norm_changed, expanded)
         elif pat not in expanded:
             expanded.append(pat)
     return expanded
@@ -748,6 +881,24 @@ def _filter_unique_proofs(candidates: List[Path], selected_slug: Optional[str]) 
     return unique
 
 
+def _scan_dir_matching_proofs(
+    proofs_dir: Path,
+    slug_set: set,
+    ticket_set: set,
+    ticket_by_slug: Dict[str, Optional[str]],
+) -> List[Path]:
+    if not proofs_dir.is_dir():
+        return []
+    found: List[Path] = []
+    for pf in sorted(proofs_dir.glob("*.json")):
+        if pf.name.endswith("-visual.json"):
+            continue
+        meta = _parse_proof_raw_meta(pf.read_text(encoding="utf-8", errors="ignore"), pf.name, ticket_by_slug)
+        if meta["spec_slug"] in slug_set or (meta["ticket_id"] and meta["ticket_id"] in ticket_set):
+            found.append(pf)
+    return found
+
+
 def _collect_matching_disk_proofs(
     roots: List[Path],
     spec_slugs: List[str],
@@ -757,15 +908,7 @@ def _collect_matching_disk_proofs(
     ticket_set = {v for v in ticket_by_slug.values() if v}
     found: List[Path] = []
     for root in roots:
-        proofs_dir = root / ".edge" / "qa" / "proofs"
-        if not proofs_dir.is_dir():
-            continue
-        for pf in sorted(proofs_dir.glob("*.json")):
-            if pf.name.endswith("-visual.json"):
-                continue
-            meta = _parse_proof_raw_meta(pf.read_text(encoding="utf-8", errors="ignore"), pf.name, ticket_by_slug)
-            if meta["spec_slug"] in slug_set or (meta["ticket_id"] and meta["ticket_id"] in ticket_set):
-                found.append(pf)
+        found.extend(_scan_dir_matching_proofs(root / ".edge" / "qa" / "proofs", slug_set, ticket_set, ticket_by_slug))
     return found
 
 
@@ -800,7 +943,20 @@ def _load_json_dict(raw_text: str) -> Dict[str, Any]:
 def _extract_str_list(val: Any) -> List[str]:
     if not isinstance(val, list):
         return []
-    return [str(u) for u in val if isinstance(u, str) and u.strip()]
+    out: List[str] = []
+    for u in val:
+        if isinstance(u, str) and u.strip():
+            out.append(str(u))
+    return out
+
+
+def _lookup_slug_by_ticket(tid: Optional[str], ticket_by_slug: Dict[str, Optional[str]]) -> str:
+    if not tid:
+        return ""
+    for s, t in ticket_by_slug.items():
+        if t == tid:
+            return s
+    return ""
 
 
 def _parse_proof_raw_meta(
@@ -811,9 +967,7 @@ def _parse_proof_raw_meta(
     raw = _load_json_dict(raw_text)
     tid = str(raw.get("ticket_id") or "").strip() or None
     raw_spec = str(raw.get("spec") or "").strip()
-    spec_slug = _clean_slug(Path(raw_spec).stem) if raw_spec else ""
-    if not spec_slug and tid:
-        spec_slug = next((s for s, t in ticket_by_slug.items() if t == tid), "")
+    spec_slug = _clean_slug(Path(raw_spec).stem) if raw_spec else _lookup_slug_by_ticket(tid, ticket_by_slug)
     return {
         "spec_slug": spec_slug or _clean_slug(Path(rel_path).stem),
         "ticket_id": tid,
@@ -941,6 +1095,46 @@ def _verify_disk_proofs(
     return verified, failed
 
 
+def _proof_dedup_key(entry: Dict[str, Any]) -> Tuple[Any, ...]:
+    hashes = tuple(sorted((entry.get("screenshot_hashes") or {}).values()))
+    return (entry.get("path"), entry.get("spec_slug"), entry.get("ticket_id"), hashes)
+
+
+def _append_unique_proof(
+    ok: bool,
+    entry: Dict[str, Any],
+    verified: List[Dict[str, Any]],
+    failed: List[Dict[str, Any]],
+    seen_keys: set,
+) -> None:
+    key = _proof_dedup_key(entry)
+    if key in seen_keys:
+        return
+    seen_keys.add(key)
+    (verified if ok else failed).append(entry)
+
+
+def _verify_historical_proofs_for_slugs(
+    repo: Path,
+    eff_base: str,
+    roots: List[Path],
+    ticket: Optional[Ticket],
+    target_slugs: List[str],
+    t_map: Dict[str, Optional[str]],
+    verified: List[Dict[str, Any]],
+    failed: List[Dict[str, Any]],
+    seen_keys: set,
+) -> None:
+    covered_slugs = {e.get("spec_slug") for e in verified}
+    for slug in target_slugs:
+        if not slug or slug in covered_slugs:
+            continue
+        for rel_path, raw_text in _discover_historical_proof_blobs(repo, eff_base, slug, t_map.get(slug), t_map):
+            ok, entry = _verify_proof_raw_text(raw_text, rel_path, roots, ticket, t_map)
+            _append_unique_proof(ok, entry, verified, failed, seen_keys)
+            covered_slugs.add(slug)
+
+
 def _verify_scoped_proofs(
     repo: Path,
     ticket: Optional[Ticket],
@@ -953,19 +1147,21 @@ def _verify_scoped_proofs(
     roots = _proof_search_roots(repo, ticket)
     t_map = ticket_by_slug or {}
     proof_files = _discover_scoped_proof_files(repo, roots, spec_slugs, changed_files, selected_slug, ticket_by_slug=t_map)
-    verified, failed = _verify_disk_proofs(repo, roots, ticket, proof_files, selected_slug, t_map)
+    raw_v, raw_f = _verify_disk_proofs(repo, roots, ticket, proof_files, selected_slug, t_map)
+    verified: List[Dict[str, Any]] = []
+    failed: List[Dict[str, Any]] = []
+    seen_keys: set = set()
+    for e in raw_v:
+        _append_unique_proof(True, e, verified, failed, seen_keys)
+    for e in raw_f:
+        _append_unique_proof(False, e, verified, failed, seen_keys)
     if not eff_base:
         return verified, failed
 
-    covered_slugs = {e.get("spec_slug") for e in verified}
     target_slugs = [selected_slug] if selected_slug else list(spec_slugs)
-    for slug in target_slugs:
-        if not slug or slug in covered_slugs:
-            continue
-        for rel_path, raw_text in _discover_historical_proof_blobs(repo, eff_base, slug, t_map.get(slug), t_map):
-            ok, entry = _verify_proof_raw_text(raw_text, rel_path, roots, ticket, t_map)
-            (verified if ok else failed).append(entry)
-            covered_slugs.add(slug)
+    _verify_historical_proofs_for_slugs(
+        repo, eff_base, roots, ticket, target_slugs, t_map, verified, failed, seen_keys
+    )
     return verified, failed
 
 
@@ -1044,6 +1240,19 @@ def _format_summary_section(
     return lines
 
 
+def _format_proof_line(p: Dict[str, Any]) -> List[str]:
+    shots = len(p.get("screenshot_hashes", {}))
+    out = [
+        f"- **QA Proof `{p['slug']}` (Verified):** urls={p['visited_urls']}, "
+        f"actions={p['user_actions_executed']}, screenshots={shots} (SHA-256 verified), "
+        f"db_crosscheck={json.dumps(p['db_crosscheck'])}"
+    ]
+    for url in p.get("screenshot_urls", []) or []:
+        fname = Path(str(url).split("?")[0]).name or "screenshot.png"
+        out.append(f"  - ![{fname}]({url})")
+    return out
+
+
 def _format_evidence_section(
     specs_linked: List[str],
     verified_proofs: List[Dict[str, Any]],
@@ -1059,15 +1268,7 @@ def _format_evidence_section(
         ev = ", ".join(examiner_receipt.get("evidence_reviewed", [])) or "diff"
         lines.append(f"- **Examiner Seal:** `{examiner_receipt.get('verdict')}` — {examiner_receipt.get('summary')} (reviewed: {ev})")
     for p in verified_proofs:
-        shots = len(p.get("screenshot_hashes", {}))
-        lines.append(
-            f"- **QA Proof `{p['slug']}` (Verified):** urls={p['visited_urls']}, "
-            f"actions={p['user_actions_executed']}, screenshots={shots} (SHA-256 verified), "
-            f"db_crosscheck={json.dumps(p['db_crosscheck'])}"
-        )
-        for url in p.get("screenshot_urls", []) or []:
-            fname = Path(str(url).split("?")[0]).name or "screenshot.png"
-            lines.append(f"  - ![{fname}]({url})")
+        lines.extend(_format_proof_line(p))
     for fp in failed_proofs:
         lines.append(f"- **QA Proof `{fp['slug']}` (FAILED - {fp['error']}):** {fp['message']}")
     return lines
@@ -1293,7 +1494,8 @@ def _explicit_commit_owners(
 def _overlap_commit_owners(c_files: List[str], plans: List[SpecShipPlan]) -> List[str]:
     owners: List[str] = []
     for p in plans:
-        if p.expected_files and _match_expected_files(p.expected_files, c_files):
+        specific = [pat for pat in p.expected_files if not _is_broad_path(pat)]
+        if specific and _match_expected_files(specific, c_files):
             owners.append(p.spec_slug)
     return owners
 
@@ -1455,6 +1657,28 @@ def _materialize_single_branch(
     return _materialize_checkout_files(repo, eff_base, head_sha, head_tree, plan)
 
 
+def _prepare_split_branch_context(
+    repo: Path,
+) -> Tuple[bool, str, str, set, str]:
+    st_code, st_out, _ = run_command(["git", "status", "--porcelain"], cwd=repo)
+    if st_code != 0 or st_out.strip():
+        return False, "", "", set(), "Working tree must be clean before running --split-branches."
+
+    _, orig_branch, _ = run_command(["git", "branch", "--show-current"], cwd=repo)
+    _, head_sha, _ = run_command(["git", "rev-parse", "HEAD"], cwd=repo)
+    head_sha = head_sha.strip()
+    orig_ref = orig_branch.strip() or head_sha
+
+    ls_code, ls_out, ls_err = run_command(["git", "ls-tree", "-r", "--name-only", head_sha], cwd=repo)
+    if ls_code != 0:
+        return False, "", "", set(), f"Failed to inspect HEAD tree: {ls_err}"
+    head_tree: set = set()
+    for line in ls_out.splitlines():
+        if line.strip():
+            head_tree.add(_norm_rel_path(line))
+    return True, head_sha, orig_ref, head_tree, ""
+
+
 def create_split_branches(
     repo: Path,
     eff_base: str,
@@ -1465,19 +1689,9 @@ def create_split_branches(
     if not spec_plans:
         return True, [], ""
 
-    st_code, st_out, _ = run_command(["git", "status", "--porcelain"], cwd=repo)
-    if st_code != 0 or st_out.strip():
-        return False, [], "Working tree must be clean before running --split-branches."
-
-    _, orig_branch, _ = run_command(["git", "branch", "--show-current"], cwd=repo)
-    _, head_sha, _ = run_command(["git", "rev-parse", "HEAD"], cwd=repo)
-    head_sha = head_sha.strip()
-    orig_ref = orig_branch.strip() or head_sha
-
-    ls_code, ls_out, ls_err = run_command(["git", "ls-tree", "-r", "--name-only", head_sha], cwd=repo)
-    if ls_code != 0:
-        return False, [], f"Failed to inspect HEAD tree: {ls_err}"
-    head_tree = {_norm_rel_path(line) for line in ls_out.splitlines() if line.strip()}
+    ctx_ok, head_sha, orig_ref, head_tree, ctx_err = _prepare_split_branch_context(repo)
+    if not ctx_ok:
+        return False, [], ctx_err
     exclusive, has_shared, _ = _resolve_spec_commits(repo, eff_base, spec_plans, ticket_map or {})
 
     created: List[str] = []
@@ -1615,6 +1829,29 @@ def _commit_and_push_evidence(
     return True, commit_sha, ""
 
 
+def _resolve_github_target(repo: Path) -> Tuple[bool, str, str, str]:
+    r_code, remote_url, r_err = run_command(["git", "remote", "get-url", "origin"], cwd=repo)
+    if r_code != 0 or not remote_url.strip():
+        return False, "", "", f"Cannot publish evidence: missing git remote 'origin' ({r_err})."
+    parsed = parse_github_owner_repo(remote_url.strip())
+    if not parsed:
+        return False, "", "", f"Cannot publish evidence: origin remote '{remote_url.strip()}' is not GitHub."
+    return True, parsed[0], parsed[1], ""
+
+
+def _bind_evidence_urls(
+    shots: List[Tuple[Dict[str, Any], Path, str]],
+    owner: str,
+    repo_name: str,
+    commit_sha: str,
+) -> None:
+    for proof, _, stage_path in shots:
+        raw_url = f"https://github.com/{owner}/{repo_name}/blob/{commit_sha}/{stage_path}?raw=true"
+        urls = proof.setdefault("screenshot_urls", [])
+        if raw_url not in urls:
+            urls.append(raw_url)
+
+
 def publish_screenshots_to_evidence_branch(
     repo: Path,
     evidence_branch: str,
@@ -1622,13 +1859,9 @@ def publish_screenshots_to_evidence_branch(
     search_roots: List[Path],
 ) -> Tuple[bool, str]:
     """Publishes QA screenshots onto an orphan branch without switching HEAD and binds permanent GitHub URLs."""
-    r_code, remote_url, r_err = run_command(["git", "remote", "get-url", "origin"], cwd=repo)
-    if r_code != 0 or not remote_url.strip():
-        return False, f"Cannot publish evidence: missing git remote 'origin' ({r_err})."
-    parsed = parse_github_owner_repo(remote_url.strip())
-    if not parsed:
-        return False, f"Cannot publish evidence: origin remote '{remote_url.strip()}' is not GitHub."
-    owner, repo_name = parsed
+    gh_ok, owner, repo_name, gh_err = _resolve_github_target(repo)
+    if not gh_ok:
+        return False, gh_err
 
     shots = _collect_evidence_shots(repo, spec_plans, search_roots)
     if not shots:
@@ -1645,11 +1878,7 @@ def publish_screenshots_to_evidence_branch(
         if not cm_ok:
             return False, cm_err
 
-    for proof, _, stage_path in shots:
-        raw_url = f"https://github.com/{owner}/{repo_name}/blob/{commit_sha}/{stage_path}?raw=true"
-        urls = proof.setdefault("screenshot_urls", [])
-        if raw_url not in urls:
-            urls.append(raw_url)
+    _bind_evidence_urls(shots, owner, repo_name, commit_sha)
     return True, ""
 
 
@@ -1778,6 +2007,91 @@ def _build_all_spec_plans(
     return plans, plan_receipts
 
 
+def _discover_specs_and_tickets(
+    repo: Path,
+    eff_base: str,
+    changed_files: List[str],
+    index_changes: List[IndexChange],
+    receipts_by_ticket: Dict[str, Dict[str, Any]],
+) -> Tuple[List[str], Dict[str, str], Dict[str, Optional[str]]]:
+    disk_specs = _list_disk_spec_candidates(repo)
+    ticket_map = _resolve_spec_ticket_ids(repo, eff_base, disk_specs, receipts_by_ticket)
+    specs_linked = discover_changed_specs(
+        repo, eff_base, changed_files, index_changes, ticket_map=ticket_map, history_receipts=receipts_by_ticket
+    )
+    extra_specs = [s for s in specs_linked if s not in ticket_map]
+    if extra_specs:
+        ticket_map.update(_resolve_spec_ticket_ids(repo, eff_base, extra_specs, receipts_by_ticket))
+    ticket_by_slug: Dict[str, Optional[str]] = {}
+    for spec_rel in specs_linked:
+        ticket_by_slug[_clean_slug(Path(spec_rel).stem)] = ticket_map.get(spec_rel)
+    return specs_linked, ticket_map, ticket_by_slug
+
+
+def _maybe_publish_plan_evidence(
+    repo: Path,
+    publish_evidence: bool,
+    failed_proofs: List[Dict[str, Any]],
+    evidence_branch: str,
+    selected_plans: List[SpecShipPlan],
+    ticket: Optional[Ticket],
+) -> Tuple[bool, str]:
+    if not publish_evidence or failed_proofs:
+        return True, ""
+    return publish_screenshots_to_evidence_branch(
+        repo, evidence_branch, selected_plans, _proof_search_roots(repo, ticket)
+    )
+
+
+def _assemble_ship_result(
+    base_branch: str,
+    head_branch: str,
+    door_type: str,
+    blast_radius: Dict[str, Any],
+    index_changes: List[IndexChange],
+    context_terms: List[str],
+    specs_linked: List[str],
+    verified_proofs: List[Dict[str, Any]],
+    failed_proofs: List[Dict[str, Any]],
+    examiner_receipt: Optional[Dict[str, Any]],
+    changed_files: List[str],
+    selected_plans: List[SpecShipPlan],
+    sel_slug: Optional[str],
+    gate_status: str,
+) -> ShipPrepResult:
+    spec_digests = [p.spec_digest for p in selected_plans if p.spec_digest]
+    pr_body, show_me_body = _render_top_level_bodies(
+        sel_slug, selected_plans, head_branch, base_branch, len(changed_files),
+        index_changes, context_terms, specs_linked, verified_proofs, failed_proofs, examiner_receipt, gate_status, spec_digests,
+    )
+    return ShipPrepResult(
+        base_branch=base_branch,
+        head_branch=head_branch,
+        door_type=door_type,
+        blast_radius=blast_radius,
+        index_changes=index_changes,
+        context_terms=context_terms,
+        specs_linked=specs_linked,
+        verified_proofs=verified_proofs,
+        failed_proofs=failed_proofs,
+        examiner_receipt=examiner_receipt,
+        intent=_build_intent_str(head_branch, index_changes, verified_proofs, changed_files, spec_digests=spec_digests),
+        scenario_contract=_build_scenario_contract(head_branch, index_changes, verified_proofs, examiner_receipt, changed_files),
+        pr_body=pr_body,
+        show_me_body=show_me_body,
+        spec_digests=spec_digests,
+        spec_plans=selected_plans,
+        selected_spec=sel_slug,
+    )
+
+
+def _compute_search_tokens(blast_radius: Dict[str, Any], index_changes: List[IndexChange]) -> List[str]:
+    tokens = list(blast_radius.get("domains", []))
+    for ch in index_changes:
+        tokens.append(ch.symbol.lower())
+    return list(dict.fromkeys(tokens))
+
+
 def prepare_ship_payload(
     repo_path: Path,
     base_branch: str = "staging",
@@ -1799,25 +2113,16 @@ def prepare_ship_payload(
 
     index_changes = parse_index_diff(idx_diff)
     door_type, blast_radius = classify_merge_danger(changed_files, diff_stat)
-    search_tokens = list(dict.fromkeys([*blast_radius.get("domains", []), *(c.symbol.lower() for c in index_changes)]))
-    context_terms = _read_context_terms(repo, search_tokens)
-
+    context_terms = _read_context_terms(repo, _compute_search_tokens(blast_radius, index_changes))
     ticket, examiner_receipt, gate_status, receipts_by_ticket = _load_brigade_history_snapshot(repo)
-    disk_specs = _list_disk_spec_candidates(repo)
-    ticket_map = _resolve_spec_ticket_ids(repo, eff_base, disk_specs, receipts_by_ticket)
-    specs_linked = discover_changed_specs(
-        repo, eff_base, changed_files, index_changes, ticket_map=ticket_map, history_receipts=receipts_by_ticket
+    specs_linked, ticket_map, ticket_by_slug = _discover_specs_and_tickets(
+        repo, eff_base, changed_files, index_changes, receipts_by_ticket
     )
-    extra_specs = [s for s in specs_linked if s not in ticket_map]
-    if extra_specs:
-        ticket_map.update(_resolve_spec_ticket_ids(repo, eff_base, extra_specs, receipts_by_ticket))
 
-    spec_slugs = [_clean_slug(Path(s).stem) for s in specs_linked]
-    ticket_by_slug: Dict[str, Optional[str]] = {_clean_slug(Path(s).stem): ticket_map.get(s) for s in specs_linked}
     selected_slug = _clean_slug(spec_slug) if spec_slug else None
-
     verified_proofs, failed_proofs = _verify_scoped_proofs(
-        repo, ticket, spec_slugs, changed_files, selected_slug=selected_slug, eff_base=eff_base, ticket_by_slug=ticket_by_slug
+        repo, ticket, list(ticket_by_slug.keys()), changed_files,
+        selected_slug=selected_slug, eff_base=eff_base, ticket_by_slug=ticket_by_slug,
     )
     all_plans, plan_receipts = _build_all_spec_plans(
         repo, specs_linked, base_branch, changed_files, index_changes,
@@ -1833,43 +2138,22 @@ def prepare_ship_payload(
         res_err.selected_spec = sel_slug
         return False, res_err, sel_err
 
-    if publish_evidence and not failed_proofs:
-        pub_ok, pub_err = publish_screenshots_to_evidence_branch(
-            repo, evidence_branch, selected_plans, _proof_search_roots(repo, ticket)
-        )
-        if not pub_ok:
-            res_pub_err = _empty_result(base_branch, head_branch)
-            res_pub_err.spec_plans = selected_plans
-            res_pub_err.verified_proofs = verified_proofs
-            return False, res_pub_err, pub_err
+    pub_ok, pub_err = _maybe_publish_plan_evidence(
+        repo, publish_evidence, failed_proofs, evidence_branch, selected_plans, ticket
+    )
+    if not pub_ok:
+        res_pub_err = _empty_result(base_branch, head_branch)
+        res_pub_err.spec_plans = selected_plans
+        res_pub_err.verified_proofs = verified_proofs
+        return False, res_pub_err, pub_err
 
     for plan in selected_plans:
         _render_plan_bodies(plan, base_branch, context_terms, plan_receipts.get(plan.spec_slug), gate_status)
 
-    spec_digests = [p.spec_digest for p in selected_plans if p.spec_digest]
-    pr_body, show_me_body = _render_top_level_bodies(
-        sel_slug, selected_plans, head_branch, base_branch, len(changed_files),
-        index_changes, context_terms, specs_linked, verified_proofs, failed_proofs, examiner_receipt, gate_status, spec_digests,
-    )
-
-    result = ShipPrepResult(
-        base_branch=base_branch,
-        head_branch=head_branch,
-        door_type=door_type,
-        blast_radius=blast_radius,
-        index_changes=index_changes,
-        context_terms=context_terms,
-        specs_linked=specs_linked,
-        verified_proofs=verified_proofs,
-        failed_proofs=failed_proofs,
-        examiner_receipt=examiner_receipt,
-        intent=_build_intent_str(head_branch, index_changes, verified_proofs, changed_files, spec_digests=spec_digests),
-        scenario_contract=_build_scenario_contract(head_branch, index_changes, verified_proofs, examiner_receipt, changed_files),
-        pr_body=pr_body,
-        show_me_body=show_me_body,
-        spec_digests=spec_digests,
-        spec_plans=selected_plans,
-        selected_spec=sel_slug,
+    result = _assemble_ship_result(
+        base_branch, head_branch, door_type, blast_radius, index_changes, context_terms,
+        specs_linked, verified_proofs, failed_proofs, examiner_receipt, changed_files,
+        selected_plans, sel_slug, gate_status,
     )
     return _validate_ship_result(result, strict_proofs, split_branches, repo, eff_base, ticket_map=ticket_map)
 
