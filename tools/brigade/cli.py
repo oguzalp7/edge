@@ -321,11 +321,15 @@ def cmd_prepare_ship(args: argparse.Namespace) -> int:
     base_branch = getattr(args, "base", "staging") or "staging"
     fmt = getattr(args, "format", "pr") or "pr"
     strict_proofs = bool(getattr(args, "strict_proofs", False))
+    spec_slug = getattr(args, "spec", None)
+    split_branches = bool(getattr(args, "split_branches", False))
 
     ok, result, err = prepare_ship_payload(
         repo_path=repo_path,
         base_branch=base_branch,
         strict_proofs=strict_proofs,
+        spec_slug=spec_slug,
+        split_branches=split_branches,
     )
     rendered = format_ship_output(result, fmt=fmt)
 
@@ -1200,9 +1204,11 @@ def main() -> int:
     p_tier.add_argument("--json", action="store_true", help="Output machine-readable JSON")
 
     # prepare-ship
-    p_ship = subparsers.add_parser("prepare-ship", help="Synthesize Specs-to-PR ship payload for no-mistakes")
+    p_ship = subparsers.add_parser("prepare-ship", help="Synthesize per-spec Specs-to-PR ship plans and split branches")
     p_ship.add_argument("repo", help="Path to target repository")
     p_ship.add_argument("--base", default="staging", help="Base branch to diff against (default: staging)")
+    p_ship.add_argument("--spec", default=None, help="Filter to a single changed spec slug")
+    p_ship.add_argument("--split-branches", action="store_true", help="Create isolated ship/<spec-slug> branches off base")
     p_ship.add_argument("--format", choices=["pr", "show-me", "json"], default="pr", help="Output format (default: pr)")
     p_ship.add_argument("--out", help="Optional output file path (written atomically)")
     p_ship.add_argument("--strict-proofs", action="store_true", help="Require at least one verified QA proof or ExaminerReceipt")

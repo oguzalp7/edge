@@ -1,117 +1,64 @@
 ---
 name: edge-ship
-description: Milestone & Release Gate via no-mistakes. Validates committed changes on a feature/milestone branch through the no-mistakes pipeline (intent, rebase, review, test, document, lint, push, PR, CI) with PR targeting staging for automated Coolify deployment. Use when an epic, feature, or MVP milestone is completed.
+description: Brigade-Native "1 Spec = 1 PR" Delivery Engine targeting staging. Synthesizes per-spec ship/<slug> branches, scoped ProofVerifier evidence, lean Pocock/Show-Me PR bodies, GitHub PR creation, and CI watch without external orchestrator wrappers.
 user-invocable: true
 ---
 
-# 🚀 /edge-ship — Milestone & Release Gate via no-mistakes
+# 🚀 /edge-ship — Brigade-Native Per-Spec Delivery Engine (`1 Spec = 1 PR`)
 
-> *"Do not deploy individual micro-slices directly. Slices land fast-forward into local `development`. When a cohesive feature or MVP milestone is accomplished, trigger the `no-mistakes` verification gate to open a PR against `staging`, triggering remote Coolify redeployment upon merge."*
+> *"Slices land fast-forward into local `development` after passing `VERIFY -> GATE -> [QA] -> REVIEW`. When shipping from `development` to `staging`, each changed spec gets its own isolated `ship/<spec-slug>` PR backed by scoped `ProofVerifier` receipts and remote CI checks."*
 
 ---
 
-## 🎯 Purpose & Cadence
+## 🎯 Purpose & Architecture
 
-In the Edge architecture:
-1. **Vertical Slices & Tickets**: Sliced by `edge-orchestrator`, executed in isolated `treehouse` worktrees, and fast-forward merged into local `development` via `edge-brigade`.
-2. **Milestone / Epic Completion (`edge-ship`)**: Triggered **only** when a meaningful user journey, epic, or MVP milestone has landed on `development` (or a dedicated milestone branch).
-3. **Target Integration Branch**: Strictly **`staging`**. Coolify is configured to monitor `staging` on GitHub and redeploy the staging container on push/merge.
+- **1 Spec = 1 PR:** Never lump unrelated completed slices into one monolithic PR. `brigade prepare-ship --split-branches` discovers each spec touched in `staging..HEAD`, validates only its scoped `.edge/qa/proofs/<spec-slug>.json` receipts, and creates `ship/<spec-slug>` off `staging`.
+- **Lean 2-Section PR Body:** Emits concise `## Summary` (branch/spec scope, Mermaid architecture digest, `specs/INDEX.md`, `CONTEXT.md`) and `## Evidence` (spec link, Gate status, Examiner seal, SHA-256 verified QA screenshots, `db_crosscheck`).
+- **Target Integration Branch:** Strictly **`staging`** (triggers Coolify redeployment upon PR merge).
+- **Decoupled from `/edge-no-mistakes`:** Primary delivery uses native `brigade` + `gh` / `gh-axi` + CI. For optional external auditing, invoke `/edge-no-mistakes` separately.
 
 ---
 
 ## 🐧 Critical Execution Environment: WSL2 Protocol
 
 > [!CRITICAL]
-> All `no-mistakes` CLI commands MUST be executed inside **WSL2** (`/home/oguz/...`):
+> All `brigade` and `gh` shipping commands MUST run inside **WSL2** (`/home/oguz/...`):
 > ```bash
-> wsl -e /bin/bash -lc "cd /home/oguz/<project> && no-mistakes axi run --base-branch staging --intent '<milestone_intent>' -y"
+> wsl --cd /home/oguz/<project> python3 tools/brigade/cli.py prepare-ship . --base staging --split-branches --format json
 > ```
 
 ---
 
-## 🔄 The no-mistakes Gate Pipeline
+## ⚡ 4-Step Brigade-Native Shipping Pipeline
 
-When invoked, `no-mistakes` validates code changes through a strict 9-phase deterministic gate:
-
-1. **Intent Lock**: Pins the user's high-level goal and acceptance criteria (`--intent`).
-2. **Rebase**: Hermetically rebases the branch onto `staging`.
-3. **Automated Code Review**: Multi-agent review with automated remediation of actionable findings (`-y`).
-4. **Test**: Executes test suite; verifies characterization and behavioral tests.
-5. **Document**: Synchronizes bilingual docs, specs, and API contracts.
-6. **Lint**: Runs project linter and formatting checks.
-7. **Push**: Pushes validated branch to GitHub remote.
-8. **PR Creation**: Drafts and opens a Pull Request targeting **`staging`**.
-9. **CI Verification**: Verifies remote CI pipeline checks.
-
----
-
-## ⚡ How to Ship a Milestone
-
-### Step 1: Pre-Flight Check & Scope Inspection
-Verify that all changes are committed and your working tree is clean:
-
+### Step 1: Docs & Drift Gate
+Verify navigation index integrity and living domain contracts before preparing PRs:
 ```bash
-# Check repository status and current branch in WSL
-git status
-git branch --show-current
+npm run check:navigation
+python3 tools/drift/cli.py check .
 ```
 
-If currently on `development`, create and checkout a release/milestone branch before initiating the gate:
+### Step 2: Per-Spec Branch & PR Plan Synthesis (`brigade prepare-ship`)
+Discover changed specs in `staging..HEAD`, run scoped `ProofVerifier` validation (ignoring stale historical proofs), and materialize isolated `ship/<spec-slug>` branches:
 ```bash
-git checkout -b release/<feature-milestone>
+# Split all changed specs into isolated ship/<spec-slug> branches and emit JSON plans
+python3 tools/brigade/cli.py prepare-ship . --base staging --split-branches --format json --out .edge/ship-payload.json
+
+# Or inspect / target a single spec slice
+python3 tools/brigade/cli.py prepare-ship . --base staging --spec <spec-slug> --format pr
 ```
 
-### Step 1.5: Two-Tier Spec-Anchored PR & Specs-to-PR Bridge (`finish-slice --pr` & `prepare-ship`)
-1. **Tier 1 — Slice-Level PR into `development` (`brigade finish-slice <repo> --pr`):**
-   - Synthesizes a Spec-Anchored PR body (including the slice spec's embedded `mermaid` diagram, Examiner seal, and QA proof summary).
-   - **Two-Way Door (`[TWO-WAY DOOR]`):** Opens PR and automatically merges (`gh pr merge --auto --merge`) unless `--no-auto-merge` is passed.
-   - **One-Way Door (`[ONE-WAY DOOR]` — DB migrations, schema changes, SQL):** Opens PR and holds it open for mandatory human review (never auto-merged).
-2. **Tier 2 — Milestone PR into `staging` (`brigade prepare-ship`):**
-   - Before invoking `no-mistakes`, synthesize the deterministic Multi-Spec Ship payload across all slices delivered on `development..HEAD` (automatically excluding `*-critique.md` files), embedding each spec's `SpecDigest` and `mermaid` architecture/state diagrams into `## Evidence`, verifying all QA proof receipts via `ProofVerifier`, classifying One-way vs. Two-way Door risk, and locking a multi-spec `--intent`:
-
+### Step 3: Push & Per-Spec PR Creation (`gh pr create --base staging`)
+For each `ship/<spec-slug>` branch in `spec_plans`:
 ```bash
-# Generate PR body & validate proofs (exits 1 if any .edge/qa/proofs/*.json fails ProofVerifier)
-python3 tools/brigade/cli.py prepare-ship . --base staging --format pr
-
-# Or emit machine-readable JSON (contains intent, scenario_contract, pr_body, door_type, blast_radius)
-python3 tools/brigade/cli.py prepare-ship . --base staging --format json --out .edge/ship-payload.json
+git push -u origin ship/<spec-slug>
+gh pr create --base staging --head ship/<spec-slug> --title "<plan.pr_title>" --body "<plan.pr_body>"
 ```
+*(Prefer `gh-axi` when available, falling back to `gh` CLI or `github-mcp-server`.)*
 
-### Step 2: Run no-mistakes Targeting Staging
-Execute `no-mistakes axi run` with `--base-branch staging` using the locked `--intent` from `prepare-ship`:
-
+### Step 4: Remote CI Verification (`gh pr checks`)
+Monitor remote CI status on each opened PR:
 ```bash
-no-mistakes axi run \
-  --base-branch staging \
-  --intent "Deliver <Milestone/Feature Name>: Complete vertical slice with repository extraction, visual parity, and characterization test coverage." \
-  -y
+gh pr checks <pr_number> --watch
 ```
-
-> [!TIP]
-> If you need to skip external CI checks during rapid staging previews:
-> ```bash
-> no-mistakes axi run --base-branch staging --skip ci --intent "<intent>" -y
-> ```
-
-### Step 3: Monitor Gate Status & Handle Approval Points
-`no-mistakes axi` prints token-efficient [TOON](https://toonformat.dev) format.
-
-If the gate pauses for a human decision or question:
-```bash
-# 1. View detailed status of active run
-no-mistakes axi status
-
-# 2. View step logs
-no-mistakes axi logs --step <step_name>
-
-# 3. Answer a question or approval gate
-no-mistakes axi respond --answer "<decision>"
-
-# 4. In case of fatal dead-end (between runs only)
-no-mistakes axi abort
-```
-
-### Step 4: Outcome & Coolify Redeployment
-Once `no-mistakes` outputs `disposition: completed`:
-- A Pull Request targeting `staging` is open on GitHub.
-- Once merged into `staging`, Coolify automatically pulls the updated branch, rebuilds the Docker container, and redeploys the staging environment.
+Once CI is green and the PR merges into `staging`, Coolify automatically redeploys the staging environment.

@@ -21,6 +21,9 @@ except ImportError:
     from tools.brigade.navigation import build_navigation_context, resolve_migration_paths
 
 
+_GENERIC_DOMAINS = frozenset({"general", "core", "ui", "feature"})
+
+
 def _resolve_target_label(ticket: Ticket) -> str:
     if ticket.target_file:
         return ticket.target_file
@@ -594,18 +597,36 @@ CONSTRAINTS & INSTRUCTIONS (STRICT):
     @staticmethod
     def _strip_branch_prefix(branch: str) -> str:
         s = branch.strip()
-        for prefix in ("feat/", "refactor/", "hotfix/", "chore/"):
+        for prefix in ("feat/", "fix/", "refactor/", "hotfix/", "chore/", "ship/"):
             if s.startswith(prefix):
                 return s[len(prefix):]
         return s
 
     @staticmethod
+    def _clean_path_stem(raw_path: Optional[str]) -> str:
+        text = (raw_path or "").strip()
+        if not text:
+            return ""
+        stem = Path(text.replace("\\", "/")).stem
+        return StationRegistry._clean_slug(stem)
+
+    @staticmethod
     def _resolve_ticket_slug(ticket: Ticket) -> Optional[str]:
-        if (ticket.domain or "").strip():
-            return StationRegistry._clean_slug(ticket.domain)
+        spec_slug = StationRegistry._clean_path_stem(getattr(ticket, "spec_path", None))
+        if spec_slug:
+            return spec_slug
         if (ticket.branch_name or "").strip():
-            stripped = StationRegistry._strip_branch_prefix(ticket.branch_name)
-            return StationRegistry._clean_slug(stripped)
+            branch_slug = StationRegistry._clean_slug(
+                StationRegistry._strip_branch_prefix(ticket.branch_name)
+            )
+            if branch_slug:
+                return branch_slug
+        domain_slug = StationRegistry._clean_slug(ticket.domain)
+        if domain_slug and domain_slug not in _GENERIC_DOMAINS:
+            return domain_slug
+        target_slug = StationRegistry._clean_path_stem(ticket.target_file)
+        if target_slug:
+            return target_slug
         if (ticket.ticket_id or "").strip():
             return StationRegistry._clean_slug(ticket.ticket_id)
         return None
@@ -619,10 +640,12 @@ CONSTRAINTS & INSTRUCTIONS (STRICT):
         Deterministically resolves the scenario slug used for proof receipt lookup.
         Priority:
         1. Explicit scenario_slug if not default 'qa_scenario'
-        2. ticket.domain (lowercased, '_' replaced with '-')
-        3. ticket.branch_name (prefixes stripped, lowercased, '_' replaced with '-')
-        4. ticket.ticket_id (lowercased, '_' replaced with '-')
-        5. Fallback: 'qa_scenario'
+        2. ticket.spec_path stem
+        3. ticket.branch_name (prefixes stripped)
+        4. Non-generic ticket.domain (excludes general/core/ui/feature)
+        5. ticket.target_file stem
+        6. ticket.ticket_id
+        7. Fallback: 'qa_scenario'
         """
         clean_scenario = StationRegistry._clean_slug(scenario_slug)
         if clean_scenario and clean_scenario != "qa-scenario":

@@ -2997,7 +2997,7 @@ class TestBrigadeQABrowserProofGate(unittest.TestCase):
             fingerprint="fp-dash",
             description="User dashboard view",
             suggested_fix="Fix",
-            branch_name="feat/dashboard-v2",
+            branch_name="feat/dashboard",
             test_seam_command="npm test",
         )
         self.fsm.state.active_ticket = self.ticket
@@ -3018,40 +3018,57 @@ class TestBrigadeQABrowserProofGate(unittest.TestCase):
             "explicit-slug",
         )
 
-        # Priority 2: ticket.domain (lowercased, '_' replaced with '-')
-        self.assertEqual(
-            StationRegistry._resolve_qa_slug("qa_scenario", ticket=self.ticket),
-            "dashboard",
-        )
-        t_domain = Ticket(
-            ticket_id="TICK-1",
+        # Priority 2: ticket.spec_path stem overrides domain and branch_name (prevents shared domain collisions)
+        t_spec = Ticket(
+            ticket_id="TICK-PORTAL-1",
             track="ui",
-            domain="User_Profile",
+            domain="portal",
             rule_id="R",
             severity="NORMAL",
-            target_file="",
+            target_file="src/portal/grid.tsx",
             line_number=1,
-            fingerprint="",
-            description="",
-            suggested_fix="",
-            branch_name="feat/some_branch",
+            fingerprint="fp-portal",
+            description="Portal grid polish",
+            suggested_fix="Polish",
+            branch_name="feat/portal-grid-polish",
+            spec_path=".edge/specs/portal-grid-polish.md",
+        )
+        resolved_spec_slug = StationRegistry._resolve_qa_slug("qa_scenario", ticket=t_spec)
+        self.assertNotEqual(resolved_spec_slug, "portal")
+        self.assertEqual(resolved_spec_slug, "portal-grid-polish")
+
+        t_archived_spec = Ticket(
+            ticket_id="TICK-PORTAL-2",
+            track="ui",
+            domain="portal",
+            rule_id="R",
+            severity="NORMAL",
+            target_file="src/portal/studio.tsx",
+            line_number=1,
+            fingerprint="fp-studio",
+            description="Content studio polish",
+            suggested_fix="Polish",
+            branch_name="feat/portal-polish",
+            spec_path=".edge/archive/specs/content-studio-polish.md",
         )
         self.assertEqual(
-            StationRegistry._resolve_qa_slug("qa_scenario", ticket=t_domain),
-            "user-profile",
+            StationRegistry._resolve_qa_slug("qa_scenario", ticket=t_archived_spec),
+            "content-studio-polish",
         )
 
-        # Priority 3: ticket.branch_name (prefixes stripped, lowercased, '_' replaced with '-')
+        # Priority 3: ticket.branch_name (prefixes stripped) overrides domain when spec_path is absent
         for prefix, expected in [
             ("feat/checkout_flow", "checkout-flow"),
+            ("fix/login_redirect", "login-redirect"),
             ("refactor/user_auth", "user-auth"),
             ("hotfix/crash_fix", "crash-fix"),
             ("chore/cleanup_db", "cleanup-db"),
+            ("ship/alpha_slice", "alpha-slice"),
         ]:
             t_branch = Ticket(
                 ticket_id="TICK-2",
                 track="ui",
-                domain="",
+                domain="portal",
                 rule_id="R",
                 severity="NORMAL",
                 target_file="",
@@ -3060,13 +3077,73 @@ class TestBrigadeQABrowserProofGate(unittest.TestCase):
                 description="",
                 suggested_fix="",
                 branch_name=prefix,
+                spec_path=None,
             )
             self.assertEqual(
                 StationRegistry._resolve_qa_slug("qa_scenario", ticket=t_branch),
                 expected,
             )
 
-        # Priority 4: ticket.ticket_id (lowercased, '_' replaced with '-')
+        # Priority 4: non-generic ticket.domain when spec_path and branch_name are absent
+        t_domain = Ticket(
+            ticket_id="TICK-1",
+            track="ui",
+            domain="User_Profile",
+            rule_id="R",
+            severity="NORMAL",
+            target_file="src/profile/view.tsx",
+            line_number=1,
+            fingerprint="",
+            description="",
+            suggested_fix="",
+            branch_name="",
+            spec_path=None,
+        )
+        self.assertEqual(
+            StationRegistry._resolve_qa_slug("qa_scenario", ticket=t_domain),
+            "user-profile",
+        )
+
+        # Priority 5: Generic domains ('core', 'general', 'ui', 'feature') are skipped -> target_file stem
+        t_generic_core = Ticket(
+            ticket_id="TICK-CORE-1",
+            track="core",
+            domain="core",
+            rule_id="R",
+            severity="NORMAL",
+            target_file="tools/brigade/ship_prep.py",
+            line_number=1,
+            fingerprint="",
+            description="",
+            suggested_fix="",
+            branch_name="",
+            spec_path=None,
+        )
+        resolved_core = StationRegistry._resolve_qa_slug("qa_scenario", ticket=t_generic_core)
+        self.assertNotEqual(resolved_core, "core")
+        self.assertEqual(resolved_core, "ship-prep")
+
+        for generic_dom in ("general", "ui", "feature"):
+            t_gen = Ticket(
+                ticket_id="TICK-GEN",
+                track="ui",
+                domain=generic_dom,
+                rule_id="R",
+                severity="NORMAL",
+                target_file="src/components/booking_card.tsx",
+                line_number=1,
+                fingerprint="",
+                description="",
+                suggested_fix="",
+                branch_name="",
+                spec_path=None,
+            )
+            self.assertEqual(
+                StationRegistry._resolve_qa_slug("qa_scenario", ticket=t_gen),
+                "booking-card",
+            )
+
+        # Priority 6: ticket.ticket_id (lowercased, '_' replaced with '-')
         t_tid = Ticket(
             ticket_id="TICK_999_PAYMENT",
             track="ui",
@@ -3079,13 +3156,14 @@ class TestBrigadeQABrowserProofGate(unittest.TestCase):
             description="",
             suggested_fix="",
             branch_name=None,
+            spec_path=None,
         )
         self.assertEqual(
             StationRegistry._resolve_qa_slug("qa_scenario", ticket=t_tid),
             "tick-999-payment",
         )
 
-        # Priority 5: Fallback to 'qa_scenario'
+        # Priority 7: Fallback to 'qa_scenario'
         t_empty = Ticket(
             ticket_id="",
             track="ui",
@@ -3098,6 +3176,7 @@ class TestBrigadeQABrowserProofGate(unittest.TestCase):
             description="",
             suggested_fix="",
             branch_name="",
+            spec_path=None,
         )
         self.assertEqual(
             StationRegistry._resolve_qa_slug("qa_scenario", ticket=t_empty),
@@ -4588,7 +4667,7 @@ class TestEvidenceFirstReviewAndShipBridge(unittest.TestCase):
 
         from tools.common import run_command as real_run_command
 
-        ticket = self._make_ticket(track="ui", domain="checkout", branch_name="refactor/ui-checkout")
+        ticket = self._make_ticket(track="ui", domain="checkout", branch_name="refactor/checkout")
         self.fsm.state.active_ticket = ticket
         self.fsm.state.current_state = CycleState.GATE
 
@@ -4846,8 +4925,16 @@ class TestEvidenceFirstReviewAndShipBridge(unittest.TestCase):
         pr_text = ship_prep.format_ship_output(result, fmt="pr")
         self.assertIn("## Summary", pr_text)
         self.assertIn("## Evidence", pr_text)
-        self.assertIn("## Merge Danger", pr_text)
-        self.assertIn("Two-way door", pr_text)
+        self.assertNotIn("## Merge Danger", pr_text)
+        self.assertNotIn("One-way door", pr_text)
+        self.assertNotIn("Two-way door", pr_text)
+
+        show_me_text = ship_prep.format_ship_output(result, fmt="show-me")
+        self.assertIn("## Summary", show_me_text)
+        self.assertIn("## Evidence", show_me_text)
+        self.assertNotIn("## Merge Danger", show_me_text)
+        self.assertNotIn("One-way door", show_me_text)
+        self.assertNotIn("Two-way door", show_me_text)
 
         # CLI prepare-ship --format json --out <path>
         out_file = self.repo_path / ".edge" / "ship-payload.json"
@@ -4876,7 +4963,7 @@ class TestEvidenceFirstReviewAndShipBridge(unittest.TestCase):
         for key in ("intent", "scenario_contract", "pr_body", "door_type", "blast_radius", "verified_proofs", "failed_proofs"):
             self.assertIn(key, payload)
 
-        # Broken QA proof receipt -> prepare-ship fails (exit 1)
+        # Broken QA proof receipt changed in staging..HEAD -> prepare-ship fails (exit 1)
         (proofs_dir / "broken.json").write_text(
             json.dumps({
                 "slug": "broken",
@@ -4890,6 +4977,8 @@ class TestEvidenceFirstReviewAndShipBridge(unittest.TestCase):
             }),
             encoding="utf-8",
         )
+        git("add", ".edge/qa/proofs/broken.json")
+        git("commit", "-m", "test: add broken scoped proof")
         ok_bad, res_bad, _ = ship_prep.prepare_ship_payload(self.repo_path, base_branch="staging")
         self.assertFalse(ok_bad, "Broken QA proof must fail prepare_ship_payload")
         self.assertTrue(len(res_bad.failed_proofs) >= 1)
@@ -5184,6 +5273,230 @@ class TestEvidenceFirstReviewAndShipBridge(unittest.TestCase):
         qa_lines = qa_text.splitlines()
         self.assertLessEqual(len(qa_lines), 60, f"agents/qa-engineer.md exceeded 60 lines ({len(qa_lines)})")
         self.assertIn("mermaid", qa_text.lower(), "agents/qa-engineer.md must reference following the spec's mermaid workflow")
+
+    # ------------------------------------------------------------------
+    # SPEC-EDGE-BRIGADE-004 (IC-2, IC-3, IC-5): Per-Spec Ship Engine & Skills Decoupling
+    # ------------------------------------------------------------------
+
+    def test_per_spec_ship_plans_scoped_proofs_and_split_branches(self):
+        import inspect
+        import io
+        from contextlib import redirect_stdout
+
+        ship_prep = importlib.import_module("tools.brigade.ship_prep")
+        SpecShipPlan = getattr(ship_prep, "SpecShipPlan", None)
+        self.assertIsNotNone(SpecShipPlan, "tools.brigade.ship_prep must define SpecShipPlan")
+        discover_fn = getattr(ship_prep, "discover_changed_specs", None)
+        self.assertIsNotNone(discover_fn, "tools.brigade.ship_prep must define discover_changed_specs")
+        split_fn = getattr(ship_prep, "create_split_branches", None)
+        self.assertIsNotNone(split_fn, "tools.brigade.ship_prep must define create_split_branches")
+
+        sig = inspect.signature(ship_prep.prepare_ship_payload)
+        self.assertIn("spec_slug", sig.parameters, "prepare_ship_payload must accept spec_slug")
+        self.assertIn("split_branches", sig.parameters, "prepare_ship_payload must accept split_branches")
+
+        repo_dir = Path(tempfile.mkdtemp(dir=self.test_dir))
+
+        def git(*git_args):
+            proc = subprocess.run(
+                ["git", *git_args],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            return proc.stdout.strip()
+
+        git("init", "-b", "staging")
+        git("config", "user.email", "brigade@example.com")
+        git("config", "user.name", "Edge Brigade")
+
+        # Base staging commit with a stale/malformed historical proof that MUST NOT block future slices
+        (repo_dir / "README.md").write_text("# Base Repo\n", encoding="utf-8")
+        (repo_dir / "specs").mkdir(parents=True, exist_ok=True)
+        (repo_dir / "specs" / "INDEX.md").write_text("# Navigation Index\n", encoding="utf-8")
+        proofs_dir = repo_dir / ".edge" / "qa" / "proofs"
+        proofs_dir.mkdir(parents=True, exist_ok=True)
+        (proofs_dir / "legacy-broken.json").write_text("{malformed-legacy-json", encoding="utf-8")
+        git("add", "-A")
+        git("commit", "-m", "chore: staging base with legacy broken proof")
+
+        git("checkout", "-b", "development")
+
+        arch_dir = repo_dir / ".edge" / "archive" / "specs"
+        arch_dir.mkdir(parents=True, exist_ok=True)
+        (arch_dir / "alpha.md").write_text(
+            "---\n"
+            "expected_files:\n"
+            "  - src/alpha/core.ts\n"
+            "---\n\n"
+            "# Alpha Flow Slice\n\n"
+            "Summary: Implements alpha slice.\n\n"
+            "```mermaid\n"
+            "flowchart LR\n"
+            "    Start --> AlphaDone\n"
+            "```\n",
+            encoding="utf-8",
+        )
+        (arch_dir / "beta.md").write_text(
+            "---\n"
+            "expected_files:\n"
+            "  - src/beta/core.ts\n"
+            "---\n\n"
+            "# Beta Flow Slice\n\n"
+            "Summary: Implements beta slice.\n\n"
+            "```mermaid\n"
+            "stateDiagram-v2\n"
+            "    Init --> BetaReady\n"
+            "```\n",
+            encoding="utf-8",
+        )
+
+        (repo_dir / "specs" / "INDEX.md").write_text(
+            "# Navigation Index\n"
+            "- @module alpha | Action: runAlpha | @spec .edge/archive/specs/alpha.md\n"
+            "- @module beta | Action: runBeta | @spec .edge/archive/specs/beta.md\n",
+            encoding="utf-8",
+        )
+        (repo_dir / "src" / "alpha").mkdir(parents=True, exist_ok=True)
+        (repo_dir / "src" / "alpha" / "core.ts").write_text("export const alpha = 1;\n", encoding="utf-8")
+        (repo_dir / "src" / "beta").mkdir(parents=True, exist_ok=True)
+        (repo_dir / "src" / "beta" / "core.ts").write_text("export const beta = 2;\n", encoding="utf-8")
+
+        shots_dir = repo_dir / ".edge" / "qa" / "screenshots"
+        shots_dir.mkdir(parents=True, exist_ok=True)
+        (shots_dir / "alpha-1.png").write_bytes(self._make_solid_png(4, 4, (10, 40, 80)))
+        (proofs_dir / "alpha.json").write_text(
+            json.dumps({
+                "slug": "alpha",
+                "visited_urls": ["http://localhost:3000/alpha"],
+                "user_actions_executed": ["click alpha", "reload"],
+                "persistence_verified": True,
+                "console_clean": True,
+                "screenshot_paths": [".edge/qa/screenshots/alpha-1.png"],
+                "host_facts_verified": True,
+                "db_crosscheck": {"alpha": 1},
+            }),
+            encoding="utf-8",
+        )
+
+        git("add", "-A")
+        git("commit", "-m", "feat: deliver alpha and beta slices on development")
+
+        # 1. Scoped ProofVerifier ignores legacy-broken.json & builds 2 SpecShipPlans
+        ok, result, err = ship_prep.prepare_ship_payload(repo_dir, base_branch="staging")
+        self.assertTrue(ok, f"prepare_ship_payload must ignore legacy-broken.json and succeed: {err}")
+        self.assertEqual(result.failed_proofs, [], f"legacy-broken.json must not fail scoped proofs: {result.failed_proofs}")
+        self.assertTrue(hasattr(result, "spec_plans"), "ShipPrepResult must include spec_plans")
+        self.assertEqual(len(result.spec_plans), 2, f"Expected 2 SpecShipPlans, got: {result.spec_plans}")
+
+        plans_by_slug = {p.spec_slug: p for p in result.spec_plans}
+        self.assertIn("alpha", plans_by_slug)
+        self.assertIn("beta", plans_by_slug)
+
+        alpha_plan = plans_by_slug["alpha"]
+        beta_plan = plans_by_slug["beta"]
+        self.assertEqual(alpha_plan.pr_branch, "ship/alpha")
+        self.assertEqual(beta_plan.pr_branch, "ship/beta")
+        self.assertIn("src/alpha/core.ts", alpha_plan.matched_files)
+        self.assertIn("src/beta/core.ts", beta_plan.matched_files)
+        self.assertTrue(len(alpha_plan.verified_proofs) == 1 and alpha_plan.verified_proofs[0]["slug"] == "alpha")
+        self.assertEqual(alpha_plan.failed_proofs, [])
+
+        # 2. Lean 2-section PR body (NO ## Merge Danger / One-way door / Two-way door)
+        for body in (alpha_plan.pr_body, alpha_plan.show_me_body, beta_plan.pr_body, result.pr_body, result.show_me_body):
+            self.assertIn("## Summary", body)
+            self.assertIn("## Evidence", body)
+            self.assertNotIn("## Merge Danger", body)
+            self.assertNotIn("One-way door", body)
+            self.assertNotIn("Two-way door", body)
+        self.assertIn("gh pr create", alpha_plan.show_me_body)
+        self.assertIn("ship/alpha", alpha_plan.show_me_body)
+        self.assertNotIn("no-mistakes axi run", alpha_plan.show_me_body)
+
+        # 3. CLI --spec alpha --format pr
+        stdout_buf = io.StringIO()
+        try:
+            with patch.object(
+                sys,
+                "argv",
+                ["brigade", "prepare-ship", str(repo_dir), "--base", "staging", "--spec", "alpha", "--format", "pr"],
+            ), redirect_stdout(stdout_buf):
+                rc_spec = brigade_cli.main()
+        except SystemExit as exc:
+            self.fail(f"CLI 'prepare-ship --spec alpha' exited abnormally: {exc}")
+        self.assertEqual(rc_spec, 0)
+        spec_out = stdout_buf.getvalue()
+        self.assertIn("## Summary", spec_out)
+        self.assertIn("## Evidence", spec_out)
+        self.assertIn("Alpha Flow Slice", spec_out)
+        self.assertNotIn("Beta Flow Slice", spec_out)
+        self.assertNotIn("## Merge Danger", spec_out)
+
+        # 4. CLI --split-branches --format json creates isolated ship/alpha & ship/beta off staging and restores HEAD
+        json_buf = io.StringIO()
+        try:
+            with patch.object(
+                sys,
+                "argv",
+                ["brigade", "prepare-ship", str(repo_dir), "--base", "staging", "--split-branches", "--format", "json"],
+            ), redirect_stdout(json_buf):
+                rc_split = brigade_cli.main()
+        except SystemExit as exc:
+            self.fail(f"CLI 'prepare-ship --split-branches' exited abnormally: {exc}")
+        self.assertEqual(rc_split, 0)
+        json_payload = json.loads(json_buf.getvalue())
+        self.assertIn("spec_plans", json_payload)
+        self.assertIn("split_branches_created", json_payload)
+        self.assertEqual(sorted(json_payload["split_branches_created"]), ["ship/alpha", "ship/beta"])
+
+        self.assertEqual(git("branch", "--show-current"), "development", "Original branch must be restored after --split-branches")
+        branches_out = git("branch", "--list", "ship/*")
+        self.assertIn("ship/alpha", branches_out)
+        self.assertIn("ship/beta", branches_out)
+
+        alpha_tree = set(git("ls-tree", "-r", "--name-only", "ship/alpha").splitlines())
+        self.assertIn("src/alpha/core.ts", alpha_tree)
+        self.assertIn(".edge/archive/specs/alpha.md", alpha_tree)
+        self.assertIn(".edge/qa/proofs/alpha.json", alpha_tree)
+        self.assertIn(".edge/qa/screenshots/alpha-1.png", alpha_tree)
+        self.assertNotIn("src/beta/core.ts", alpha_tree)
+        self.assertNotIn(".edge/archive/specs/beta.md", alpha_tree)
+
+        beta_tree = set(git("ls-tree", "-r", "--name-only", "ship/beta").splitlines())
+        self.assertIn("src/beta/core.ts", beta_tree)
+        self.assertIn(".edge/archive/specs/beta.md", beta_tree)
+        self.assertNotIn("src/alpha/core.ts", beta_tree)
+        self.assertNotIn(".edge/archive/specs/alpha.md", beta_tree)
+
+        # 5. Unknown --spec returns exit code 1
+        try:
+            with patch.object(
+                sys,
+                "argv",
+                ["brigade", "prepare-ship", str(repo_dir), "--base", "staging", "--spec", "does-not-exist"],
+            ):
+                rc_missing = brigade_cli.main()
+        except SystemExit as exc:
+            self.fail(f"CLI 'prepare-ship --spec does-not-exist' should return 1 cleanly, not SystemExit: {exc}")
+        self.assertEqual(rc_missing, 1)
+
+    def test_edge_ship_and_edge_no_mistakes_skills_decoupled(self):
+        edge_ship_path = self.repo_root / "skills" / "edge-ship" / "SKILL.md"
+        edge_nm_path = self.repo_root / "skills" / "edge-no-mistakes" / "SKILL.md"
+
+        ship_text = edge_ship_path.read_text(encoding="utf-8")
+        self.assertIn("--split-branches", ship_text)
+        self.assertIn("gh pr checks", ship_text)
+        self.assertIn("gh pr create", ship_text)
+        self.assertIn("--base staging", ship_text)
+        self.assertNotIn("no-mistakes axi run", ship_text)
+
+        nm_text = edge_nm_path.read_text(encoding="utf-8")
+        self.assertNotIn("This skill is an alias for", nm_text)
+        self.assertIn("--skip review,test", nm_text)
+        self.assertIn("gh issue create", nm_text)
+        self.assertIn("frontier-axi", nm_text)
 
 
 if __name__ == "__main__":

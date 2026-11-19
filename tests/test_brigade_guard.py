@@ -2106,6 +2106,72 @@ class TestGuardRoleDetectionAndPostToolHardening(unittest.TestCase):
         self.assertEqual(role, "SEAM_ARCHITECT")
         self.assertEqual(src, "transcript_swarm_keyword")
 
+    def test_no_mistakes_headless_invocation_exemption(self):
+        is_nm_fn = getattr(guard, "is_no_mistakes_invocation", None)
+        self.assertIsNotNone(
+            is_nm_fn,
+            "tools.brigade.orchestrator_guard must define is_no_mistakes_invocation(payload)",
+        )
+
+        # Normal payload without markers/env must NOT be exempted
+        matched_plain, _ = is_nm_fn({"conversationId": "plain-orch", "prompt": "Implement feature X"})
+        self.assertFalse(matched_plain)
+
+        # Signal B: prompt / message / transcript markers
+        marker_payloads = [
+            {"conversationId": "nm-1", "prompt": "Generate pipeline-attestation summary"},
+            {"conversationId": "nm-2", "userMessage": "Audit this diff. Return JSON only."},
+            {"conversationId": "nm-3", "message": "## What Changed\n- src/app.ts"},
+            {"conversationId": "nm-4", "prompt": "Evaluate against scenarioContract items"},
+        ]
+        for mp in marker_payloads:
+            matched, reason = is_nm_fn(mp)
+            self.assertTrue(matched, f"Expected no-mistakes match for payload: {mp}")
+            self.assertTrue(bool(reason))
+
+            pre_inv = guard.handle_pre_invocation(mp)
+            self.assertEqual(pre_inv, {"injectSteps": []})
+            self.assertNotIn("EDGE ORCHESTRATOR ENFORCED", json.dumps(pre_inv))
+
+            pre_tool = guard.handle_pre_tool({
+                **mp,
+                "toolCall": {
+                    "name": "write_file",
+                    "args": {"Path": "src/app.ts", "Content": "// doc update"},
+                },
+            })
+            self.assertEqual(pre_tool.get("decision"), "allow")
+
+        # Signal B via transcriptPath (first 25 lines)
+        tp_nm = self._write_transcript("nm_transcript.jsonl", [{
+            "step_index": 0,
+            "source": "USER_EXPLICIT",
+            "content": "Run no-mistakes review. Return JSON only with pipeline-attestation.",
+        }])
+        tp_payload = {"conversationId": "nm-tp", "transcriptPath": str(tp_nm)}
+        self.assertTrue(is_nm_fn(tp_payload)[0])
+        self.assertEqual(guard.handle_pre_invocation(tp_payload), {"injectSteps": []})
+        self.assertEqual(
+            guard.handle_pre_tool({
+                **tp_payload,
+                "toolCall": {"name": "write_file", "args": {"Path": "src/app.ts", "Content": "x"}},
+            }).get("decision"),
+            "allow",
+        )
+
+        # Signal A: NO_MISTAKES=1 environment variable
+        with patch.dict(os.environ, {"NO_MISTAKES": "1"}):
+            matched_env, _ = is_nm_fn({"conversationId": "nm-env"})
+            self.assertTrue(matched_env)
+            self.assertEqual(guard.handle_pre_invocation({"conversationId": "nm-env"}), {"injectSteps": []})
+            self.assertEqual(
+                guard.handle_pre_tool({
+                    "conversationId": "nm-env",
+                    "toolCall": {"name": "write_file", "args": {"Path": "src/app.ts", "Content": "x"}},
+                }).get("decision"),
+                "allow",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1246,7 +1246,93 @@ def _is_spec_writer_allowed_target(target_file: str) -> bool:
     return Path(norm).name in _SPEC_WRITER_ROOT_DOCS
 
 
+_NO_MISTAKES_ENV_VARS: Tuple[str, ...] = (
+    "NO_MISTAKES",
+    "NO_MISTAKES_RUN",
+    "NO_MISTAKES_STEP",
+)
+
+_NO_MISTAKES_MARKERS: Tuple[str, ...] = (
+    "no-mistakes",
+    "pipeline-attestation",
+    "return json only",
+    "## what changed",
+    "scenariocontract",
+)
+
+
+def _find_marker_in_text(text: str) -> Optional[str]:
+    low = text.lower()
+    for marker in _NO_MISTAKES_MARKERS:
+        if marker in low:
+            return marker
+    return None
+
+
+def _check_no_mistakes_env() -> Optional[str]:
+    for key in _NO_MISTAKES_ENV_VARS:
+        val = str(os.environ.get(key, "")).strip().lower()
+        if val and val not in ("0", "false", "no"):
+            return f"env:{key}"
+    return None
+
+
+def _check_no_mistakes_payload_text(payload: Dict[str, Any]) -> Optional[str]:
+    parts: List[str] = []
+    for key in ("prompt", "userMessage", "message"):
+        val = payload.get(key)
+        if val:
+            parts.append(str(val))
+    tool_call = payload.get("toolCall")
+    if isinstance(tool_call, dict) and tool_call.get("args"):
+        parts.append(str(tool_call.get("args")))
+    if not parts:
+        return None
+    marker = _find_marker_in_text("\n".join(parts))
+    return f"payload:{marker}" if marker else None
+
+
+def _check_no_mistakes_transcript(payload: Dict[str, Any]) -> Optional[str]:
+    t_path_raw = payload.get("transcriptPath")
+    if not t_path_raw:
+        return None
+    t_path = Path(str(t_path_raw))
+    if not t_path.is_file():
+        return None
+    try:
+        head_lines: List[str] = []
+        with open(t_path, "r", encoding="utf-8", errors="ignore") as f:
+            for idx, line in enumerate(f):
+                if idx >= 25:
+                    break
+                head_lines.append(line)
+        marker = _find_marker_in_text("\n".join(head_lines))
+        return f"transcript:{marker}" if marker else None
+    except Exception:
+        return None
+
+
+def is_no_mistakes_invocation(payload: Dict[str, Any]) -> Tuple[bool, str]:
+    """Detects headless no-mistakes worker invocations via env vars, payload markers, or transcript head."""
+    env_hit = _check_no_mistakes_env()
+    if env_hit:
+        return True, env_hit
+    if not isinstance(payload, dict):
+        return False, ""
+    payload_hit = _check_no_mistakes_payload_text(payload)
+    if payload_hit:
+        return True, payload_hit
+    transcript_hit = _check_no_mistakes_transcript(payload)
+    if transcript_hit:
+        return True, transcript_hit
+    return False, ""
+
+
 def handle_pre_tool(payload: dict) -> dict:
+    is_nm, _ = is_no_mistakes_invocation(payload)
+    if is_nm:
+        return {"decision": "allow", "reason": "NO_MISTAKES_HEADLESS_EXEMPTION"}
+
     is_afk, afk_mode = is_afk_session(payload)
     if is_afk:
         afk_decision = apply_afk_guard(payload, afk_mode)
@@ -1556,6 +1642,10 @@ def handle_post_tool(payload: dict) -> dict:
 
 
 def handle_pre_invocation(payload: dict) -> dict:
+    is_nm, _ = is_no_mistakes_invocation(payload)
+    if is_nm:
+        return {"injectSteps": []}
+
     is_afk, _ = is_afk_session(payload)
     if is_afk:
         return {}
