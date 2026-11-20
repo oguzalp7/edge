@@ -29,6 +29,7 @@ try:
     from .tier import get_tier_status, switch_tier, format_tier_card
     from .ship_prep import prepare_ship_payload, format_ship_output
     from .smoke_routes import discover_project_routes, run_route_smoke_scan, triage_smoke_failures, format_smoke_report
+    from .security_audit import run_security_audit, triage_security_findings, format_security_report
 except ImportError:
     from tools.brigade.models import StationRole, CycleState, ReviewFinding, Ticket, ExaminerReceipt
     from tools.brigade.fsm import BrigadeFSM
@@ -39,6 +40,7 @@ except ImportError:
     from tools.brigade.tier import get_tier_status, switch_tier, format_tier_card
     from tools.brigade.ship_prep import prepare_ship_payload, format_ship_output
     from tools.brigade.smoke_routes import discover_project_routes, run_route_smoke_scan, triage_smoke_failures, format_smoke_report
+    from tools.brigade.security_audit import run_security_audit, triage_security_findings, format_security_report
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -408,6 +410,25 @@ def cmd_smoke_routes(args: argparse.Namespace) -> int:
     fmt = getattr(args, "format", "toon") or "toon"
     print(format_smoke_report(report, fmt=fmt))
     return 0 if report.all_navigable else 1
+
+
+def cmd_security_audit(args: argparse.Namespace) -> int:
+    repo_path = normalize_target_path(args.repo)
+    raw_scopes = list(getattr(args, "scope", None) or [])
+    report = run_security_audit(
+        repo_path=repo_path,
+        scopes=raw_scopes or None,
+        diff_only=bool(getattr(args, "diff_only", False)),
+        base_ref=getattr(args, "base", None),
+        recursive=bool(getattr(args, "recursive", False)),
+        profile=getattr(args, "profile", "standard") or "standard",
+    )
+    if not report.passed and not getattr(args, "no_triage", False):
+        triage_security_findings(repo_path, report)
+
+    fmt = getattr(args, "format", "toon") or "toon"
+    print(format_security_report(report, fmt=fmt))
+    return 0 if report.passed else 1
 
 
 def _print_handoff_banner(handoff: Dict[str, Any]) -> None:
@@ -1301,6 +1322,17 @@ def main() -> int:
     p_smoke.add_argument("--settle-budget-ms", type=int, default=1500, help="Spinner/skeleton settling budget in ms (default: 1500)")
     p_smoke.add_argument("--heap-budget-mb", type=float, default=80.0, help="JS heap usage budget in MB (default: 80.0)")
 
+    # security-audit
+    p_sec = subparsers.add_parser("security-audit", help="Run incremental 4-class security audit with shared coverage ledger")
+    p_sec.add_argument("repo", help="Path to target repository")
+    p_sec.add_argument("--scope", action="append", default=[], help="Audit scope directory/file/glob (repeatable or comma-separated)")
+    p_sec.add_argument("--diff-only", action="store_true", help="Restrict audit to git diff changed files")
+    p_sec.add_argument("--base", default=None, help="Git base ref for --diff-only")
+    p_sec.add_argument("--recursive", action="store_true", help="Audit all repository source files")
+    p_sec.add_argument("--profile", choices=["quick", "standard", "deep"], default="standard", help="Audit depth profile (default: standard)")
+    p_sec.add_argument("--no-triage", action="store_true", help="Do not auto-triage confirmed findings into core ledger / FSM")
+    p_sec.add_argument("--format", choices=["toon", "json", "markdown"], default="toon", help="Output format (default: toon)")
+
     args = parser.parse_args()
 
     commands = {
@@ -1333,6 +1365,7 @@ def main() -> int:
         "tier": cmd_tier,
         "prepare-ship": cmd_prepare_ship,
         "smoke-routes": cmd_smoke_routes,
+        "security-audit": cmd_security_audit,
     }
 
     func = commands.get(args.command)

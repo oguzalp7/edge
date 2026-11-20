@@ -7318,6 +7318,316 @@ class TestEvidenceFirstReviewAndShipBridge(unittest.TestCase):
         self.assertIn("--allow-topology-override", skill_text)
         self.assertIn("--stage-branch", skill_text)
 
+    # ------------------------------------------------------------------
+    # SPEC-EDGE-BRIGADE-010 (IC-1 .. IC-5): Incremental Security Audit Shared Ledger & Tier 2 Gate
+    # ------------------------------------------------------------------
+
+    def test_security_audit_shared_ledger_refutation_toon_and_triage(self):
+        spec = importlib.util.find_spec("tools.brigade.security_audit")
+        self.assertIsNotNone(spec, "tools.brigade.security_audit module must exist")
+        sec_mod = importlib.import_module("tools.brigade.security_audit")
+
+        for sym in (
+            "CoverageUnit",
+            "CoverageLedger",
+            "SecurityTrace",
+            "SecurityFinding",
+            "SecurityAuditReport",
+            "validate_security_artifacts",
+            "run_security_audit",
+            "triage_security_findings",
+            "format_security_report",
+        ):
+            self.assertIsNotNone(getattr(sec_mod, sym, None), f"tools.brigade.security_audit must define {sym}")
+
+        run_audit = sec_mod.run_security_audit
+        validate_fn = sec_mod.validate_security_artifacts
+        triage_fn = sec_mod.triage_security_findings
+        format_fn = sec_mod.format_security_report
+        CoverageLedger = sec_mod.CoverageLedger
+        CoverageUnit = sec_mod.CoverageUnit
+        SecurityFinding = sec_mod.SecurityFinding
+
+        # IC-1: Shared incremental coverage ledger (.edge/security/coverage-ledger.json) & multi-scope
+        with tempfile.TemporaryDirectory() as tmp_ledger:
+            repo = Path(tmp_ledger)
+            (repo / "src" / "actions").mkdir(parents=True, exist_ok=True)
+            (repo / "src" / "core").mkdir(parents=True, exist_ok=True)
+            (repo / "src" / "lib").mkdir(parents=True, exist_ok=True)
+
+            orders_ts = repo / "src" / "actions" / "orders.ts"
+            orders_ts.write_text(
+                '"use server";\n'
+                "export async function createOrder(session: any) {\n"
+                "    await requireAuth(session);\n"
+                "    await db.insert(orders).values({ ok: true });\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            (repo / "src" / "core" / "billing.ts").write_text(
+                "export function calcTotal(a: number, b: number) { return a + b; }\n",
+                encoding="utf-8",
+            )
+            (repo / "src" / "lib" / "unused.ts").write_text(
+                "export const UNUSED = true;\n",
+                encoding="utf-8",
+            )
+
+            rep1 = run_audit(repo, scopes=["src/actions"])
+            self.assertTrue(rep1.passed)
+            ledger_file = repo / ".edge" / "security" / "coverage-ledger.json"
+            self.assertTrue(ledger_file.is_file(), ".edge/security/coverage-ledger.json must be written")
+
+            units1 = {u["file_path"]: u for u in json.loads(ledger_file.read_text(encoding="utf-8")).get("units", [])}
+            self.assertEqual(units1["src/actions/orders.ts"]["status"], "covered")
+            self.assertEqual(units1["src/core/billing.ts"]["status"], "out_of_scope")
+            self.assertEqual(units1["src/lib/unused.ts"]["status"], "out_of_scope")
+            orders_sha1 = units1["src/actions/orders.ts"]["file_sha256"]
+            orders_ts1 = units1["src/actions/orders.ts"]["last_audited_at"]
+
+            # Second run targeting src/core preserves unchanged src/actions/orders.ts covered status
+            rep2 = run_audit(repo, scopes=["src/core"])
+            self.assertTrue(rep2.passed)
+            units2 = {u["file_path"]: u for u in json.loads(ledger_file.read_text(encoding="utf-8")).get("units", [])}
+            self.assertEqual(units2["src/actions/orders.ts"]["status"], "covered")
+            self.assertEqual(units2["src/actions/orders.ts"]["last_audited_at"], orders_ts1)
+            self.assertEqual(units2["src/core/billing.ts"]["status"], "covered")
+            self.assertEqual(units2["src/lib/unused.ts"]["status"], "out_of_scope")
+
+            # Modifying src/actions/orders.ts triggers automatic re-audit on next scopes=["src/core"] run
+            orders_ts.write_text(
+                '"use server";\n'
+                "export async function wipeOrders() {\n"
+                "    await db.delete(orders);\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            rep3 = run_audit(repo, scopes=["src/core"])
+            units3 = {u["file_path"]: u for u in json.loads(ledger_file.read_text(encoding="utf-8")).get("units", [])}
+            self.assertNotEqual(units3["src/actions/orders.ts"]["file_sha256"], orders_sha1)
+            self.assertFalse(rep3.passed, "Modified covered file with unguarded db.delete must be re-scanned and fail")
+            self.assertGreaterEqual(rep3.confirmed_count, 1)
+
+        # IC-2 & IC-3: 4 attack classes, automated refutation, validate_security_artifacts, TOON & TICK-SEC triage
+        with tempfile.TemporaryDirectory() as tmp_scan:
+            scan_repo = Path(tmp_scan)
+            (scan_repo / "src" / "actions").mkdir(parents=True, exist_ok=True)
+            (scan_repo / "src" / "components").mkdir(parents=True, exist_ok=True)
+
+            (scan_repo / "src" / "actions" / "profile.ts").write_text(
+                '"use server";\n'
+                "export async function updateProfile(session: any) {\n"
+                "    await requireAuth(session);\n"
+                '    await db.update(users).set({}).where(eq(id, 1));\n'
+                "}\n",
+                encoding="utf-8",
+            )
+            (scan_repo / "src" / "components" / "safe.tsx").write_text(
+                'import DOMPurify from "dompurify";\n'
+                "export function SafeHtml({ html }: { html: string }) {\n"
+                "    const clean = DOMPurify.sanitize(html);\n"
+                "    return <div dangerouslySetInnerHTML={{ __html: clean }} />;\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            (scan_repo / "src" / "actions" / "unsafe.ts").write_text(
+                '"use server";\n'
+                "export async function dangerAction(id: string) {\n"
+                "    await db.delete(orders);\n"
+                "    return sql.raw(`SELECT * FROM t WHERE id = ${id}`);\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            BrigadeFSM(scan_repo).save()
+            report = run_audit(scan_repo, recursive=True)
+            self.assertFalse(report.passed)
+            self.assertGreaterEqual(report.confirmed_count, 2)
+            self.assertGreaterEqual(report.rejected_count, 2)
+
+            rejected_profile = [
+                f for f in report.findings
+                if f.verdict == "rejected" and "profile.ts" in (f.fix_target or str(f.trace))
+            ]
+            self.assertTrue(rejected_profile, f"Expected refuted finding for profile.ts, got: {report.findings}")
+            for rf in rejected_profile:
+                self.assertIsNone(rf.severity)
+                self.assertTrue(bool((rf.rejection_reason or "").strip()))
+
+            rejected_safe = [
+                f for f in report.findings
+                if f.verdict == "rejected" and "safe.tsx" in (f.fix_target or str(f.trace))
+            ]
+            self.assertTrue(rejected_safe, f"Expected refuted finding for safe.tsx, got: {report.findings}")
+            for rf in rejected_safe:
+                self.assertIsNone(rf.severity)
+                self.assertTrue(bool((rf.rejection_reason or "").strip()))
+
+            confirmed_unsafe = [
+                f for f in report.findings
+                if f.verdict == "confirmed" and "unsafe.ts" in (f.fix_target or str(f.trace))
+            ]
+            self.assertGreaterEqual(len(confirmed_unsafe), 2)
+            for cf in confirmed_unsafe:
+                self.assertIn(cf.severity, ("CRITICAL", "HIGH"))
+                self.assertTrue(bool(cf.trace.get("entrypoint")))
+                self.assertTrue(bool(cf.trace.get("sink")))
+
+            # validate_security_artifacts check
+            ledger_raw = json.loads((scan_repo / ".edge" / "security" / "coverage-ledger.json").read_text(encoding="utf-8"))
+            ledger_obj = CoverageLedger(
+                version=ledger_raw.get("version", "1.0.0"),
+                updated_at=ledger_raw.get("updated_at", ""),
+                units=[CoverageUnit(**u) for u in ledger_raw.get("units", [])],
+            )
+            valid_ok, valid_errs = validate_fn(ledger_obj, report.findings)
+            self.assertTrue(valid_ok, f"validate_security_artifacts failed: {valid_errs}")
+            self.assertEqual(valid_errs, [])
+
+            bad_finding = SecurityFinding(
+                finding_id="F-BAD",
+                fingerprint="fp-bad",
+                verdict="rejected",
+                severity="HIGH",
+                attack_class="INJECTION_AND_SINKS",
+                boundary="component",
+                trace={"entrypoint": "safe.tsx", "propagation": [], "sink": "dangerouslySetInnerHTML"},
+                evidence="bad",
+                rejection_reason="Refuted",
+                fix_target="src/components/safe.tsx",
+            )
+            bad_ok, bad_errs = validate_fn(ledger_obj, [bad_finding])
+            self.assertFalse(bad_ok)
+            self.assertTrue(len(bad_errs) >= 1)
+
+            # IC-3: Default TOON output
+            toon = format_fn(report)
+            self.assertTrue(toon.startswith("security_audit["), f"Expected TOON header, got: {toon!r}")
+            self.assertIn("ledger_covered:", toon)
+            self.assertIn("id | verdict | severity | attack_class | entrypoint | sink | summary", toon)
+
+            # IC-3: Core triage -> .edge/ledger/core.json + IDLE -> TRIAGE
+            triage_tickets = triage_fn(scan_repo, report)
+            self.assertTrue(any(tid.startswith("TICK-SEC-") for tid in triage_tickets))
+
+            core_ledger = json.loads((scan_repo / ".edge" / "ledger" / "core.json").read_text(encoding="utf-8"))
+            sec_items = [it for it in core_ledger.get("items", []) if str(it.get("ticket_id", "")).startswith("TICK-SEC-")]
+            self.assertTrue(sec_items)
+            self.assertEqual(sec_items[0].get("rule_id"), "SECURITY_AUDIT_CONFIRMED")
+
+            fsm_after = BrigadeFSM(scan_repo)
+            self.assertEqual(fsm_after.state.current_state, CycleState.TRIAGE)
+            self.assertIsNotNone(fsm_after.state.active_ticket)
+            self.assertTrue(fsm_after.state.active_ticket.ticket_id.startswith("TICK-SEC-"))
+
+        # IC-5: skills/edge-security-audit/SKILL.md & skills/edge-ship/SKILL.md alignment
+        sec_skill_path = self.repo_root / "skills" / "edge-security-audit" / "SKILL.md"
+        self.assertTrue(sec_skill_path.is_file(), "skills/edge-security-audit/SKILL.md must exist")
+        sec_skill_text = sec_skill_path.read_text(encoding="utf-8")
+        for tok in ("--scope", "coverage-ledger.json", "confirmed", "rejected"):
+            self.assertIn(tok, sec_skill_text)
+
+        ship_skill_text = (self.repo_root / "skills" / "edge-ship" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("security-audit", ship_skill_text)
+        self.assertIn("Security & ABAC Audit", ship_skill_text)
+
+    def test_tier2_staging_auto_security_audit_gate_and_cli(self):
+        import io
+        from contextlib import redirect_stdout
+
+        spec = importlib.util.find_spec("tools.brigade.security_audit")
+        self.assertIsNotNone(spec, "tools.brigade.security_audit module must exist")
+        self.assertTrue(hasattr(brigade_cli, "cmd_security_audit"), "tools.brigade.cli must define cmd_security_audit")
+
+        ship_prep = importlib.import_module("tools.brigade.ship_prep")
+
+        with tempfile.TemporaryDirectory() as tmp_root:
+            tmp_path = Path(tmp_root)
+            bare_dir = tmp_path / "origin.git"
+            repo_dir = tmp_path / "repo"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["git", "init", "--bare", str(bare_dir)], check=True, capture_output=True)
+
+            def git(*git_args):
+                proc = subprocess.run(
+                    ["git", *git_args],
+                    cwd=repo_dir,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                return proc.stdout.strip()
+
+            git("init", "-b", "staging")
+            git("config", "user.email", "brigade@example.com")
+            git("config", "user.name", "Edge Brigade")
+            git("remote", "add", "origin", bare_dir.as_uri())
+
+            (repo_dir / "README.md").write_text("# Base\n", encoding="utf-8")
+            (repo_dir / "specs").mkdir(parents=True, exist_ok=True)
+            (repo_dir / "specs" / "INDEX.md").write_text("# Index\n", encoding="utf-8")
+            git("add", "-A")
+            git("commit", "-m", "chore: initial staging")
+            git("push", "-u", "origin", "staging")
+
+            git("checkout", "-b", "development")
+            arch_dir = repo_dir / ".edge" / "archive" / "specs"
+            arch_dir.mkdir(parents=True, exist_ok=True)
+            (arch_dir / "orders-sec.md").write_text(
+                "---\nexpected_files:\n  - src/actions/unsafe.ts\n---\n# Orders Action\n\nSummary: Orders action.\n",
+                encoding="utf-8",
+            )
+            (repo_dir / "src" / "actions").mkdir(parents=True, exist_ok=True)
+            unsafe_ts = repo_dir / "src" / "actions" / "unsafe.ts"
+            unsafe_ts.write_text(
+                '"use server";\n'
+                "export async function wipeOrders() {\n"
+                "    await db.delete(orders);\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            git("add", "-A")
+            git("commit", "-m", "feat: add unsafe server action")
+
+            # Tier 2 prepare-ship automatically blocks on confirmed vulnerability & updates coverage-ledger.json
+            ok_blk, res_blk, err_blk = ship_prep.prepare_ship_payload(repo_dir, base_branch="staging")
+            self.assertFalse(ok_blk)
+            self.assertIn("Tier 2 staging release blocked: Security audit", err_blk)
+            self.assertTrue((repo_dir / ".edge" / "security" / "coverage-ledger.json").is_file())
+            self.assertTrue(hasattr(res_blk, "security_report") and res_blk.security_report is not None)
+
+            # Fix vulnerability with auth guard + .where() -> Tier 2 passes and embeds Security & ABAC Audit
+            unsafe_ts.write_text(
+                '"use server";\n'
+                "export async function wipeOrders(session: any, id: string) {\n"
+                "    await requireAuth(session);\n"
+                "    await db.delete(orders).where(eq(orders.id, id));\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            git("add", "src/actions/unsafe.ts")
+            git("commit", "-m", "fix: add requireAuth and .where() guard")
+
+            ok_pass, res_pass, err_pass = ship_prep.prepare_ship_payload(repo_dir, base_branch="staging")
+            self.assertTrue(ok_pass, f"Clean Tier 2 release should pass security audit gate: {err_pass}")
+            self.assertTrue(hasattr(res_pass, "security_report") and res_pass.security_report is not None)
+            self.assertTrue(res_pass.security_report.get("passed"))
+            self.assertIn("### Security & ABAC Audit", res_pass.pr_body)
+
+            # CLI: brigade security-audit <repo> --scope src/actions --format toon
+            cli_buf = io.StringIO()
+            try:
+                with patch.object(
+                    sys,
+                    "argv",
+                    ["brigade", "security-audit", str(repo_dir), "--scope", "src/actions", "--format", "toon"],
+                ), redirect_stdout(cli_buf):
+                    rc_sec = brigade_cli.main()
+            except SystemExit as exc:
+                self.fail(f"CLI 'security-audit' exited abnormally: {exc}")
+            self.assertEqual(rc_sec, 0)
+            self.assertTrue(cli_buf.getvalue().startswith("security_audit["))
+
 
 if __name__ == "__main__":
     unittest.main()

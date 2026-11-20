@@ -22,10 +22,12 @@ try:
     from .models import BrigadeState, Ticket
     from .fsm import ProofVerifier
     from .smoke_routes import SmokeScanReport, triage_smoke_failures
+    from .security_audit import run_security_audit, triage_security_findings
 except ImportError:
     from tools.brigade.models import BrigadeState, Ticket
     from tools.brigade.fsm import ProofVerifier
     from tools.brigade.smoke_routes import SmokeScanReport, triage_smoke_failures
+    from tools.brigade.security_audit import run_security_audit, triage_security_findings
 
 from tools.common import normalize_target_path, run_command
 
@@ -147,6 +149,7 @@ class ShipPrepResult:
     split_branches_created: List[str] = field(default_factory=list)
     selected_spec: Optional[str] = None
     smoke_report: Optional[Dict[str, Any]] = None
+    security_report: Optional[Dict[str, Any]] = None
 
 
 def _clean_slug(raw: str) -> str:
@@ -1893,6 +1896,21 @@ def _format_smoke_audit_block(smoke_report: Optional[Dict[str, Any]]) -> List[st
     ]
 
 
+def _format_security_audit_block(security_report: Optional[Dict[str, Any]]) -> List[str]:
+    if not security_report:
+        return []
+    confirmed = _smoke_metric(security_report, "confirmed_count", int, 0)
+    rejected = _smoke_metric(security_report, "rejected_count", int, 0)
+    covered = _smoke_metric(security_report, "ledger_covered", int, 0)
+    total = _smoke_metric(security_report, "ledger_total", int, 0)
+    icon = "✅" if security_report.get("passed") else "❌"
+    return [
+        "",
+        "### Security & ABAC Audit",
+        f"- {icon} {confirmed} confirmed vulnerabilities · {rejected} refuted · Shared Ledger: {covered}/{total} units covered",
+    ]
+
+
 def _format_evidence_section(
     specs_linked: List[str],
     verified_proofs: List[Dict[str, Any]],
@@ -1900,6 +1918,7 @@ def _format_evidence_section(
     examiner_receipt: Optional[Dict[str, Any]],
     gate_status: str,
     smoke_report: Optional[Dict[str, Any]] = None,
+    security_report: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
     lines = ["", "## Evidence"]
     if specs_linked:
@@ -1913,6 +1932,7 @@ def _format_evidence_section(
         for fp in failed_proofs:
             lines.append(f"- **QA Proof `{fp['slug']}` (FAILED - {fp['error']}):** {fp['message']}")
     lines.extend(_format_smoke_audit_block(smoke_report))
+    lines.extend(_format_security_audit_block(security_report))
     return lines
 
 
@@ -1931,6 +1951,7 @@ def _format_markdown_sections(
     audit: Optional[RealizationAudit] = None,
     included_plans: Optional[List[SpecShipPlan]] = None,
     smoke_report: Optional[Dict[str, Any]] = None,
+    security_report: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Renders lean 2-section PR body (## Summary + ## Evidence only; no ## Merge Danger)."""
     lines = _format_summary_section(
@@ -1951,6 +1972,7 @@ def _format_markdown_sections(
             examiner_receipt,
             gate_status,
             smoke_report=smoke_report,
+            security_report=security_report,
         )
     )
     return "\n".join(lines)
@@ -2690,6 +2712,7 @@ def _render_top_level_bodies(
     gate_status: str,
     spec_digests: List[SpecDigest],
     smoke_report: Optional[Dict[str, Any]] = None,
+    security_report: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, str]:
     if sel_slug and len(selected_plans) == 1:
         return selected_plans[0].pr_body, selected_plans[0].show_me_body
@@ -2708,6 +2731,7 @@ def _render_top_level_bodies(
         spec_digests,
         included_plans=selected_plans,
         smoke_report=smoke_report,
+        security_report=security_report,
     )
     ship_cmd = f"gh pr create --base {shlex.quote(base_branch)} --head {shlex.quote(head_branch)}"
     return pr_body, f"{pr_body}\n\n## Ship Command\n```bash\n{ship_cmd}\n```"
@@ -2751,6 +2775,51 @@ def _check_tier2_smoke_report(
     return True, report.to_dict(), ""
 
 
+def _check_tier2_security_audit(
+    repo: Path,
+    base_branch: str,
+    eff_base: str,
+    changed_files: List[str],
+    stage_branches: Optional[Dict[str, str]] = None,
+) -> Tuple[bool, Optional[Dict[str, Any]], str]:
+    eff_stages = stage_branches or DEFAULT_STAGE_BRANCHES
+    staging_branch = eff_stages.get("staging", "staging")
+    raw_base = (base_branch or "").strip()
+    clean_base = raw_base[7:] if raw_base.startswith("origin/") else raw_base
+    if clean_base != staging_branch:
+        return True, None, ""
+    sec_report = run_security_audit(
+        repo, diff_only=True, base_ref=eff_base, changed_files=changed_files
+    )
+    if not sec_report.passed:
+        triage_security_findings(repo, sec_report)
+        return (
+            False,
+            sec_report.to_dict(),
+            f"Tier 2 staging release blocked: Security audit found "
+            f"{sec_report.confirmed_count} confirmed vulnerability/ies.",
+        )
+    return True, sec_report.to_dict(), ""
+
+
+def _run_tier2_gates(
+    repo: Path,
+    base_branch: str,
+    eff_base: str,
+    changed_files: List[str],
+    require_smoke: bool,
+    eff_stages: Dict[str, str],
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], str]:
+    smoke_ok, smoke_report, smoke_err = _check_tier2_smoke_report(
+        repo, base_branch, require_smoke, stage_branches=eff_stages
+    )
+    sec_ok, sec_report, sec_err = _check_tier2_security_audit(
+        repo, base_branch, eff_base, changed_files, stage_branches=eff_stages
+    )
+    gate_err = smoke_err if not smoke_ok else (sec_err if not sec_ok else "")
+    return smoke_report, sec_report, gate_err
+
+
 def _validate_ship_result(
     result: ShipPrepResult,
     strict_proofs: bool,
@@ -2758,11 +2827,10 @@ def _validate_ship_result(
     repo: Path,
     eff_base: str,
     ticket_map: Optional[Dict[str, str]] = None,
-    smoke_ok: bool = True,
-    smoke_err: str = "",
+    gate_err: str = "",
 ) -> Tuple[bool, ShipPrepResult, str]:
-    if not smoke_ok:
-        return False, result, smoke_err
+    if gate_err:
+        return False, result, gate_err
     if result.failed_proofs:
         return False, result, f"ProofVerifier rejected {len(result.failed_proofs)} QA proof receipt(s)."
     if strict_proofs and not result.verified_proofs and not result.examiner_receipt:
@@ -2858,12 +2926,13 @@ def _assemble_ship_result(
     sel_slug: Optional[str],
     gate_status: str,
     smoke_report: Optional[Dict[str, Any]] = None,
+    security_report: Optional[Dict[str, Any]] = None,
 ) -> ShipPrepResult:
     spec_digests = [p.spec_digest for p in selected_plans if p.spec_digest]
     pr_body, show_me_body = _render_top_level_bodies(
         sel_slug, selected_plans, head_branch, base_branch, changed_files,
         index_changes, context_terms, specs_linked, verified_proofs, failed_proofs,
-        examiner_receipt, gate_status, spec_digests, smoke_report=smoke_report,
+        examiner_receipt, gate_status, spec_digests, smoke_report=smoke_report, security_report=security_report,
     )
     return ShipPrepResult(
         base_branch=base_branch,
@@ -2884,6 +2953,7 @@ def _assemble_ship_result(
         spec_plans=selected_plans,
         selected_spec=sel_slug,
         smoke_report=smoke_report,
+        security_report=security_report,
     )
 
 
@@ -2971,13 +3041,13 @@ def prepare_ship_payload(
         plan.realization_audit = compute_realization_audit(plan, plan.spec_digest, p_rec)
         _render_plan_bodies(plan, base_branch, context_terms, p_rec, gate_status)
 
-    smoke_ok, smoke_report, smoke_err = _check_tier2_smoke_report(
-        repo, base_branch, require_smoke, stage_branches=eff_stages
+    smoke_report, sec_report, gate_err = _run_tier2_gates(
+        repo, base_branch, eff_base, changed_files, require_smoke, eff_stages
     )
     result = _assemble_ship_result(
         base_branch, head_branch, door_type, blast_radius, index_changes, context_terms,
         specs_linked, verified_proofs, failed_proofs, examiner_receipt, changed_files,
-        selected_plans, sel_slug, gate_status, smoke_report=smoke_report,
+        selected_plans, sel_slug, gate_status, smoke_report=smoke_report, security_report=sec_report,
     )
     return _validate_ship_result(
         result,
@@ -2986,8 +3056,7 @@ def prepare_ship_payload(
         repo,
         eff_base,
         ticket_map=ticket_map,
-        smoke_ok=smoke_ok,
-        smoke_err=smoke_err,
+        gate_err=gate_err,
     )
 
 
@@ -3016,6 +3085,7 @@ def format_ship_output(result: ShipPrepResult, fmt: str = "pr") -> str:
             "failed_proofs": result.failed_proofs,
             "examiner_receipt": result.examiner_receipt,
             "smoke_report": result.smoke_report,
+            "security_report": result.security_report,
         }
         return json.dumps(payload, indent=2, ensure_ascii=False)
     return result.pr_body
