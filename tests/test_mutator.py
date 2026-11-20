@@ -303,3 +303,300 @@ class TestDifferentialRunner:
         )
         assert summary_cached.total == summary.total
         assert summary_cached.killed == summary.killed
+
+
+# ----------------------------------------------------------------------
+# SPEC-EDGE-BRIGADE-009 (IC-1 .. IC-3, IC-5): SDL Deletion Mutator & Differential/Recursive Runner
+# ----------------------------------------------------------------------
+
+
+class TestSDLAndRegexFallback:
+    def test_ts_regex_fallback_sdl_and_operators(self, tmp_path):
+        import inspect
+        import tools.mutator.sites as sites_mod
+
+        fallback_fn = getattr(sites_mod, "_discover_with_regex_fallback", None)
+        assert fallback_fn is not None, "tools.mutator.sites must define _discover_with_regex_fallback"
+
+        sig = inspect.signature(discover_mutation_sites)
+        assert "mode" in sig.parameters, "discover_mutation_sites must accept mode parameter"
+
+        ts_code = (
+            'import { User } from "./types";\n'
+            "export function authorize(token: string, a: number, b: number): number {\n"
+            '    if (!token) throw new Error("unauthorized");\n'
+            "    return a + b;\n"
+            "}\n"
+        )
+        ts_file = tmp_path / "auth.ts"
+        ts_file.write_text(ts_code, encoding="utf-8")
+
+        with patch.object(sites_mod, "TREE_SITTER_AVAILABLE", False):
+            sites_all = discover_mutation_sites(ts_file, "src/core/auth.ts", mode="all")
+            sdl_sites = [s for s in sites_all if getattr(s, "op_category", None) == "sdl"]
+            op_sites = [s for s in sites_all if getattr(s, "op_category", None) == "operators"]
+
+            assert len(sdl_sites) >= 1, f"Expected SDL deletion site in TS fallback, got: {sites_all}"
+            assert any(s.mutant == "/* [SDL-DELETED] */" and s.category == "SDL" for s in sdl_sites)
+            assert any(s.original == "+" and s.mutant == "-" for s in op_sites)
+
+            sites_sdl_only = discover_mutation_sites(ts_file, "src/core/auth.ts", mode="sdl")
+            assert len(sites_sdl_only) >= 1
+            assert all(getattr(s, "op_category", None) == "sdl" and s.category == "SDL" for s in sites_sdl_only)
+
+            sites_ops_only = discover_mutation_sites(ts_file, "src/core/auth.ts", mode="operators")
+            assert len(sites_ops_only) >= 1
+            assert all(getattr(s, "op_category", None) == "operators" for s in sites_ops_only)
+
+        direct_sites = fallback_fn(ts_code.encode("utf-8"), "src/core/auth.ts", mode="all")
+        assert any(getattr(s, "op_category", None) == "sdl" for s in direct_sites)
+        assert any(s.original == "+" and s.mutant == "-" for s in direct_sites)
+
+    def test_python_sdl_preserves_indentation(self, tmp_path):
+        import inspect
+        import tools.mutator.sites as sites_mod
+
+        sig = inspect.signature(discover_mutation_sites)
+        assert "mode" in sig.parameters, "discover_mutation_sites must accept mode parameter"
+
+        py_code = (
+            "def validate_positive(x: int) -> int:\n"
+            '    if x < 0: raise ValueError("neg")\n'
+            "    assert x > 0\n"
+            "    return x\n"
+        )
+        py_file = tmp_path / "guard_calc.py"
+        py_file.write_text(py_code, encoding="utf-8")
+
+        sites_sdl = discover_mutation_sites(py_file, "core/guard_calc.py", mode="sdl")
+        assert len(sites_sdl) >= 2, f"Expected Python SDL sites for raise guard and assert, got: {sites_sdl}"
+        assert all(getattr(s, "op_category", None) == "sdl" and s.category == "SDL" for s in sites_sdl)
+        assert all(s.mutant == "pass  # [SDL-DELETED]" for s in sites_sdl)
+
+        mutated_text = apply_mutation(py_code.encode("utf-8"), sites_sdl[0]).decode("utf-8")
+        assert "    pass  # [SDL-DELETED]" in mutated_text
+
+
+class TestImporterCacheDiffAndRecursive:
+    def test_importer_cache_avoids_repeated_rglob(self, tmp_path):
+        import tools.mutator.overlay as overlay_mod
+
+        cache_dict = getattr(overlay_mod, "_IMPORTER_CACHE", None)
+        clear_fn = getattr(overlay_mod, "clear_importer_cache", None)
+        assert cache_dict is not None, "tools.mutator.overlay must define _IMPORTER_CACHE"
+        assert clear_fn is not None, "tools.mutator.overlay must define clear_importer_cache"
+
+        repo = tmp_path / "cached_repo"
+        (repo / "src" / "core").mkdir(parents=True)
+        (repo / "tests").mkdir(parents=True)
+        (repo / "src" / "core" / "pricing.ts").write_text("export const price = 10;\n", encoding="utf-8")
+        (repo / "tests" / "pricing.test.ts").write_text("import { price } from '../src/core/pricing';\n", encoding="utf-8")
+
+        clear_fn(repo)
+        orig_rglob = Path.rglob
+        rglob_calls = 0
+
+        def counting_rglob(self_path, *args, **kwargs):
+            nonlocal rglob_calls
+            if self_path == repo or self_path.resolve() == repo.resolve():
+                rglob_calls += 1
+            return orig_rglob(self_path, *args, **kwargs)
+
+        with patch.object(Path, "rglob", autospec=True, side_effect=counting_rglob):
+            imp1 = overlay_mod._find_all_importers(repo, "src/core/pricing.ts")
+            imp2 = overlay_mod._find_all_importers(repo, "src/core/pricing.ts")
+
+        assert len(imp1) == 1
+        assert len(imp2) == 1
+        assert rglob_calls == 1, f"Expected single cached rglob walk, got {rglob_calls}"
+        assert str(repo.resolve()) in cache_dict
+
+        clear_fn(repo)
+        assert str(repo.resolve()) not in cache_dict
+
+    def test_extract_git_diff_changed_lines_and_diff_only_run_mutations(self, tmp_path):
+        import subprocess
+        import tools.mutator.runner as runner_mod
+
+        extract_fn = getattr(runner_mod, "extract_git_diff_changed_lines", None)
+        run_fn = getattr(runner_mod, "run_mutations", None)
+        assert extract_fn is not None, "tools.mutator.runner must define extract_git_diff_changed_lines"
+        assert run_fn is not None, "tools.mutator.runner must define run_mutations"
+
+        repo = tmp_path / "diff_repo"
+        repo.mkdir()
+
+        def git(*args):
+            subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True)
+
+        git("init")
+        git("config", "user.email", "mutator@example.com")
+        git("config", "user.name", "Mutator")
+
+        (repo / "core").mkdir()
+        calc_py = repo / "core" / "calc.py"
+        calc_py.write_text(
+            "def calc(a: int, b: int) -> int:\n"
+            '    if a < 0: raise ValueError("neg_a")\n'
+            "    return a + b\n",
+            encoding="utf-8",
+        )
+        (repo / "tests").mkdir()
+        (repo / "tests" / "test_calc.py").write_text(
+            "import unittest\n"
+            "from core.calc import calc\n\n"
+            "class TestCalc(unittest.TestCase):\n"
+            "    def test_calc(self):\n"
+            "        self.assertEqual(calc(2, 3), 5)\n"
+            "        with self.assertRaises(ValueError):\n"
+            "            calc(-1, 2)\n",
+            encoding="utf-8",
+        )
+        git("add", "-A")
+        git("commit", "-m", "init")
+
+        # Add a new unasserted guard on line 3 only
+        calc_py.write_text(
+            "def calc(a: int, b: int) -> int:\n"
+            '    if a < 0: raise ValueError("neg_a")\n'
+            '    if b < 0: raise ValueError("neg_b")\n'
+            "    return a + b\n",
+            encoding="utf-8",
+        )
+        git("add", "-A")
+        git("commit", "-m", "feat: add b guard")
+
+        changed = extract_fn(repo, calc_py, base_ref="HEAD~1")
+        assert changed == {3}, f"Expected only changed line {{3}}, got: {changed}"
+
+        summary = run_fn(
+            repo_root=repo,
+            target_file=calc_py,
+            test_cmd=["python3", "-m", "unittest", "tests/test_calc.py"],
+            mode="sdl",
+            diff_only=True,
+            base_ref="HEAD~1",
+        )
+        assert summary.total == 1
+        assert summary.survived == 1
+        assert summary.outcomes[0].site.line == 3
+
+    def test_discover_recursive_targets_and_run_recursive_mutations(self, tmp_path):
+        import tools.mutator.runner as runner_mod
+
+        disc_fn = getattr(runner_mod, "discover_recursive_targets", None)
+        run_rec_fn = getattr(runner_mod, "run_recursive_mutations", None)
+        rec_cls = getattr(runner_mod, "RecursiveMutationSummary", None)
+        assert disc_fn is not None, "tools.mutator.runner must define discover_recursive_targets"
+        assert run_rec_fn is not None, "tools.mutator.runner must define run_recursive_mutations"
+        assert rec_cls is not None, "tools.mutator.runner must define RecursiveMutationSummary"
+
+        repo = tmp_path / "rec_repo"
+        (repo / "src" / "core" / "sub").mkdir(parents=True)
+        (repo / "tests").mkdir(parents=True)
+
+        (repo / "src" / "core" / "alpha.py").write_text(
+            'def check_a(x: int) -> int:\n    if x < 0: raise ValueError("a")\n    return x\n',
+            encoding="utf-8",
+        )
+        (repo / "src" / "core" / "sub" / "beta.py").write_text(
+            'def check_b(y: int) -> int:\n    if y < 0: raise ValueError("b")\n    return y\n',
+            encoding="utf-8",
+        )
+        (repo / "src" / "core" / "alpha.test.py").write_text("# test file excluded\n", encoding="utf-8")
+        (repo / "tests" / "test_all.py").write_text(
+            "import unittest\n"
+            "from src.core.alpha import check_a\n"
+            "from src.core.sub.beta import check_b\n\n"
+            "class TestAll(unittest.TestCase):\n"
+            "    def test_guards(self):\n"
+            "        with self.assertRaises(ValueError):\n"
+            "            check_a(-1)\n"
+            "        with self.assertRaises(ValueError):\n"
+            "            check_b(-1)\n",
+            encoding="utf-8",
+        )
+
+        targets = disc_fn(repo)
+        rel_targets = sorted(p.relative_to(repo).as_posix() for p in targets)
+        assert rel_targets == ["src/core/alpha.py", "src/core/sub/beta.py"]
+
+        rec_summary = run_rec_fn(
+            repo_root=repo,
+            test_cmd=["python3", "-m", "unittest", "tests/test_all.py"],
+            mode="sdl",
+        )
+        assert isinstance(rec_summary, rec_cls)
+        assert rec_summary.files_scanned >= 2
+        assert rec_summary.total >= 2
+        assert rec_summary.killed >= 2
+        assert rec_summary.passed is True
+
+
+class TestToonFormatCliAndSkillAlignment:
+    def test_format_mutation_report_toon_default_and_cli_flags(self, tmp_path):
+        import io
+        from contextlib import redirect_stdout
+        import tools.mutator.runner as runner_mod
+        import tools.mutator.cli as mutator_cli
+
+        fmt_fn = getattr(runner_mod, "format_mutation_report", None)
+        assert fmt_fn is not None, "tools.mutator.runner must define format_mutation_report"
+
+        site = MutationSite(
+            file_path="src/core/auth.ts",
+            function_name="authorize",
+            line=3,
+            start_byte=10,
+            end_byte=52,
+            original='if (!token) throw new Error("unauthorized");',
+            mutant="/* [SDL-DELETED] */",
+            category="SDL",
+        )
+        summary = MutationSummary(
+            total=1,
+            killed=1,
+            survived=0,
+            timed_out=0,
+            score_pct=100.0,
+            outcomes=[MutantOutcome(site=site, status="KILLED", duration_ms=12)],
+        )
+        toon = fmt_fn(summary)
+        assert toon.startswith("mutator["), f"Expected TOON header starting with 'mutator[', got: {toon!r}"
+        assert "line | op | original | mutated | status" in toon
+        assert "KILLED" in toon
+
+        # CLI flags: --mode sdl --diff-only --recursive --scan-only --format toon
+        repo = tmp_path / "cli_repo"
+        (repo / "src" / "core").mkdir(parents=True)
+        (repo / "src" / "core" / "guard.py").write_text(
+            'def f(x: int) -> int:\n    if x < 0: raise ValueError("neg")\n    return x\n',
+            encoding="utf-8",
+        )
+        out_buf = io.StringIO()
+        try:
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "edge-mutator",
+                    "--repo",
+                    str(repo),
+                    "--recursive",
+                    "--scan-only",
+                    "--mode",
+                    "sdl",
+                    "--format",
+                    "toon",
+                ],
+            ), redirect_stdout(out_buf):
+                rc = mutator_cli.main()
+        except SystemExit as exc:
+            pytest.fail(f"mutator cli exited abnormally with SystemExit: {exc}")
+        assert rc == 0
+
+    def test_edge_mutator_skill_documents_sdl_diff_recursive(self):
+        skill_text = (root_dir / "skills" / "edge-mutator" / "SKILL.md").read_text(encoding="utf-8")
+        assert "--mode sdl" in skill_text
+        assert "--diff-only" in skill_text
+        assert "--recursive" in skill_text

@@ -1,37 +1,47 @@
 ---
 name: edge-mutator
-description: Alias-aware differential core mutation testing gate. Validates unit test assertions by injecting AST operator mutations into isolated worker overlays with Next.js @/ alias materialization and differential caching.
+description: Alias-aware differential core mutation testing gate with Statement Deletion (SDL), zero-dependency TS/JS regex fallback, --diff-only line scoping, --recursive scanning, TOON reporting, and tools/gate.py integration.
 ---
 
-# 🧬 /edge-mutator — Alias-Aware Differential Core Mutation Gate
+# 🧬 /edge-mutator — SDL Deletion & Differential Core Mutation Gate
 
-`edge-mutator` executes deterministic mutation testing against core business logic (`src/core/`, `core/`, `tools/`). By applying AST operator mutations and checking whether tests fail (mutants killed) or pass (mutants survived), it mathematically measures assertion quality.
+`edge-mutator` executes deterministic mutation testing against core business logic (`src/core/`, `core/`, `tools/`). It pairs AST/regex operator flips with **Statement Deletion (`SDL`)** (`/* [SDL-DELETED] */` in TS/JS, `pass  # [SDL-DELETED]` in Python) to mathematically catch dead assertions, useless guards, and unasserted side effects.
 
 ---
 
 ## ⚡ Usage & CLI Reference
 
-### 1. Run Mutation Suite on Core File
+### 1. Statement Deletion (`--mode sdl`), Operators, or Combined (`--mode all`)
 ```bash
-uv run python tools/mutator/cli.py --target src/core/pricing.ts --test-cmd "npm run test:unit -- src/core/pricing.test.ts"
+# Run both Statement Deletion and operator mutations (default TOON output)
+python3 tools/mutator/cli.py --target src/core/pricing.ts --mode all --test-cmd "npm run test:unit -- src/core/pricing.test.ts"
+
+# Statement Deletion only
+python3 tools/mutator/cli.py --target src/core/pricing.ts --mode sdl --test-cmd "npm run test:unit -- src/core/pricing.test.ts"
 ```
 
-### 2. Custom Mutation Score Threshold
-Exit with code 1 if mutation score is below 85%:
+### 2. Differential Line Scoping (`--diff-only`)
+Restrict mutations strictly to lines modified or added against `--base`:
 ```bash
-uv run python tools/mutator/cli.py --target src/core/pricing.ts --test-cmd "npm test" --threshold 85.0
+python3 tools/mutator/cli.py --target src/core/pricing.ts --mode sdl --diff-only --base HEAD~1 --test-cmd "npm run test:unit"
 ```
 
-### 3. Scan Mutation Sites Only (Dry Run)
-Inspect all mutation sites discovered by Tree-Sitter without executing tests:
+### 3. Recursive Repo-Wide Core Scan (`--recursive`)
+Walk `src/core/` (or an explicit `--target <dir>`) recursively, optionally combined with `--diff-only` and `--scan-only`:
 ```bash
-uv run python tools/mutator/cli.py --target src/core/pricing.ts --scan-only
+python3 tools/mutator/cli.py --recursive --mode sdl --format toon --test-cmd "npm run test:unit"
+python3 tools/mutator/cli.py --recursive --scan-only --mode sdl --format toon
 ```
+
+### 4. Output Formats (`--format toon|json|human`)
+- `--format toon` (default): Token-frugal AXI header + pipe-delimited table (`mutator[N]{...}:`).
+- `--format json`: Machine-readable JSON (`MutationSummary` / `RecursiveMutationSummary`).
+- `--format human`: Verbose human-readable ASCII summary banner.
 
 ---
 
-## 🏛️ Architecture & Invariants
+## 🏛️ Architecture & Gate Integration
 
-1. **Core Scope Guard:** Mutation testing is restricted to core logic (`src/core/`, `core/`, `tools/`). UI components or actions produce false timeouts and are rejected unless `--allow-non-core` is passed.
-2. **Materialized Overlays:** Isolated worker environments under `.edge/mutation-workers/` physically copy build/test configs (`vitest.config.ts`, `tsconfig.json`, `package.json`), write mutated bytes, and materialize all dependent test files importing Next.js `@/` path aliases.
-3. **Differential Result Cache:** Previously killed mutants are cached in `.edge/metrics/mutator.json`. Unchanged functions bypass re-execution on subsequent runs.
+1. **Zero-Dependency TS/JS Fallback:** When `tree_sitter` is unavailable, `_discover_with_regex_fallback` scans `.ts/.tsx/.js/.jsx` files safely (ignoring comments, imports, and type declarations) for both operators and `SDL` deletion sites.
+2. **Cached Worker Overlays (`_IMPORTER_CACHE`):** `tools/mutator/overlay.py` caches repo source/test candidate paths per repository root to eliminate repeated `rglob` traversals across mutants.
+3. **Automatic `tools/gate.py` Integration (`check_differential_mutation_gate`):** When changed files touch `src/core/**/*.{ts,tsx,js,py}`, `tools/gate.py` automatically executes static SDL discovery (`--skip-verify`) or differential SDL mutation verification (`threshold >= 80%`).

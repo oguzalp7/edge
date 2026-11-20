@@ -8,7 +8,7 @@ import os
 import uuid
 import shutil
 from pathlib import Path
-from typing import Optional, Set, Union
+from typing import Dict, List, Optional, Set, Union
 
 
 CONFIG_FILES = [
@@ -22,29 +22,55 @@ CONFIG_FILES = [
     "pytest.ini",
 ]
 
+_IMPORTER_CACHE: Dict[str, List[Path]] = {}
+_IGNORED_DIRS = {".git", "node_modules", ".edge", ".next", "dist", "build", ".venv"}
+_SOURCE_EXTS = (".ts", ".tsx", ".js", ".jsx", ".py")
 
-def _find_all_importers(repo_root: Path, target_rel_path: str) -> Set[Path]:
-    target_rel = Path(target_rel_path).as_posix()
-    target_stem = Path(target_rel).stem
 
-    tokens = {target_stem, target_rel}
-    if target_rel.endswith((".ts", ".tsx", ".js", ".jsx", ".py")):
+def clear_importer_cache(repo_root: Optional[Union[Path, str]] = None) -> None:
+    """Clears the cached candidate source/test index for one repo or all repos."""
+    if repo_root is None:
+        _IMPORTER_CACHE.clear()
+        return
+    _IMPORTER_CACHE.pop(str(Path(repo_root).resolve()), None)
+
+
+def _get_cached_repo_files(repo_root: Path) -> List[Path]:
+    key = str(repo_root.resolve())
+    cached = _IMPORTER_CACHE.get(key)
+    if cached is not None:
+        return [p for p in cached if p.exists()]
+    files: List[Path] = []
+    for p in repo_root.rglob("*"):
+        if not p.is_file() or p.suffix not in _SOURCE_EXTS:
+            continue
+        if any(ign in p.parts for ign in _IGNORED_DIRS):
+            continue
+        files.append(p)
+    _IMPORTER_CACHE[key] = files
+    return files
+
+
+def _build_import_tokens(target_rel: str) -> Set[str]:
+    tokens = {Path(target_rel).stem, target_rel}
+    if target_rel.endswith(_SOURCE_EXTS):
         no_ext = target_rel.rsplit(".", 1)[0]
         tokens.add(no_ext)
         if no_ext.startswith("src/"):
             tokens.add("@/" + no_ext[4:])
             tokens.add(no_ext[4:])
+    return tokens
 
+
+def _find_all_importers(repo_root: Path, target_rel_path: str) -> Set[Path]:
+    target_rel = Path(target_rel_path).as_posix()
+    tokens = _build_import_tokens(target_rel)
+    resolved_root = repo_root.resolve()
     importers: Set[Path] = set()
-    ignored_dirs = {".git", "node_modules", ".edge", ".next", "dist", "build", ".venv"}
 
-    for p in repo_root.rglob("*"):
-        if not p.is_file() or p.suffix not in (".ts", ".tsx", ".js", ".jsx", ".py"):
-            continue
-        if any(ign in p.parts for ign in ignored_dirs):
-            continue
+    for p in _get_cached_repo_files(repo_root):
         try:
-            rel = p.relative_to(repo_root).as_posix()
+            rel = p.resolve().relative_to(resolved_root).as_posix()
         except ValueError:
             continue
         if rel == target_rel:

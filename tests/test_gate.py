@@ -810,6 +810,43 @@ class TestDeterministicOmissionAndSafetyGates(_HermeticGitRepoTestCase):
         res_pass = self.gate.check_dual_theme_and_a11y("HEAD~1")
         self.assertTrue(res_pass.passed, msg=str(res_pass))
 
+    def test_check_differential_mutation_gate(self) -> None:
+        gate_fn = getattr(gate_mod, "check_differential_mutation_gate", None)
+        self.assertIsNotNone(
+            gate_fn,
+            "tools.gate must define check_differential_mutation_gate",
+        )
+        self.assertTrue(
+            hasattr(self.gate, "check_differential_mutation_gate"),
+            "EdgeVerificationGate must define check_differential_mutation_gate",
+        )
+
+        # 1. Bypass when no src/core/ production files changed
+        res_bypass = gate_fn(self.repo_path, ["src/components/Button.tsx"], skip_verify=True)
+        self.assertTrue(res_bypass.passed, msg=str(res_bypass))
+
+        # 2. Static differential SDL scan when src/core/pricing.ts changed and skip_verify=True
+        self._write_and_commit({"README.md": "# Init\n"}, "chore: init")
+        self._write_and_commit(
+            {
+                "src/core/pricing.ts": (
+                    "export function calcTotal(qty: number, price: number): number {\n"
+                    '    if (qty <= 0) throw new Error("invalid qty");\n'
+                    "    return qty * price;\n"
+                    "}\n"
+                ),
+            },
+            "feat: add core pricing guard",
+        )
+        res_static = gate_fn(
+            self.repo_path,
+            ["src/core/pricing.ts"],
+            skip_verify=True,
+            base_ref="HEAD~1",
+        )
+        self.assertTrue(res_static.passed, msg=str(res_static))
+        self.assertIn("SDL", res_static.message)
+
 
 if __name__ == "__main__":
     unittest.main()
