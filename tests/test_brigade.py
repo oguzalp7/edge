@@ -6696,6 +6696,320 @@ class TestEvidenceFirstReviewAndShipBridge(unittest.TestCase):
         self.assertIn("Tier 2", skill_text)
         self.assertIn("--base development", skill_text)
 
+    # ------------------------------------------------------------------
+    # SPEC-EDGE-BRIGADE-007 (IC-1 .. IC-5): Tier 2 Route Smoke Scanner, Auto-Triage & Staging Gate
+    # ------------------------------------------------------------------
+
+    def test_smoke_routes_discovery_scan_and_auto_triage(self):
+        spec = importlib.util.find_spec("tools.brigade.smoke_routes")
+        self.assertIsNotNone(spec, "tools.brigade.smoke_routes module must exist")
+        smoke_mod = importlib.import_module("tools.brigade.smoke_routes")
+
+        DiscoveredRoute = getattr(smoke_mod, "DiscoveredRoute", None)
+        RouteSmokeResult = getattr(smoke_mod, "RouteSmokeResult", None)
+        SmokeScanReport = getattr(smoke_mod, "SmokeScanReport", None)
+        discover_fn = getattr(smoke_mod, "discover_project_routes", None)
+        scan_fn = getattr(smoke_mod, "run_route_smoke_scan", None)
+        triage_fn = getattr(smoke_mod, "triage_smoke_failures", None)
+
+        self.assertIsNotNone(DiscoveredRoute, "smoke_routes must define DiscoveredRoute")
+        self.assertIsNotNone(RouteSmokeResult, "smoke_routes must define RouteSmokeResult")
+        self.assertIsNotNone(SmokeScanReport, "smoke_routes must define SmokeScanReport")
+        self.assertIsNotNone(discover_fn, "smoke_routes must define discover_project_routes")
+        self.assertIsNotNone(scan_fn, "smoke_routes must define run_route_smoke_scan")
+        self.assertIsNotNone(triage_fn, "smoke_routes must define triage_smoke_failures")
+
+        # IC-1: Multi-variant route discovery (Next.js App Router, SvelteKit, specs/INDEX.md, dynamic params)
+        with tempfile.TemporaryDirectory() as tmp_disc:
+            disc_repo = Path(tmp_disc)
+            (disc_repo / "src" / "app" / "(portal)" / "explore").mkdir(parents=True, exist_ok=True)
+            (disc_repo / "src" / "app" / "(portal)" / "explore" / "page.tsx").write_text(
+                "export default function Explore() { return null; }\n", encoding="utf-8"
+            )
+            (disc_repo / "src" / "app" / "(portal)" / "stylists" / "[id]").mkdir(parents=True, exist_ok=True)
+            (disc_repo / "src" / "app" / "(portal)" / "stylists" / "[id]" / "page.tsx").write_text(
+                "export default function Stylist() { return null; }\n", encoding="utf-8"
+            )
+            (disc_repo / "src" / "app" / "api" / "health").mkdir(parents=True, exist_ok=True)
+            (disc_repo / "src" / "app" / "api" / "health" / "route.ts").write_text(
+                "export async function GET() { return new Response('ok'); }\n", encoding="utf-8"
+            )
+            (disc_repo / "src" / "routes" / "dashboard").mkdir(parents=True, exist_ok=True)
+            (disc_repo / "src" / "routes" / "dashboard" / "+page.svelte").write_text(
+                "<h1>Dashboard</h1>\n", encoding="utf-8"
+            )
+            (disc_repo / "specs").mkdir(parents=True, exist_ok=True)
+            (disc_repo / "specs" / "INDEX.md").write_text(
+                "# Navigation Index\n- @route /legacy/report | Page: LegacyReport | Legacy report\n",
+                encoding="utf-8",
+            )
+            proofs_dir = disc_repo / ".edge" / "qa" / "proofs"
+            proofs_dir.mkdir(parents=True, exist_ok=True)
+            (proofs_dir / "stylists.json").write_text(
+                json.dumps({"visited_urls": ["http://localhost:3000/stylists/1744c61b-0001"]}),
+                encoding="utf-8",
+            )
+
+            routes = discover_fn(disc_repo)
+            by_pat = {r.route_pattern: r for r in routes}
+            self.assertIn("/explore", by_pat)
+            self.assertIn("/stylists/[id]", by_pat)
+            self.assertIn("/dashboard", by_pat)
+            self.assertIn("/legacy/report", by_pat)
+            self.assertFalse(any("/api" in pat or "(portal)" in pat for pat in by_pat))
+
+            self.assertEqual(by_pat["/explore"].framework, "nextjs-app")
+            self.assertTrue(by_pat["/stylists/[id]"].is_dynamic)
+            self.assertEqual(by_pat["/stylists/[id]"].concrete_url_path, "/stylists/1744c61b-0001")
+            self.assertEqual(by_pat["/dashboard"].framework, "sveltekit")
+            self.assertTrue(by_pat["/dashboard"].requires_auth)
+            self.assertEqual(by_pat["/legacy/report"].framework, "index")
+
+            routes_override = discover_fn(disc_repo, params={"id": "42"})
+            by_pat_override = {r.route_pattern: r for r in routes_override}
+            self.assertEqual(by_pat_override["/stylists/[id]"].concrete_url_path, "/stylists/42")
+
+        # IC-2 & IC-3: Headless smoke scan with injectable driver_fn + auto-triage
+        with tempfile.TemporaryDirectory() as tmp_scan:
+            scan_repo = Path(tmp_scan)
+            (scan_repo / "src" / "app" / "(portal)" / "explore").mkdir(parents=True, exist_ok=True)
+            (scan_repo / "src" / "app" / "(portal)" / "explore" / "page.tsx").write_text(
+                "export default function Explore() { return null; }\n", encoding="utf-8"
+            )
+            (scan_repo / "src" / "routes" / "dashboard").mkdir(parents=True, exist_ok=True)
+            (scan_repo / "src" / "routes" / "dashboard" / "+page.svelte").write_text(
+                "<h1>Dashboard</h1>\n", encoding="utf-8"
+            )
+
+            fsm = BrigadeFSM(scan_repo)
+            self.assertEqual(fsm.state.current_state, CycleState.IDLE)
+            fsm.save()
+
+            def fake_driver(route, full_url, auth_cookie):
+                if route.route_pattern == "/explore":
+                    return {
+                        "http_status": 200,
+                        "final_url": full_url,
+                        "console_errors": [],
+                        "page_errors": [],
+                        "failed_requests": [],
+                    }
+                return {
+                    "http_status": 200,
+                    "final_url": full_url,
+                    "console_errors": ["TypeError: null"],
+                    "page_errors": [],
+                    "failed_requests": [],
+                }
+
+            report = scan_fn(scan_repo, base_url="http://localhost:3000", driver_fn=fake_driver)
+            smoke_file = scan_repo / ".edge" / "qa" / "smoke-routes.json"
+            self.assertTrue(smoke_file.is_file(), ".edge/qa/smoke-routes.json must be written")
+            self.assertFalse(report.all_navigable)
+            self.assertEqual(report.passed_routes, 1)
+            self.assertEqual(report.failed_routes, 1)
+            self.assertEqual(report.total_console_errors, 1)
+
+            reloaded_report = SmokeScanReport.from_dict(json.loads(smoke_file.read_text(encoding="utf-8")))
+            self.assertFalse(reloaded_report.all_navigable)
+            self.assertEqual(reloaded_report.failed_routes, 1)
+
+            created_tickets = triage_fn(scan_repo, report)
+            self.assertIn("TICK-SMOKE-DASHBOARD", created_tickets)
+
+            ledger_file = scan_repo / ".edge" / "ledger" / "ui.json"
+            self.assertTrue(ledger_file.is_file(), ".edge/ledger/ui.json must be written by auto-triage")
+            ledger_data = json.loads(ledger_file.read_text(encoding="utf-8"))
+            items = ledger_data.get("items", [])
+            dash_items = [it for it in items if it.get("ticket_id") == "TICK-SMOKE-DASHBOARD"]
+            self.assertEqual(len(dash_items), 1)
+            self.assertEqual(dash_items[0].get("severity"), "CRITICAL")
+            self.assertEqual(dash_items[0].get("rule_id"), "ROUTE_SMOKE_NAVIGABILITY")
+
+            fsm_after = BrigadeFSM(scan_repo)
+            self.assertEqual(fsm_after.state.current_state, CycleState.TRIAGE)
+            self.assertIsNotNone(fsm_after.state.active_ticket)
+            self.assertEqual(fsm_after.state.active_ticket.ticket_id, "TICK-SMOKE-DASHBOARD")
+
+            # Idempotent re-triage does not duplicate ledger ticket
+            triage_fn(scan_repo, report)
+            ledger_data_2 = json.loads(ledger_file.read_text(encoding="utf-8"))
+            self.assertEqual(
+                len([it for it in ledger_data_2.get("items", []) if it.get("ticket_id") == "TICK-SMOKE-DASHBOARD"]),
+                1,
+            )
+
+        # IC-5: skills/edge-ship/SKILL.md documents smoke-routes and --require-smoke
+        skill_text = (self.repo_root / "skills" / "edge-ship" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("smoke-routes", skill_text)
+        self.assertIn("--require-smoke", skill_text)
+
+    def test_tier2_staging_smoke_gate_and_cli_smoke_routes(self):
+        import inspect
+        import io
+        from contextlib import redirect_stdout
+
+        spec = importlib.util.find_spec("tools.brigade.smoke_routes")
+        self.assertIsNotNone(spec, "tools.brigade.smoke_routes module must exist")
+        self.assertTrue(hasattr(brigade_cli, "cmd_smoke_routes"), "tools.brigade.cli must define cmd_smoke_routes")
+
+        ship_prep = importlib.import_module("tools.brigade.ship_prep")
+        sig = inspect.signature(ship_prep.prepare_ship_payload)
+        self.assertIn("require_smoke", sig.parameters, "prepare_ship_payload must accept require_smoke")
+
+        with tempfile.TemporaryDirectory() as tmp_root:
+            tmp_path = Path(tmp_root)
+            bare_dir = tmp_path / "origin.git"
+            repo_dir = tmp_path / "repo"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["git", "init", "--bare", str(bare_dir)], check=True, capture_output=True)
+
+            def git(*git_args):
+                proc = subprocess.run(
+                    ["git", *git_args],
+                    cwd=repo_dir,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                return proc.stdout.strip()
+
+            git("init", "-b", "staging")
+            git("config", "user.email", "brigade@example.com")
+            git("config", "user.name", "Edge Brigade")
+            git("remote", "add", "origin", bare_dir.as_uri())
+
+            (repo_dir / "README.md").write_text("# Base\n", encoding="utf-8")
+            (repo_dir / "specs").mkdir(parents=True, exist_ok=True)
+            (repo_dir / "specs" / "INDEX.md").write_text("# Index\n", encoding="utf-8")
+            git("add", "-A")
+            git("commit", "-m", "chore: initial staging")
+            git("push", "-u", "origin", "staging")
+
+            git("checkout", "-b", "development")
+            arch_dir = repo_dir / ".edge" / "archive" / "specs"
+            arch_dir.mkdir(parents=True, exist_ok=True)
+            (arch_dir / "alpha.md").write_text(
+                "---\nexpected_files:\n  - src/alpha.ts\n---\n# Alpha Slice\n\nSummary: Alpha feature.\n",
+                encoding="utf-8",
+            )
+            (repo_dir / "src" / "app" / "explore").mkdir(parents=True, exist_ok=True)
+            (repo_dir / "src" / "app" / "explore" / "page.tsx").write_text(
+                "export default function Explore() { return null; }\n", encoding="utf-8"
+            )
+            (repo_dir / "src" / "alpha.ts").write_text("export const alpha = 1;\n", encoding="utf-8")
+            git("add", "-A")
+            git("commit", "-m", "feat: deliver alpha on development")
+
+            # CLI: brigade smoke-routes --discover-only exits 0
+            disc_buf = io.StringIO()
+            try:
+                with patch.object(
+                    sys,
+                    "argv",
+                    ["brigade", "smoke-routes", str(repo_dir), "--discover-only"],
+                ), redirect_stdout(disc_buf):
+                    rc_disc = brigade_cli.main()
+            except SystemExit as exc:
+                self.fail(f"CLI 'smoke-routes --discover-only' exited abnormally: {exc}")
+            self.assertEqual(rc_disc, 0)
+            self.assertIn("/explore", disc_buf.getvalue())
+
+            # Case A: require_smoke=True when .edge/qa/smoke-routes.json is missing -> blocked
+            ok_missing, _, err_missing = ship_prep.prepare_ship_payload(
+                repo_dir, base_branch="staging", require_smoke=True
+            )
+            self.assertFalse(ok_missing)
+            self.assertIn("Tier 2 staging release blocked", err_missing)
+
+            # Case B: .edge/qa/smoke-routes.json has all_navigable=False -> blocked + auto-triage
+            smoke_file = repo_dir / ".edge" / "qa" / "smoke-routes.json"
+            smoke_file.parent.mkdir(parents=True, exist_ok=True)
+            smoke_file.write_text(
+                json.dumps({
+                    "schema_version": "1.0.0",
+                    "base_url": "http://localhost:3000",
+                    "scanned_at": "2026-11-20T00:00:00Z",
+                    "total_routes": 2,
+                    "passed_routes": 1,
+                    "failed_routes": 1,
+                    "all_navigable": False,
+                    "total_console_errors": 1,
+                    "total_page_errors": 0,
+                    "triage_tickets_created": [],
+                    "results": [
+                        {
+                            "route_pattern": "/explore",
+                            "url": "http://localhost:3000/explore",
+                            "source_file": "src/app/explore/page.tsx",
+                            "http_status": 200,
+                            "final_url": "http://localhost:3000/explore",
+                            "auth_redirected": False,
+                            "console_errors": [],
+                            "page_errors": [],
+                            "failed_requests": [],
+                            "navigable": True,
+                        },
+                        {
+                            "route_pattern": "/dashboard",
+                            "url": "http://localhost:3000/dashboard",
+                            "source_file": "src/routes/dashboard/+page.svelte",
+                            "http_status": 200,
+                            "final_url": "http://localhost:3000/dashboard",
+                            "auth_redirected": False,
+                            "console_errors": ["TypeError: null"],
+                            "page_errors": [],
+                            "failed_requests": [],
+                            "navigable": False,
+                        },
+                    ],
+                }),
+                encoding="utf-8",
+            )
+            ok_fail, res_fail, err_fail = ship_prep.prepare_ship_payload(
+                repo_dir, base_branch="staging"
+            )
+            self.assertFalse(ok_fail)
+            self.assertIn("Tier 2 staging release blocked", err_fail)
+            self.assertTrue((repo_dir / ".edge" / "ledger" / "ui.json").is_file())
+            self.assertEqual(BrigadeFSM(repo_dir).state.current_state, CycleState.TRIAGE)
+
+            try:
+                with patch.object(
+                    sys,
+                    "argv",
+                    ["brigade", "prepare-ship", str(repo_dir), "--base", "staging"],
+                ):
+                    rc_fail = brigade_cli.main()
+            except SystemExit as exc:
+                self.fail(f"CLI 'prepare-ship --base staging' with failed smoke must return 1 cleanly: {exc}")
+            self.assertEqual(rc_fail, 1)
+
+            # Case C: .edge/qa/smoke-routes.json has all_navigable=True -> passes & embeds Smoke Audit
+            smoke_file.write_text(
+                json.dumps({
+                    "schema_version": "1.0.0",
+                    "base_url": "http://localhost:3000",
+                    "scanned_at": "2026-11-20T00:05:00Z",
+                    "total_routes": 5,
+                    "passed_routes": 5,
+                    "failed_routes": 0,
+                    "all_navigable": True,
+                    "total_console_errors": 0,
+                    "total_page_errors": 0,
+                    "triage_tickets_created": [],
+                    "results": [],
+                }),
+                encoding="utf-8",
+            )
+            ok_pass, res_pass, err_pass = ship_prep.prepare_ship_payload(
+                repo_dir, base_branch="staging", require_smoke=True
+            )
+            self.assertTrue(ok_pass, f"Tier 2 prepare-ship with clean smoke report should pass: {err_pass}")
+            self.assertTrue(hasattr(res_pass, "smoke_report") and res_pass.smoke_report is not None)
+            self.assertIn("### Route Navigability & Console Smoke Audit", res_pass.pr_body)
+            self.assertIn("5/5 routes navigable · 0 console errors · 0 page errors", res_pass.pr_body)
+
 
 if __name__ == "__main__":
     unittest.main()

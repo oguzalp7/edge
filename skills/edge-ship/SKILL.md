@@ -77,20 +77,27 @@ Merge each verified PR into `development`.
 
 ## 🚢 Tier 2: `Release PR: development -> staging` (Coolify Promotion)
 
-Once slices are integrated and verified on `development`, promote `development` to `staging` as a single consolidated Release PR (never pass `--split-branches` here):
+Once slices are integrated and verified on `development`, run the Route Navigability & Console Smoke Gate before promoting `development` to `staging` as a single consolidated Release PR (never pass `--split-branches` here):
 
 1. Ensure local `development` is checked out and synced:
    ```bash
    git checkout development && git pull
    ```
-2. Generate the consolidated Staging Release PR payload (`--base staging`, NO `--split-branches`):
+2. Run the headless route smoke scanner across all discovered routes (`--param` overrides dynamic segments like `[id]`; `--auth-cookie` authenticates protected routes):
    ```bash
-   python3 tools/brigade/cli.py prepare-ship . --base staging --format json --out .edge/release-payload.json
+   python3 tools/brigade/cli.py smoke-routes . --base-url http://localhost:3000
+   # With dynamic/auth overrides:
+   python3 tools/brigade/cli.py smoke-routes . --base-url http://localhost:3000 --param id=42 --auth-cookie "session=..."
    ```
-   The consolidated body includes `### Included Specs & Realization` summarizing every delivered spec and verified QA proof across `origin/staging..development`.
-3. Push `development` (if needed) and open the consolidated Release PR:
+   - Any non-navigable route (`HTTP >= 400`, `console.error`, uncaught `pageerror`, or unexpected auth redirect) automatically upserts a `CRITICAL` `TICK-SMOKE-<SLUG>` ticket into `.edge/ledger/ui.json` and transitions an `IDLE` Brigade into `CycleState.TRIAGE`.
+3. Generate the consolidated Staging Release PR payload with `--require-smoke` (`--base staging`, NO `--split-branches`):
+   ```bash
+   python3 tools/brigade/cli.py prepare-ship . --base staging --require-smoke --format json --out .edge/release-payload.json
+   ```
+   The consolidated body includes `### Included Specs & Realization` under `## Summary` and `### Route Navigability & Console Smoke Audit` under `## Evidence`.
+4. Push `development` (if needed) and open the consolidated Release PR:
    ```bash
    git push origin development
    gh pr create --base staging --head development --title "release: promote development to staging" --body-file .edge/release-body.md
    ```
-4. Watch CI (`gh pr checks <pr_number> --watch`); merging into `staging` triggers Coolify deployment.
+5. Watch CI (`gh pr checks <pr_number> --watch`); merging into `staging` triggers Coolify deployment.

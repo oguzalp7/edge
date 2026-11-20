@@ -28,6 +28,7 @@ try:
     from .spec_critic import run_spec_critique, PRIMARY_CRITIC_MODEL, FALLBACK_CRITIC_MODEL
     from .tier import get_tier_status, switch_tier, format_tier_card
     from .ship_prep import prepare_ship_payload, format_ship_output
+    from .smoke_routes import discover_project_routes, run_route_smoke_scan, triage_smoke_failures
 except ImportError:
     from tools.brigade.models import StationRole, CycleState, ReviewFinding, Ticket, ExaminerReceipt
     from tools.brigade.fsm import BrigadeFSM
@@ -37,6 +38,7 @@ except ImportError:
     from tools.brigade.spec_critic import run_spec_critique, PRIMARY_CRITIC_MODEL, FALLBACK_CRITIC_MODEL
     from tools.brigade.tier import get_tier_status, switch_tier, format_tier_card
     from tools.brigade.ship_prep import prepare_ship_payload, format_ship_output
+    from tools.brigade.smoke_routes import discover_project_routes, run_route_smoke_scan, triage_smoke_failures
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -325,6 +327,7 @@ def cmd_prepare_ship(args: argparse.Namespace) -> int:
     split_branches = bool(getattr(args, "split_branches", False))
     publish_evidence = bool(getattr(args, "publish_evidence", False))
     evidence_branch = getattr(args, "evidence_branch", "edge-qa-evidence") or "edge-qa-evidence"
+    require_smoke = bool(getattr(args, "require_smoke", False))
 
     ok, result, err = prepare_ship_payload(
         repo_path=repo_path,
@@ -334,6 +337,7 @@ def cmd_prepare_ship(args: argparse.Namespace) -> int:
         split_branches=split_branches,
         publish_evidence=publish_evidence,
         evidence_branch=evidence_branch,
+        require_smoke=require_smoke,
     )
     rendered = format_ship_output(result, fmt=fmt)
 
@@ -351,6 +355,50 @@ def cmd_prepare_ship(args: argparse.Namespace) -> int:
 
     print(rendered)
     return 0
+
+
+def _parse_param_pairs(raw_params: Optional[List[str]]) -> Dict[str, str]:
+    parsed: Dict[str, str] = {}
+    for item in raw_params or []:
+        if "=" in str(item):
+            key, val = str(item).split("=", 1)
+            if key.strip():
+                parsed[key.strip()] = val.strip()
+    return parsed
+
+
+def cmd_smoke_routes(args: argparse.Namespace) -> int:
+    repo_path = normalize_target_path(args.repo)
+    params = _parse_param_pairs(getattr(args, "param", None))
+    pattern = getattr(args, "pattern", None)
+
+    if getattr(args, "discover_only", False):
+        routes = discover_project_routes(repo_path, pattern=pattern, params=params)
+        for r in routes:
+            print(f"{r.concrete_url_path} ({r.framework}) [{r.source_file}]")
+        return 0
+
+    out_arg = getattr(args, "out", None)
+    out_path = (
+        normalize_target_path(out_arg) if (out_arg and Path(out_arg).is_absolute()) else ((repo_path / out_arg) if out_arg else None)
+    )
+    report = run_route_smoke_scan(
+        repo_path=repo_path,
+        base_url=getattr(args, "base_url", "http://localhost:3000") or "http://localhost:3000",
+        pattern=pattern,
+        params=params,
+        auth_cookie=getattr(args, "auth_cookie", None),
+        out_path=out_path,
+    )
+    if not report.all_navigable and not getattr(args, "no_triage", False):
+        triage_smoke_failures(repo_path, report)
+
+    status_icon = "✅" if report.all_navigable else "❌"
+    print(
+        f"{status_icon} Smoke scan: {report.passed_routes}/{report.total_routes} navigable · "
+        f"{report.total_console_errors} console error(s) · {report.total_page_errors} page error(s)"
+    )
+    return 0 if report.all_navigable else 1
 
 
 def _print_handoff_banner(handoff: Dict[str, Any]) -> None:
@@ -1226,6 +1274,18 @@ def main() -> int:
     p_ship.add_argument("--format", choices=["pr", "show-me", "json"], default="pr", help="Output format (default: pr)")
     p_ship.add_argument("--out", help="Optional output file path (written atomically)")
     p_ship.add_argument("--strict-proofs", action="store_true", help="Require at least one verified QA proof or ExaminerReceipt")
+    p_ship.add_argument("--require-smoke", action="store_true", help="Require passing .edge/qa/smoke-routes.json when targeting staging")
+
+    # smoke-routes
+    p_smoke = subparsers.add_parser("smoke-routes", help="Discover and headless-smoke-scan all project routes")
+    p_smoke.add_argument("repo", help="Path to target repository")
+    p_smoke.add_argument("--base-url", default="http://localhost:3000", help="Running app base URL (default: http://localhost:3000)")
+    p_smoke.add_argument("--pattern", default=None, help="Optional extra glob pattern for custom routes")
+    p_smoke.add_argument("--param", action="append", default=[], help="Dynamic route param replacement (key=val)")
+    p_smoke.add_argument("--auth-cookie", default=None, help="Optional Cookie header for authenticated routes")
+    p_smoke.add_argument("--no-triage", action="store_true", help="Do not auto-triage failed routes into UI ledger / FSM")
+    p_smoke.add_argument("--discover-only", action="store_true", help="Only discover and print routes without scanning")
+    p_smoke.add_argument("--out", default=None, help="Optional output path (default: .edge/qa/smoke-routes.json)")
 
     args = parser.parse_args()
 
@@ -1258,6 +1318,7 @@ def main() -> int:
         "prompt": cmd_prompt,
         "tier": cmd_tier,
         "prepare-ship": cmd_prepare_ship,
+        "smoke-routes": cmd_smoke_routes,
     }
 
     func = commands.get(args.command)
