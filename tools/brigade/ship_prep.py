@@ -58,6 +58,11 @@ _SLICE_BRANCH_PREFIXES: Tuple[str, ...] = (
     "chore/",
     "ship/",
 )
+DEFAULT_STAGE_BRANCHES: Dict[str, str] = {
+    "integration": "development",
+    "staging": "staging",
+    "production": "production",
+}
 _CALLSTACK_HEADING_RE = re.compile(
     r"^(#{1,4})\s+.*(?:call[-\s]?stack|responsive\s+layout\s+flow|architecture|flow|component\s+tree|file\s+tree)",
     re.IGNORECASE,
@@ -295,29 +300,72 @@ def classify_merge_danger(changed_files: List[str], diff_stat: str = "") -> Tupl
     return door_type, blast_radius
 
 
+def _read_stage_branches_config(repo_path: Optional[Path]) -> Dict[str, str]:
+    if repo_path is None:
+        return {}
+    cfg_file = Path(repo_path) / ".edge" / "brigade.json"
+    if not cfg_file.is_file():
+        return {}
+    try:
+        data = json.loads(cfg_file.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    raw_stages = data.get("stage_branches") if isinstance(data, dict) else None
+    if not isinstance(raw_stages, dict):
+        return {}
+    return {
+        str(k).strip(): str(v).strip()
+        for k, v in raw_stages.items()
+        if str(k).strip() and str(v or "").strip()
+    }
+
+
+def resolve_stage_branches(
+    repo_path: Optional[Path] = None,
+    overrides: Optional[Dict[str, str]] = None,
+) -> Dict[str, str]:
+    """Resolves integration/staging/production branch names from defaults, .edge/brigade.json, and overrides."""
+    resolved = dict(DEFAULT_STAGE_BRANCHES)
+    resolved.update(_read_stage_branches_config(repo_path))
+    for k, v in (overrides or {}).items():
+        clean_k = str(k).strip()
+        clean_v = str(v or "").strip()
+        if clean_k and clean_v:
+            resolved[clean_k] = clean_v
+    return resolved
+
+
 def _get_head_branch(repo: Path) -> str:
     code, out, _ = run_command(["git", "branch", "--show-current"], cwd=repo)
     return (out.strip() or "HEAD") if code == 0 else "HEAD"
+
+
+def _candidate_base_refs(
+    raw: str,
+    eff_head: str,
+    stage_branches: Optional[Dict[str, str]] = None,
+) -> Tuple[str, str]:
+    clean_base = raw[7:] if raw.startswith("origin/") else raw
+    if raw.startswith("origin/"):
+        return raw, clean_base
+    eff_stages = stage_branches or DEFAULT_STAGE_BRANCHES
+    protected_bases = {eff_stages.get("staging", "staging"), eff_stages.get("production", "production"), "staging"}
+    if eff_head == clean_base or clean_base in protected_bases:
+        return f"origin/{clean_base}", clean_base
+    return clean_base, f"origin/{clean_base}"
 
 
 def _resolve_base_ref(
     repo: Path,
     base_branch: str,
     head_branch: Optional[str] = None,
+    stage_branches: Optional[Dict[str, str]] = None,
 ) -> Optional[str]:
     raw = (base_branch or "").strip()
     if not raw:
         return None
-    clean_base = raw[7:] if raw.startswith("origin/") else raw
-    if raw.startswith("origin/"):
-        cands = (raw, clean_base)
-    else:
-        eff_head = head_branch if head_branch is not None else _get_head_branch(repo)
-        if eff_head == clean_base or clean_base == "staging":
-            cands = (f"origin/{clean_base}", clean_base)
-        else:
-            cands = (clean_base, f"origin/{clean_base}")
-    for cand in cands:
+    eff_head = head_branch if head_branch is not None else _get_head_branch(repo)
+    for cand in _candidate_base_refs(raw, eff_head, stage_branches):
         code, _, _ = run_command(["git", "rev-parse", "--verify", cand], cwd=repo)
         if code == 0:
             return cand
@@ -328,24 +376,33 @@ def validate_branch_topology(
     base_branch: str,
     head_branch: str,
     split_branches: bool = False,
+    allow_override: bool = False,
+    stage_branches: Optional[Dict[str, str]] = None,
 ) -> Tuple[bool, str]:
-    """Enforces development-first PR topology: slice branches and --split-branches cannot target staging."""
+    """Enforces development-first PR topology unless allow_override=True bypasses it."""
+    if allow_override:
+        return True, ""
+    eff_stages = stage_branches or DEFAULT_STAGE_BRANCHES
+    integration_branch = eff_stages.get("integration", "development")
+    staging_branch = eff_stages.get("staging", "staging")
+    production_branch = eff_stages.get("production", "production")
+
     raw_base = (base_branch or "").strip()
     clean_base = raw_base[7:] if raw_base.startswith("origin/") else raw_base
-    if clean_base != "staging":
+    if clean_base not in (staging_branch, production_branch) or clean_base == integration_branch:
         return True, ""
     if split_branches:
         return (
             False,
-            "Branch topology violation: per-spec split branches (ship/<slug>) must target "
-            "'development' first (--base development), never 'staging' directly.",
+            f"Branch topology violation: per-spec split branches (ship/<slug>) must target "
+            f"'{integration_branch}' first (--base {integration_branch}), never '{clean_base}' directly.",
         )
     clean_head = (head_branch or "").strip()
     if clean_head.startswith(_SLICE_BRANCH_PREFIXES):
         return (
             False,
-            f"Branch topology violation: slice branch '{clean_head}' cannot target 'staging' directly. "
-            "Open per-spec PR to 'development' first, then promote 'development' -> 'staging'.",
+            f"Branch topology violation: slice branch '{clean_head}' cannot target '{clean_base}' directly. "
+            f"Open per-spec PR to '{integration_branch}' first, then promote '{integration_branch}' -> '{clean_base}'.",
         )
     return True, ""
 
@@ -1811,18 +1868,28 @@ def _format_proof_line(p: Dict[str, Any]) -> List[str]:
     return out
 
 
+def _smoke_metric(smoke_report: Dict[str, Any], key: str, cast: Any, default: Any) -> Any:
+    val = smoke_report.get(key)
+    return cast(default if val is None else val)
+
+
 def _format_smoke_audit_block(smoke_report: Optional[Dict[str, Any]]) -> List[str]:
     if not smoke_report:
         return []
-    passed = int(smoke_report.get("passed_routes", 0) or 0)
-    total = int(smoke_report.get("total_routes", 0) or 0)
-    c_errs = int(smoke_report.get("total_console_errors", 0) or 0)
-    p_errs = int(smoke_report.get("total_page_errors", 0) or 0)
+    passed = _smoke_metric(smoke_report, "passed_routes", int, 0)
+    total = _smoke_metric(smoke_report, "total_routes", int, 0)
+    c_errs = _smoke_metric(smoke_report, "total_console_errors", int, 0)
+    p_errs = _smoke_metric(smoke_report, "total_page_errors", int, 0)
+    slow = _smoke_metric(smoke_report, "slow_routes", int, 0)
+    stuck = _smoke_metric(smoke_report, "stuck_routes", int, 0)
+    max_settle = _smoke_metric(smoke_report, "max_settle_ms", int, 0)
+    max_heap = _smoke_metric(smoke_report, "max_heap_mb", float, 0.0)
     icon = "✅" if smoke_report.get("all_navigable") else "❌"
     return [
         "",
         "### Route Navigability & Console Smoke Audit",
         f"- {icon} {passed}/{total} routes navigable · {c_errs} console errors · {p_errs} page errors",
+        f"- Telemetry: slow={slow} · stuck={stuck} · max_settle={max_settle}ms · max_heap={max_heap}MB",
     ]
 
 
@@ -2650,10 +2717,13 @@ def _check_tier2_smoke_report(
     repo: Path,
     base_branch: str,
     require_smoke: bool,
+    stage_branches: Optional[Dict[str, str]] = None,
 ) -> Tuple[bool, Optional[Dict[str, Any]], str]:
+    eff_stages = stage_branches or DEFAULT_STAGE_BRANCHES
+    staging_branch = eff_stages.get("staging", "staging")
     raw_base = (base_branch or "").strip()
     clean_base = raw_base[7:] if raw_base.startswith("origin/") else raw_base
-    if clean_base != "staging":
+    if clean_base != staging_branch:
         return True, None, ""
     smoke_file = repo / ".edge" / "qa" / "smoke-routes.json"
     if not smoke_file.is_file():
@@ -2833,15 +2903,24 @@ def prepare_ship_payload(
     publish_evidence: bool = False,
     evidence_branch: str = "edge-qa-evidence",
     require_smoke: bool = False,
+    allow_topology_override: bool = False,
+    stage_branches: Optional[Dict[str, str]] = None,
 ) -> Tuple[bool, ShipPrepResult, str]:
     """Collects per-spec ship plans, scoped ProofVerifier results, optional evidence publishing, and PR bodies."""
     repo = normalize_target_path(repo_path)
     head_branch = _get_head_branch(repo)
-    topo_ok, topo_err = validate_branch_topology(base_branch, head_branch, split_branches=split_branches)
+    eff_stages = resolve_stage_branches(repo, stage_branches)
+    topo_ok, topo_err = validate_branch_topology(
+        base_branch,
+        head_branch,
+        split_branches=split_branches,
+        allow_override=allow_topology_override,
+        stage_branches=eff_stages,
+    )
     if not topo_ok:
         return False, _empty_result(base_branch, head_branch), topo_err
 
-    eff_base = _resolve_base_ref(repo, base_branch, head_branch=head_branch)
+    eff_base = _resolve_base_ref(repo, base_branch, head_branch=head_branch, stage_branches=eff_stages)
     if not eff_base:
         return False, _empty_result(base_branch, head_branch), f"Git base branch '{base_branch}' not found in {repo}."
 
@@ -2892,7 +2971,9 @@ def prepare_ship_payload(
         plan.realization_audit = compute_realization_audit(plan, plan.spec_digest, p_rec)
         _render_plan_bodies(plan, base_branch, context_terms, p_rec, gate_status)
 
-    smoke_ok, smoke_report, smoke_err = _check_tier2_smoke_report(repo, base_branch, require_smoke)
+    smoke_ok, smoke_report, smoke_err = _check_tier2_smoke_report(
+        repo, base_branch, require_smoke, stage_branches=eff_stages
+    )
     result = _assemble_ship_result(
         base_branch, head_branch, door_type, blast_radius, index_changes, context_terms,
         specs_linked, verified_proofs, failed_proofs, examiner_receipt, changed_files,

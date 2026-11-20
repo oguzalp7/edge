@@ -7010,6 +7010,314 @@ class TestEvidenceFirstReviewAndShipBridge(unittest.TestCase):
             self.assertIn("### Route Navigability & Console Smoke Audit", res_pass.pr_body)
             self.assertIn("5/5 routes navigable · 0 console errors · 0 page errors", res_pass.pr_body)
 
+    # ------------------------------------------------------------------
+    # SPEC-EDGE-BRIGADE-008 (IC-1 .. IC-5): Pre-Staging Perf Telemetry, Two-Tier Auto-Triage & Stage Topology
+    # ------------------------------------------------------------------
+
+    def test_smoke_routes_perf_telemetry_two_tier_triage_and_toon_format(self):
+        import inspect
+        import io
+        from contextlib import redirect_stdout
+
+        smoke_mod = importlib.import_module("tools.brigade.smoke_routes")
+        format_fn = getattr(smoke_mod, "format_smoke_report", None)
+        self.assertIsNotNone(format_fn, "tools.brigade.smoke_routes must define format_smoke_report")
+
+        sig_scan = inspect.signature(smoke_mod.run_route_smoke_scan)
+        for param_name in ("settle_budget_ms", "hard_settle_timeout_ms", "heap_budget_mb"):
+            self.assertIn(
+                param_name,
+                sig_scan.parameters,
+                f"run_route_smoke_scan must accept {param_name}",
+            )
+
+        def fake_driver(route, full_url, auth_cookie):
+            if route.route_pattern == "/explore":
+                return {
+                    "http_status": 200,
+                    "final_url": full_url,
+                    "console_errors": [],
+                    "page_errors": [],
+                    "failed_requests": [],
+                    "ttfb_ms": 60,
+                    "settle_ms": 320,
+                    "heap_used_mb": 18.5,
+                    "dom_nodes": 350,
+                    "spinner_state": "settled",
+                }
+            if route.route_pattern == "/analytics":
+                return {
+                    "http_status": 200,
+                    "final_url": full_url,
+                    "console_errors": [],
+                    "page_errors": [],
+                    "failed_requests": [],
+                    "ttfb_ms": 400,
+                    "settle_ms": 2400,
+                    "heap_used_mb": 45.0,
+                    "dom_nodes": 920,
+                    "spinner_state": "settled",
+                }
+            return {
+                "http_status": 200,
+                "final_url": full_url,
+                "console_errors": [],
+                "page_errors": [],
+                "failed_requests": [],
+                "ttfb_ms": 100,
+                "settle_ms": 5000,
+                "heap_used_mb": 22.0,
+                "dom_nodes": 410,
+                "spinner_state": "stuck",
+            }
+
+        # IC-1 & IC-2 Sub-case B: /explore (PASS), /analytics (WARN_SLOW), /orders (FAIL_STUCK)
+        with tempfile.TemporaryDirectory() as tmp_both:
+            both_repo = Path(tmp_both)
+            for seg in ("explore", "analytics", "orders"):
+                (both_repo / "src" / "app" / seg).mkdir(parents=True, exist_ok=True)
+                (both_repo / "src" / "app" / seg / "page.tsx").write_text(
+                    "export default function Page() { return null; }\n", encoding="utf-8"
+                )
+            BrigadeFSM(both_repo).save()
+
+            report = smoke_mod.run_route_smoke_scan(
+                both_repo,
+                base_url="http://localhost:3000",
+                driver_fn=fake_driver,
+                settle_budget_ms=1500,
+                hard_settle_timeout_ms=5000,
+                heap_budget_mb=80.0,
+            )
+            by_pat = {r.route_pattern: r for r in report.results}
+
+            self.assertEqual(by_pat["/explore"].perf_status, "PASS")
+            self.assertTrue(by_pat["/explore"].navigable)
+            self.assertEqual(by_pat["/explore"].spinner_state, "settled")
+            self.assertEqual(by_pat["/explore"].ttfb_ms, 60)
+            self.assertEqual(by_pat["/explore"].settle_ms, 320)
+            self.assertEqual(by_pat["/explore"].heap_used_mb, 18.5)
+            self.assertEqual(by_pat["/explore"].dom_nodes, 350)
+
+            self.assertEqual(by_pat["/analytics"].spinner_state, "slow_settle")
+            self.assertEqual(by_pat["/analytics"].perf_status, "WARN_SLOW")
+            self.assertTrue(by_pat["/analytics"].navigable)
+
+            self.assertEqual(by_pat["/orders"].spinner_state, "stuck")
+            self.assertEqual(by_pat["/orders"].perf_status, "FAIL_STUCK")
+            self.assertFalse(by_pat["/orders"].navigable)
+
+            self.assertEqual(report.slow_routes, 1)
+            self.assertEqual(report.stuck_routes, 1)
+            self.assertEqual(report.max_settle_ms, 5000)
+            self.assertEqual(report.max_heap_mb, 45.0)
+            self.assertFalse(report.all_navigable)
+
+            # IC-3: Default TOON ("axi") output format
+            toon_out = format_fn(report)
+            self.assertTrue(toon_out.startswith("smoke_routes["), f"Expected TOON header, got: {toon_out!r}")
+            self.assertIn("budget_ms:1500", toon_out)
+            self.assertIn("heap_budget_mb:80.0", toon_out)
+            self.assertIn(
+                "route | status | settle_ms | ttfb_ms | heap_mb | dom_nodes | spinner | perf | navigable | source",
+                toon_out,
+            )
+            self.assertIn("WARN_SLOW", toon_out)
+            self.assertIn("FAIL_STUCK", toon_out)
+
+            # IC-2: CRITICAL TICK-SMOKE-ORDERS takes priority over WARNING TICK-PERF-ANALYTICS
+            created_both = smoke_mod.triage_smoke_failures(both_repo, report)
+            self.assertIn("TICK-SMOKE-ORDERS", created_both)
+            self.assertIn("TICK-PERF-ANALYTICS", created_both)
+
+            ledger_both = json.loads((both_repo / ".edge" / "ledger" / "ui.json").read_text(encoding="utf-8"))
+            by_tid = {it["ticket_id"]: it for it in ledger_both.get("items", [])}
+            self.assertEqual(by_tid["TICK-SMOKE-ORDERS"]["severity"], "CRITICAL")
+            self.assertEqual(by_tid["TICK-PERF-ANALYTICS"]["severity"], "WARNING")
+            self.assertEqual(by_tid["TICK-PERF-ANALYTICS"]["rule_id"], "ROUTE_PERF_SLOW_SETTLE")
+
+            fsm_both = BrigadeFSM(both_repo)
+            self.assertEqual(fsm_both.state.current_state, CycleState.TRIAGE)
+            self.assertIsNotNone(fsm_both.state.active_ticket)
+            self.assertEqual(fsm_both.state.active_ticket.ticket_id, "TICK-SMOKE-ORDERS")
+
+            # IC-3 CLI: brigade smoke-routes --format toon --settle-budget-ms 1500 --heap-budget-mb 80
+            cli_buf = io.StringIO()
+            try:
+                with patch.object(smoke_mod, "run_route_smoke_scan", return_value=report), patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "brigade",
+                        "smoke-routes",
+                        str(both_repo),
+                        "--format",
+                        "toon",
+                        "--settle-budget-ms",
+                        "1500",
+                        "--heap-budget-mb",
+                        "80",
+                    ],
+                ), redirect_stdout(cli_buf):
+                    rc_toon = brigade_cli.main()
+            except SystemExit as exc:
+                self.fail(f"CLI 'smoke-routes --format toon --settle-budget-ms 1500 --heap-budget-mb 80' exited abnormally: {exc}")
+            self.assertEqual(rc_toon, 1)
+            self.assertTrue(cli_buf.getvalue().startswith("smoke_routes["))
+            self.assertIn("budget_ms:1500", cli_buf.getvalue())
+
+        # IC-2 Sub-case A: Slow navigable route ONLY (/analytics WARN_SLOW) -> TICK-PERF-ANALYTICS in TRIAGE
+        with tempfile.TemporaryDirectory() as tmp_slow:
+            slow_repo = Path(tmp_slow)
+            (slow_repo / "src" / "app" / "analytics").mkdir(parents=True, exist_ok=True)
+            (slow_repo / "src" / "app" / "analytics" / "page.tsx").write_text(
+                "export default function Analytics() { return null; }\n", encoding="utf-8"
+            )
+            BrigadeFSM(slow_repo).save()
+
+            slow_report = smoke_mod.run_route_smoke_scan(
+                slow_repo,
+                base_url="http://localhost:3000",
+                driver_fn=fake_driver,
+                settle_budget_ms=1500,
+                hard_settle_timeout_ms=5000,
+                heap_budget_mb=80.0,
+            )
+            self.assertTrue(slow_report.all_navigable)
+            self.assertEqual(slow_report.slow_routes, 1)
+
+            created_slow = smoke_mod.triage_smoke_failures(slow_repo, slow_report)
+            self.assertIn("TICK-PERF-ANALYTICS", created_slow)
+
+            ledger_slow = json.loads((slow_repo / ".edge" / "ledger" / "ui.json").read_text(encoding="utf-8"))
+            perf_items = [it for it in ledger_slow.get("items", []) if it.get("ticket_id") == "TICK-PERF-ANALYTICS"]
+            self.assertEqual(len(perf_items), 1)
+            self.assertEqual(perf_items[0]["severity"], "WARNING")
+            self.assertEqual(perf_items[0]["rule_id"], "ROUTE_PERF_SLOW_SETTLE")
+
+            fsm_slow = BrigadeFSM(slow_repo)
+            self.assertEqual(fsm_slow.state.current_state, CycleState.TRIAGE)
+            self.assertIsNotNone(fsm_slow.state.active_ticket)
+            self.assertEqual(fsm_slow.state.active_ticket.ticket_id, "TICK-PERF-ANALYTICS")
+
+    def test_overridable_stage_branch_topology_and_skill_alignment(self):
+        import inspect
+
+        ship_prep = importlib.import_module("tools.brigade.ship_prep")
+
+        default_stages = getattr(ship_prep, "DEFAULT_STAGE_BRANCHES", None)
+        self.assertIsNotNone(default_stages, "tools.brigade.ship_prep must define DEFAULT_STAGE_BRANCHES")
+        self.assertEqual(
+            default_stages,
+            {"integration": "development", "staging": "staging", "production": "production"},
+        )
+
+        resolve_fn = getattr(ship_prep, "resolve_stage_branches", None)
+        self.assertIsNotNone(resolve_fn, "tools.brigade.ship_prep must define resolve_stage_branches")
+
+        sig_topo = inspect.signature(ship_prep.validate_branch_topology)
+        self.assertIn("allow_override", sig_topo.parameters)
+        self.assertIn("stage_branches", sig_topo.parameters)
+
+        sig_prep = inspect.signature(ship_prep.prepare_ship_payload)
+        self.assertIn("allow_topology_override", sig_prep.parameters)
+        self.assertIn("stage_branches", sig_prep.parameters)
+
+        with tempfile.TemporaryDirectory() as tmp_root:
+            repo_dir = Path(tmp_root)
+            (repo_dir / ".edge").mkdir(parents=True, exist_ok=True)
+            (repo_dir / ".edge" / "brigade.json").write_text(
+                json.dumps({
+                    "version": "2.0.0",
+                    "stage_branches": {"integration": "main", "staging": "pre-prod"},
+                }),
+                encoding="utf-8",
+            )
+
+            resolved_from_cfg = resolve_fn(repo_dir)
+            self.assertEqual(
+                resolved_from_cfg,
+                {"integration": "main", "staging": "pre-prod", "production": "production"},
+            )
+
+            resolved_override = resolve_fn(repo_dir, overrides={"staging": "qa-stage"})
+            self.assertEqual(
+                resolved_override,
+                {"integration": "main", "staging": "qa-stage", "production": "production"},
+            )
+
+        # allow_override=True permits manual topology bypass
+        self.assertEqual(
+            ship_prep.validate_branch_topology(
+                "staging", "feat/hotfix", split_branches=False, allow_override=True
+            ),
+            (True, ""),
+        )
+
+        # Custom stage_branches enforces topology against custom staging branch and cites custom integration branch
+        ok_custom_blk, msg_custom_blk = ship_prep.validate_branch_topology(
+            "qa-stage",
+            "feat/hotfix",
+            split_branches=False,
+            allow_override=False,
+            stage_branches={"integration": "main", "staging": "qa-stage", "production": "production"},
+        )
+        self.assertFalse(ok_custom_blk)
+        self.assertIn("main", msg_custom_blk)
+
+        # CLI: brigade prepare-ship --allow-topology-override --stage-branch staging=staging
+        with tempfile.TemporaryDirectory() as tmp_cli:
+            cli_repo = Path(tmp_cli)
+
+            def git(*git_args):
+                proc = subprocess.run(
+                    ["git", *git_args],
+                    cwd=cli_repo,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                return proc.stdout.strip()
+
+            git("init", "-b", "staging")
+            git("config", "user.email", "brigade@example.com")
+            git("config", "user.name", "Edge Brigade")
+            (cli_repo / "README.md").write_text("# Base\n", encoding="utf-8")
+            git("add", "README.md")
+            git("commit", "-m", "chore: base staging")
+
+            git("checkout", "-b", "feat/hotfix")
+            (cli_repo / "hotfix.ts").write_text("export const fixed = true;\n", encoding="utf-8")
+            git("add", "hotfix.ts")
+            git("commit", "-m", "fix: hotfix")
+
+            try:
+                with patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "brigade",
+                        "prepare-ship",
+                        str(cli_repo),
+                        "--base",
+                        "staging",
+                        "--allow-topology-override",
+                        "--stage-branch",
+                        "staging=staging",
+                    ],
+                ):
+                    rc_ovr = brigade_cli.main()
+            except SystemExit as exc:
+                self.fail(f"CLI 'prepare-ship --allow-topology-override --stage-branch' exited abnormally: {exc}")
+            self.assertEqual(rc_ovr, 0)
+
+        # IC-5: skills/edge-ship/SKILL.md documents TICK-PERF-, --settle-budget-ms, --allow-topology-override, --stage-branch
+        skill_text = (self.repo_root / "skills" / "edge-ship" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("TICK-PERF-", skill_text)
+        self.assertIn("--settle-budget-ms", skill_text)
+        self.assertIn("--allow-topology-override", skill_text)
+        self.assertIn("--stage-branch", skill_text)
+
 
 if __name__ == "__main__":
     unittest.main()

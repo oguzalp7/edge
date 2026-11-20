@@ -10,16 +10,17 @@ user-invocable: true
 
 ---
 
-## 🛡️ Mandatory Branch Topology (`validate_branch_topology`)
+## 🛡️ Mandatory 4-Layer Stage Topology (`worktree -> integration -> staging -> production`)
 
-`brigade prepare-ship` enforces **`worktree -> development -> staging`** via `validate_branch_topology`:
-- **Default Base Branch:** `--base development` (if `--base` is omitted, `prepare-ship` diffs against `development` / `origin/development`).
-- **Blocked Topology Violations (exit code `1`):**
-  - Running `prepare-ship --base staging --split-branches` is **FORBIDDEN** (`ship/<slug>` branches must NEVER bypass `development`).
-  - Running `prepare-ship --base staging` from any slice branch (`feat/*`, `fix/*`, `refactor/*`, `hotfix/*`, `chore/*`, `ship/*`) is **FORBIDDEN**.
-- **Smart Remote Base Resolution (`_resolve_base_ref`):**
-  - When `HEAD == development` and `--base development`, diffs `origin/development..development` (falling back to local `development` if no remote).
-  - When `--base staging` from `development`, anchors on `origin/staging` (falling back to local `staging` if no remote).
+`brigade prepare-ship` models a 4-stage delivery chain (`DEFAULT_STAGE_BRANCHES`: `integration=development`, `staging=staging`, `production=production`):
+- **Stage 1 (`worktree -> integration`):** Default `--base development` (if `--base` is omitted, `prepare-ship` diffs against `development` / `origin/development`).
+- **Stage 2 (`integration -> staging`):** Consolidated Release PR with `--require-smoke` (Coolify deploy).
+- **Stage 3 (`staging -> production`):** Production promotion after staging smoke clearance.
+- **Stage 4 (Post-Release Smoke & Monitoring):** Continuous telemetry checks.
+- **Per-Repo Customization & Manual Override:**
+  - Configure `.edge/brigade.json` `"stage_branches"` (e.g., `{"integration": "main", "staging": "qa-stage"}`) or pass `--stage-branch key=val` on `prepare-ship`.
+  - To bypass topology restrictions intentionally (e.g., urgent hotfix), pass `--allow-topology-override`.
+  - Without `--allow-topology-override`, running `prepare-ship --base staging --split-branches` or `--base staging` from any slice branch (`feat/*`, `fix/*`, `refactor/*`, `hotfix/*`, `chore/*`, `ship/*`) is **blocked** (exit code `1`).
 
 ---
 
@@ -83,16 +84,21 @@ Once slices are integrated and verified on `development`, run the Route Navigabi
    ```bash
    git checkout development && git pull
    ```
-2. Run the headless route smoke scanner across all discovered routes (`--param` overrides dynamic segments like `[id]`; `--auth-cookie` authenticates protected routes):
+2. Run the headless route smoke & perf telemetry scanner (`--format toon` default, configurable `--settle-budget-ms` and `--heap-budget-mb`):
    ```bash
-   python3 tools/brigade/cli.py smoke-routes . --base-url http://localhost:3000
+   python3 tools/brigade/cli.py smoke-routes . --base-url http://localhost:3000 --format toon --settle-budget-ms 1500 --heap-budget-mb 80
    # With dynamic/auth overrides:
    python3 tools/brigade/cli.py smoke-routes . --base-url http://localhost:3000 --param id=42 --auth-cookie "session=..."
    ```
-   - Any non-navigable route (`HTTP >= 400`, `console.error`, uncaught `pageerror`, or unexpected auth redirect) automatically upserts a `CRITICAL` `TICK-SMOKE-<SLUG>` ticket into `.edge/ledger/ui.json` and transitions an `IDLE` Brigade into `CycleState.TRIAGE`.
-3. Generate the consolidated Staging Release PR payload with `--require-smoke` (`--base staging`, NO `--split-branches`):
+   - **Two-Tier Auto-Triage (`triage_smoke_failures`):**
+     - **Tier A (`CRITICAL`):** Broken routes (`HTTP >= 400`, `console.error`, `pageerror`, auth redirect) or stuck spinners (`FAIL_STUCK`) upsert `TICK-SMOKE-<SLUG>` into `.edge/ledger/ui.json`.
+     - **Tier B (`WARNING`):** Navigable slow/memory-heavy routes (`WARN_SLOW` / `WARN_MEMORY`) upsert `TICK-PERF-<SLUG>` (`ROUTE_PERF_SLOW_SETTLE`) into `.edge/ledger/ui.json`.
+     - If Brigade is `IDLE`, `CRITICAL` `TICK-SMOKE-*` takes priority for `CycleState.TRIAGE`, falling back to the slowest `TICK-PERF-*` ticket.
+3. Generate the consolidated Staging Release PR payload with `--require-smoke` (`--base staging`, NO `--split-branches`; add `--stage-branch` / `--allow-topology-override` if overriding repository topology):
    ```bash
    python3 tools/brigade/cli.py prepare-ship . --base staging --require-smoke --format json --out .edge/release-payload.json
+   # Or with custom stage mapping / manual bypass:
+   python3 tools/brigade/cli.py prepare-ship . --base qa-stage --stage-branch staging=qa-stage --allow-topology-override --format json --out .edge/release-payload.json
    ```
    The consolidated body includes `### Included Specs & Realization` under `## Summary` and `### Route Navigability & Console Smoke Audit` under `## Evidence`.
 4. Push `development` (if needed) and open the consolidated Release PR:

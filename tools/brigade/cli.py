@@ -28,7 +28,7 @@ try:
     from .spec_critic import run_spec_critique, PRIMARY_CRITIC_MODEL, FALLBACK_CRITIC_MODEL
     from .tier import get_tier_status, switch_tier, format_tier_card
     from .ship_prep import prepare_ship_payload, format_ship_output
-    from .smoke_routes import discover_project_routes, run_route_smoke_scan, triage_smoke_failures
+    from .smoke_routes import discover_project_routes, run_route_smoke_scan, triage_smoke_failures, format_smoke_report
 except ImportError:
     from tools.brigade.models import StationRole, CycleState, ReviewFinding, Ticket, ExaminerReceipt
     from tools.brigade.fsm import BrigadeFSM
@@ -38,7 +38,7 @@ except ImportError:
     from tools.brigade.spec_critic import run_spec_critique, PRIMARY_CRITIC_MODEL, FALLBACK_CRITIC_MODEL
     from tools.brigade.tier import get_tier_status, switch_tier, format_tier_card
     from tools.brigade.ship_prep import prepare_ship_payload, format_ship_output
-    from tools.brigade.smoke_routes import discover_project_routes, run_route_smoke_scan, triage_smoke_failures
+    from tools.brigade.smoke_routes import discover_project_routes, run_route_smoke_scan, triage_smoke_failures, format_smoke_report
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -328,6 +328,8 @@ def cmd_prepare_ship(args: argparse.Namespace) -> int:
     publish_evidence = bool(getattr(args, "publish_evidence", False))
     evidence_branch = getattr(args, "evidence_branch", "edge-qa-evidence") or "edge-qa-evidence"
     require_smoke = bool(getattr(args, "require_smoke", False))
+    allow_override = bool(getattr(args, "allow_topology_override", False))
+    stage_branches = _parse_param_pairs(getattr(args, "stage_branch", None)) or None
 
     ok, result, err = prepare_ship_payload(
         repo_path=repo_path,
@@ -338,6 +340,8 @@ def cmd_prepare_ship(args: argparse.Namespace) -> int:
         publish_evidence=publish_evidence,
         evidence_branch=evidence_branch,
         require_smoke=require_smoke,
+        allow_topology_override=allow_override,
+        stage_branches=stage_branches,
     )
     rendered = format_ship_output(result, fmt=fmt)
 
@@ -367,6 +371,14 @@ def _parse_param_pairs(raw_params: Optional[List[str]]) -> Dict[str, str]:
     return parsed
 
 
+def _resolve_cli_out_path(repo_path: Path, out_arg: Optional[str]) -> Optional[Path]:
+    if not out_arg:
+        return None
+    if Path(out_arg).is_absolute():
+        return normalize_target_path(out_arg)
+    return repo_path / out_arg
+
+
 def cmd_smoke_routes(args: argparse.Namespace) -> int:
     repo_path = normalize_target_path(args.repo)
     params = _parse_param_pairs(getattr(args, "param", None))
@@ -378,10 +390,7 @@ def cmd_smoke_routes(args: argparse.Namespace) -> int:
             print(f"{r.concrete_url_path} ({r.framework}) [{r.source_file}]")
         return 0
 
-    out_arg = getattr(args, "out", None)
-    out_path = (
-        normalize_target_path(out_arg) if (out_arg and Path(out_arg).is_absolute()) else ((repo_path / out_arg) if out_arg else None)
-    )
+    out_path = _resolve_cli_out_path(repo_path, getattr(args, "out", None))
     report = run_route_smoke_scan(
         repo_path=repo_path,
         base_url=getattr(args, "base_url", "http://localhost:3000") or "http://localhost:3000",
@@ -389,15 +398,15 @@ def cmd_smoke_routes(args: argparse.Namespace) -> int:
         params=params,
         auth_cookie=getattr(args, "auth_cookie", None),
         out_path=out_path,
+        settle_budget_ms=int(getattr(args, "settle_budget_ms", 1500) or 1500),
+        heap_budget_mb=float(getattr(args, "heap_budget_mb", 80.0) or 80.0),
     )
-    if not report.all_navigable and not getattr(args, "no_triage", False):
+    needs_triage = (not report.all_navigable) or (getattr(report, "slow_routes", 0) > 0)
+    if needs_triage and not getattr(args, "no_triage", False):
         triage_smoke_failures(repo_path, report)
 
-    status_icon = "✅" if report.all_navigable else "❌"
-    print(
-        f"{status_icon} Smoke scan: {report.passed_routes}/{report.total_routes} navigable · "
-        f"{report.total_console_errors} console error(s) · {report.total_page_errors} page error(s)"
-    )
+    fmt = getattr(args, "format", "toon") or "toon"
+    print(format_smoke_report(report, fmt=fmt))
     return 0 if report.all_navigable else 1
 
 
@@ -1275,6 +1284,8 @@ def main() -> int:
     p_ship.add_argument("--out", help="Optional output file path (written atomically)")
     p_ship.add_argument("--strict-proofs", action="store_true", help="Require at least one verified QA proof or ExaminerReceipt")
     p_ship.add_argument("--require-smoke", action="store_true", help="Require passing .edge/qa/smoke-routes.json when targeting staging")
+    p_ship.add_argument("--allow-topology-override", action="store_true", help="Allow manual bypass of stage branch topology guard")
+    p_ship.add_argument("--stage-branch", action="append", default=[], help="Override stage branch mapping (e.g. integration=main, staging=qa-stage)")
 
     # smoke-routes
     p_smoke = subparsers.add_parser("smoke-routes", help="Discover and headless-smoke-scan all project routes")
@@ -1286,6 +1297,9 @@ def main() -> int:
     p_smoke.add_argument("--no-triage", action="store_true", help="Do not auto-triage failed routes into UI ledger / FSM")
     p_smoke.add_argument("--discover-only", action="store_true", help="Only discover and print routes without scanning")
     p_smoke.add_argument("--out", default=None, help="Optional output path (default: .edge/qa/smoke-routes.json)")
+    p_smoke.add_argument("--format", choices=["toon", "json", "markdown"], default="toon", help="Smoke report output format (default: toon)")
+    p_smoke.add_argument("--settle-budget-ms", type=int, default=1500, help="Spinner/skeleton settling budget in ms (default: 1500)")
+    p_smoke.add_argument("--heap-budget-mb", type=float, default=80.0, help="JS heap usage budget in MB (default: 80.0)")
 
     args = parser.parse_args()
 

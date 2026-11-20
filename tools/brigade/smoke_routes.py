@@ -66,6 +66,12 @@ class RouteSmokeResult:
     page_errors: List[str] = field(default_factory=list)
     failed_requests: List[str] = field(default_factory=list)
     navigable: bool = False
+    ttfb_ms: int = 0
+    settle_ms: int = 0
+    heap_used_mb: float = 0.0
+    dom_nodes: int = 0
+    spinner_state: str = "none"
+    perf_status: str = "PASS"
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -89,6 +95,13 @@ class SmokeScanReport:
     results: List[RouteSmokeResult] = field(default_factory=list)
     triage_tickets_created: List[str] = field(default_factory=list)
     schema_version: str = "1.0.0"
+    settle_budget_ms: int = 1500
+    hard_settle_timeout_ms: int = 5000
+    heap_budget_mb: float = 80.0
+    slow_routes: int = 0
+    stuck_routes: int = 0
+    max_settle_ms: int = 0
+    max_heap_mb: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
         payload = asdict(self)
@@ -398,13 +411,18 @@ def _http_fallback_probe(full_url: str, auth_cookie: Optional[str]) -> Dict[str,
         }
 
 
-def _playwright_node_probe(full_url: str, auth_cookie: Optional[str]) -> Optional[Dict[str, Any]]:
+def _playwright_node_probe(
+    full_url: str,
+    auth_cookie: Optional[str],
+    hard_settle_timeout_ms: int = 5000,
+) -> Optional[Dict[str, Any]]:
     if not shutil.which("node"):
         return None
     script = (
         "const { chromium } = require('playwright');"
         "(async () => {"
         "  const url = process.argv[1]; const cookie = process.argv[2] || '';"
+        "  const hardTimeout = Math.max(200, parseInt(process.argv[3] || '5000', 10));"
         "  const browser = await chromium.launch({ headless: true });"
         "  const ctx = await browser.newContext(cookie ? { extraHTTPHeaders: { Cookie: cookie } } : {});"
         "  const page = await ctx.newPage();"
@@ -412,17 +430,31 @@ def _playwright_node_probe(full_url: str, auth_cookie: Optional[str]) -> Optiona
         "  page.on('console', m => { if (m.type() === 'error') consoleErrors.push(m.text()); });"
         "  page.on('pageerror', e => pageErrors.push(String(e)));"
         "  page.on('response', r => { if (r.status() >= 500) failedRequests.push(r.url() + ' -> ' + r.status()); });"
-        "  const resp = await page.goto(url, { waitUntil: 'networkidle', timeout: 15000 });"
-        "  console.log(JSON.stringify({ http_status: resp ? resp.status() : 0, final_url: page.url(), console_errors: consoleErrors, page_errors: pageErrors, failed_requests: failedRequests }));"
+        "  const t0 = Date.now();"
+        "  const resp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 });"
+        "  const sel = \".animate-spin, .animate-pulse, [aria-busy='true'], [data-loading='true'], [role='status']\";"
+        "  let seenSpinner = false; let spinnerState = 'none'; let settleMs = Date.now() - t0;"
+        "  while (Date.now() - t0 < hardTimeout) {"
+        "    const vis = await page.evaluate((s) => Array.from(document.querySelectorAll(s)).some(el => el.offsetParent !== null), sel);"
+        "    if (vis) { seenSpinner = true; await page.waitForTimeout(100); } else { spinnerState = seenSpinner ? 'settled' : 'none'; settleMs = Date.now() - t0; break; }"
+        "  }"
+        "  if (seenSpinner && spinnerState === 'none') { spinnerState = 'stuck'; settleMs = hardTimeout; }"
+        "  const metrics = await page.evaluate(() => {"
+        "    const nav = performance.getEntriesByType('navigation')[0];"
+        "    const ttfb = nav ? Math.round(Math.max(0, nav.responseStart - nav.requestStart)) : 0;"
+        "    const mem = performance.memory ? Number((performance.memory.usedJSHeapSize / 1048576).toFixed(2)) : 0.0;"
+        "    return { ttfb_ms: ttfb, heap_used_mb: mem, dom_nodes: document.querySelectorAll('*').length };"
+        "  });"
+        "  console.log(JSON.stringify({ http_status: resp ? resp.status() : 0, final_url: page.url(), console_errors: consoleErrors, page_errors: pageErrors, failed_requests: failedRequests, ttfb_ms: metrics.ttfb_ms, settle_ms: settleMs, heap_used_mb: metrics.heap_used_mb, dom_nodes: metrics.dom_nodes, spinner_state: spinnerState }));"
         "  await browser.close();"
         "})().catch(e => { console.error(String(e)); process.exit(2); });"
     )
     try:
         proc = subprocess.run(
-            ["node", "-e", script, full_url, auth_cookie or ""],
+            ["node", "-e", script, full_url, auth_cookie or "", str(hard_settle_timeout_ms)],
             capture_output=True,
             text=True,
-            timeout=25,
+            timeout=30,
         )
         if proc.returncode == 0 and proc.stdout.strip():
             return json.loads(proc.stdout.strip().splitlines()[-1])
@@ -442,23 +474,73 @@ def _default_browser_driver(
     return _http_fallback_probe(full_url, auth_cookie)
 
 
+def _classify_perf_telemetry(
+    raw_spinner: str,
+    settle_ms: int,
+    heap_used_mb: float,
+    settle_budget_ms: int,
+    hard_settle_timeout_ms: int,
+    heap_budget_mb: float,
+) -> tuple[str, str, bool]:
+    if raw_spinner == "stuck" or settle_ms >= hard_settle_timeout_ms:
+        return "stuck", "FAIL_STUCK", True
+    if settle_ms > settle_budget_ms:
+        return "slow_settle", "WARN_SLOW", False
+    settled_or_none = "settled" if (settle_ms > 0 or raw_spinner == "settled") else "none"
+    if heap_used_mb > heap_budget_mb:
+        return settled_or_none, "WARN_MEMORY", False
+    return settled_or_none, "PASS", False
+
+
+def _compute_base_navigable(
+    http_status: int,
+    console_errors: List[str],
+    page_errors: List[str],
+    auth_redirected: bool,
+) -> bool:
+    if not (200 <= http_status < 400):
+        return False
+    if console_errors or page_errors or auth_redirected:
+        return False
+    return True
+
+
+def _raw_num(raw: Dict[str, Any], key: str, cast: Any, default: Any) -> Any:
+    val = raw.get(key)
+    return cast(default if val is None else val)
+
+
+def _raw_str_list(raw: Dict[str, Any], key: str) -> List[str]:
+    val = raw.get(key)
+    return [str(e) for e in val] if val else []
+
+
 def _evaluate_probe_result(
     route: DiscoveredRoute,
     full_url: str,
     raw: Dict[str, Any],
+    settle_budget_ms: int = 1500,
+    hard_settle_timeout_ms: int = 5000,
+    heap_budget_mb: float = 80.0,
 ) -> RouteSmokeResult:
-    http_status = int(raw.get("http_status", 0) or 0)
-    final_url = str(raw.get("final_url") or full_url)
-    console_errors = [str(e) for e in (raw.get("console_errors") or [])]
-    page_errors = [str(e) for e in (raw.get("page_errors") or [])]
-    failed_requests = [str(e) for e in (raw.get("failed_requests") or [])]
+    http_status = _raw_num(raw, "http_status", int, 0)
+    raw_final = raw.get("final_url")
+    final_url = str(raw_final) if raw_final else full_url
+    console_errors = _raw_str_list(raw, "console_errors")
+    page_errors = _raw_str_list(raw, "page_errors")
+    failed_requests = _raw_str_list(raw, "failed_requests")
     auth_redirected = bool(raw.get("auth_redirected")) or _is_auth_redirected(route.route_pattern, final_url)
-    navigable = (
-        (200 <= http_status < 400)
-        and len(console_errors) == 0
-        and len(page_errors) == 0
-        and not auth_redirected
+
+    ttfb_ms = _raw_num(raw, "ttfb_ms", int, 0)
+    settle_ms = _raw_num(raw, "settle_ms", int, 0)
+    heap_used_mb = round(_raw_num(raw, "heap_used_mb", float, 0.0), 2)
+    dom_nodes = _raw_num(raw, "dom_nodes", int, 0)
+    raw_spinner = str(raw.get("spinner_state") or "none").strip().lower()
+
+    spinner_state, perf_status, is_stuck = _classify_perf_telemetry(
+        raw_spinner, settle_ms, heap_used_mb, settle_budget_ms, hard_settle_timeout_ms, heap_budget_mb
     )
+    navigable = _compute_base_navigable(http_status, console_errors, page_errors, auth_redirected) and not is_stuck
     return RouteSmokeResult(
         route_pattern=route.route_pattern,
         url=full_url,
@@ -470,6 +552,12 @@ def _evaluate_probe_result(
         page_errors=page_errors,
         failed_requests=failed_requests,
         navigable=navigable,
+        ttfb_ms=ttfb_ms,
+        settle_ms=settle_ms,
+        heap_used_mb=heap_used_mb,
+        dom_nodes=dom_nodes,
+        spinner_state=spinner_state,
+        perf_status=perf_status,
     )
 
 
@@ -481,6 +569,9 @@ def run_route_smoke_scan(
     auth_cookie: Optional[str] = None,
     out_path: Optional[Path] = None,
     driver_fn: Optional[Callable[[DiscoveredRoute, str, Optional[str]], Dict[str, Any]]] = None,
+    settle_budget_ms: int = 1500,
+    hard_settle_timeout_ms: int = 5000,
+    heap_budget_mb: float = 80.0,
 ) -> SmokeScanReport:
     """Scans discovered routes via headless browser or driver_fn and writes .edge/qa/smoke-routes.json."""
     repo = Path(repo_path)
@@ -492,7 +583,16 @@ def run_route_smoke_scan(
     for route in routes:
         full_url = f"{base_clean}{route.concrete_url_path}"
         raw = probe(route, full_url, auth_cookie)
-        results.append(_evaluate_probe_result(route, full_url, raw))
+        results.append(
+            _evaluate_probe_result(
+                route,
+                full_url,
+                raw,
+                settle_budget_ms=settle_budget_ms,
+                hard_settle_timeout_ms=hard_settle_timeout_ms,
+                heap_budget_mb=heap_budget_mb,
+            )
+        )
 
     passed = sum(1 for r in results if r.navigable)
     failed = len(results) - passed
@@ -506,6 +606,13 @@ def run_route_smoke_scan(
         total_console_errors=sum(len(r.console_errors) for r in results),
         total_page_errors=sum(len(r.page_errors) for r in results),
         results=results,
+        settle_budget_ms=settle_budget_ms,
+        hard_settle_timeout_ms=hard_settle_timeout_ms,
+        heap_budget_mb=heap_budget_mb,
+        slow_routes=sum(1 for r in results if r.perf_status in ("WARN_SLOW", "WARN_MEMORY")),
+        stuck_routes=sum(1 for r in results if r.perf_status == "FAIL_STUCK"),
+        max_settle_ms=max((r.settle_ms for r in results), default=0),
+        max_heap_mb=round(max((r.heap_used_mb for r in results), default=0.0), 2),
     )
     target = Path(out_path) if out_path else (repo / ".edge" / "qa" / "smoke-routes.json")
     _write_json_atomic(target, report.to_dict())
@@ -518,6 +625,11 @@ def _route_to_slug(route_pattern: str) -> str:
 
 
 def _build_smoke_fix_hint(res: RouteSmokeResult) -> str:
+    if res.perf_status == "FAIL_STUCK":
+        return (
+            f"Resolve stuck loading/spinner/Suspense boundary on '{res.route_pattern}' "
+            f"exceeding hard settle timeout ({res.settle_ms}ms)."
+        )
     if res.auth_redirected:
         return "Verify session/auth cookie handling or public visibility for this route (redirected to login wall)."
     if res.http_status >= 500 or res.http_status == 404 or res.http_status == 0:
@@ -525,6 +637,32 @@ def _build_smoke_fix_hint(res: RouteSmokeResult) -> str:
     if res.page_errors:
         return f"Fix uncaught runtime / React hydration pageerror on '{res.route_pattern}'."
     return f"Eliminate browser console.error emitted during navigation to '{res.route_pattern}'."
+
+
+def _build_perf_ticket(res: RouteSmokeResult, report: SmokeScanReport) -> Ticket:
+    slug = _route_to_slug(res.route_pattern)
+    ticket_id = f"TICK-PERF-{slug}"
+    fingerprint = hashlib.sha256(f"ui:perf:{res.route_pattern}".encode("utf-8")).hexdigest()[:16]
+    desc = (
+        f"Slow route {res.route_pattern}: settle_ms={res.settle_ms}ms "
+        f"(budget={report.settle_budget_ms}ms), heap={res.heap_used_mb}MB, dom_nodes={res.dom_nodes}"
+    )
+    target_file = res.source_file or "specs/INDEX.md"
+    return Ticket(
+        ticket_id=ticket_id,
+        track="ui",
+        domain="smoke-perf",
+        rule_id="ROUTE_PERF_SLOW_SETTLE",
+        severity="WARNING",
+        target_file=target_file,
+        line_number=1,
+        fingerprint=fingerprint,
+        description=desc,
+        suggested_fix="Profile loader/Suspense waterfall, parallelize data fetches, or reduce initial client bundle/DOM payload.",
+        branch_name=f"fix/perf-{slug.lower()}",
+        expected_files=[target_file],
+        require_qa=True,
+    )
 
 
 def _build_smoke_ticket(res: RouteSmokeResult) -> Ticket:
@@ -627,18 +765,92 @@ def _activate_triage_if_idle(repo: Path, tickets: List[Ticket]) -> None:
     fsm.save()
 
 
-def triage_smoke_failures(repo_path: Path, report: SmokeScanReport) -> List[str]:
-    """Creates idempotent CRITICAL UI ledger tickets and activates CycleState.TRIAGE if IDLE."""
-    repo = Path(repo_path)
-    failing = [r for r in report.results if not r.navigable]
-    if not failing:
-        return []
-    pairs = [(_build_smoke_ticket(res), res) for res in failing]
-    tickets = [t for t, _ in pairs]
-    _upsert_ui_ledger(repo, pairs)
-    _activate_triage_if_idle(repo, tickets)
+def _select_priority_triage_ticket(
+    tier_a: List[tuple[Ticket, RouteSmokeResult]],
+    tier_b: List[tuple[Ticket, RouteSmokeResult]],
+) -> Optional[Ticket]:
+    if tier_a:
+        return tier_a[0][0]
+    if tier_b:
+        slowest = max(tier_b, key=lambda pair: (pair[1].settle_ms, pair[1].heap_used_mb))
+        return slowest[0]
+    return None
 
-    created_ids = [t.ticket_id for t in tickets]
+
+def triage_smoke_failures(repo_path: Path, report: SmokeScanReport) -> List[str]:
+    """Creates idempotent CRITICAL TICK-SMOKE-* and WARNING TICK-PERF-* ledger tickets and starts TRIAGE."""
+    repo = Path(repo_path)
+    tier_a_routes = [r for r in report.results if not r.navigable or r.perf_status == "FAIL_STUCK"]
+    tier_b_routes = [
+        r for r in report.results if r.navigable and r.perf_status in ("WARN_SLOW", "WARN_MEMORY")
+    ]
+    if not tier_a_routes and not tier_b_routes:
+        return []
+
+    tier_a_pairs = [(_build_smoke_ticket(res), res) for res in tier_a_routes]
+    tier_b_pairs = [(_build_perf_ticket(res, report), res) for res in tier_b_routes]
+    all_pairs = [*tier_a_pairs, *tier_b_pairs]
+    _upsert_ui_ledger(repo, all_pairs)
+
+    primary = _select_priority_triage_ticket(tier_a_pairs, tier_b_pairs)
+    if primary:
+        _activate_triage_if_idle(repo, [primary])
+
+    created_ids = [t.ticket_id for t, _ in all_pairs]
     report.triage_tickets_created = created_ids
     _write_json_atomic(repo / ".edge" / "qa" / "smoke-routes.json", report.to_dict())
     return created_ids
+
+
+def _format_smoke_toon(report: SmokeScanReport) -> str:
+    header = (
+        f"smoke_routes[{report.total_routes}]"
+        f"{{base:{report.base_url},navigable:{report.passed_routes}/{report.total_routes},"
+        f"slow:{report.slow_routes},stuck:{report.stuck_routes},"
+        f"budget_ms:{report.settle_budget_ms},heap_budget_mb:{report.heap_budget_mb},"
+        f"all_navigable:{str(report.all_navigable).lower()}}}:"
+    )
+    lines = [
+        header,
+        "  route | status | settle_ms | ttfb_ms | heap_mb | dom_nodes | spinner | perf | navigable | source",
+    ]
+    for r in report.results:
+        lines.append(
+            f"  {r.route_pattern} | {r.http_status} | {r.settle_ms} | {r.ttfb_ms} | "
+            f"{r.heap_used_mb} | {r.dom_nodes} | {r.spinner_state} | {r.perf_status} | "
+            f"{str(r.navigable).lower()} | {r.source_file}"
+        )
+    if report.triage_tickets_created:
+        lines.append(f"triage_tickets: {json.dumps(report.triage_tickets_created)}")
+    return "\n".join(lines)
+
+
+def _format_smoke_markdown(report: SmokeScanReport) -> str:
+    icon = "✅" if report.all_navigable else "❌"
+    lines = [
+        f"### Route Smoke & Perf Telemetry ({icon} {report.passed_routes}/{report.total_routes} navigable)",
+        (
+            f"- **Budgets:** settle `<= {report.settle_budget_ms}ms`, hard `<= {report.hard_settle_timeout_ms}ms`, "
+            f"heap `<= {report.heap_budget_mb}MB` · **Slow:** {report.slow_routes} · **Stuck:** {report.stuck_routes}"
+        ),
+        "",
+        "| route | status | settle_ms | ttfb_ms | heap_mb | dom_nodes | spinner | perf | navigable | source |",
+        "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |",
+    ]
+    for r in report.results:
+        lines.append(
+            f"| `{r.route_pattern}` | {r.http_status} | {r.settle_ms} | {r.ttfb_ms} | "
+            f"{r.heap_used_mb} | {r.dom_nodes} | {r.spinner_state} | `{r.perf_status}` | "
+            f"{str(r.navigable).lower()} | `{r.source_file}` |"
+        )
+    return "\n".join(lines)
+
+
+def format_smoke_report(report: SmokeScanReport, fmt: str = "toon") -> str:
+    """Formats SmokeScanReport as token-frugal 'toon' (default), 'json', or 'markdown'."""
+    mode = (fmt or "toon").strip().lower()
+    if mode == "json":
+        return json.dumps(report.to_dict(), indent=2, ensure_ascii=False)
+    if mode == "markdown":
+        return _format_smoke_markdown(report)
+    return _format_smoke_toon(report)
