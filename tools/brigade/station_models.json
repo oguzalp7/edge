@@ -1,0 +1,98 @@
+{
+  "version": "1.0.0",
+  "default_tier": "pro",
+  "tiers": {
+    "ultra": {
+      "branch": "main",
+      "transport": "swarm",
+      "stations": {
+        "spec_writer": {
+          "model": "gemini-4-hydrogen-high",
+          "effort": "high",
+          "fork": null
+        },
+        "researcher": {
+          "model": "gemini-4-hydrogen-high",
+          "effort": "high",
+          "fork": null
+        },
+        "spec_critic": {
+          "model": "claude-opus-5-5-high",
+          "effort": "high",
+          "fork": null
+        },
+        "seam_architect": {
+          "model": "gemini-4-hydrogen-xhigh",
+          "effort": "xhigh",
+          "fork": null
+        },
+        "coder": {
+          "model": "gemini-4-hydrogen-high",
+          "effort": "high",
+          "fork": null
+        },
+        "surgeon": {
+          "model": "gemini-4-hydrogen-high",
+          "effort": "high",
+          "fork": null
+        },
+        "examiner": {
+          "model": "gemini-4-hydrogen-high",
+          "effort": "high",
+          "fork": "spec_writer"
+        },
+        "qa_engineer": {
+          "model": "gemini-4-hydrogen-medium",
+          "effort": "medium",
+          "fork": null
+        }
+      }
+    },
+    "pro": {
+      "branch": "main",
+      "transport": "invoke_subagent",
+      "stations": {
+        "spec_writer": {
+          "model": "flash",
+          "effort": null,
+          "fork": null
+        },
+        "researcher": {
+          "model": "flash",
+          "effort": null,
+          "fork": null
+        },
+        "spec_critic": {
+          "model": "gemini-3.8-flash-high",
+          "effort": "high",
+          "fork": null
+        },
+        "seam_architect": {
+          "model": "flash",
+          "effort": null,
+          "fork": null
+        },
+        "coder": {
+          "model": "flash",
+          "effort": null,
+          "fork": null
+        },
+        "surgeon": {
+          "model": "flash",
+          "effort": null,
+          "fork": null
+        },
+        "examiner": {
+          "model": "flash",
+          "effort": null,
+          "fork": "spec_writer"
+        },
+        "qa_engineer": {
+          "model": "flash",
+          "effort": null,
+          "fork": null
+        }
+      }
+    }
+  }
+}

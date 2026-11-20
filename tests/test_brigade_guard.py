@@ -2172,6 +2172,126 @@ class TestGuardRoleDetectionAndPostToolHardening(unittest.TestCase):
                 "allow",
             )
 
+    # ------------------------------------------------------------------
+    # SPEC-EDGE-BRIGADE-011 (AC-3): Unified Swarm Guard, SSOT Preload & PostTool Sync
+    # ------------------------------------------------------------------
+
+    def test_swarm_daemon_ban_ssot_preload_and_post_tool_sync(self):
+        import inspect
+
+        swarm_guard_fn = getattr(guard, "_handle_swarm_guard", None)
+        preload_fn = getattr(guard, "_resolve_swarm_ssot_preload", None)
+        post_fn = getattr(guard, "_handle_swarm_post_tool", None)
+        self.assertIsNotNone(swarm_guard_fn, "orchestrator_guard must define _handle_swarm_guard")
+        self.assertIsNotNone(preload_fn, "orchestrator_guard must define _resolve_swarm_ssot_preload")
+        self.assertIsNotNone(post_fn, "orchestrator_guard must define _handle_swarm_post_tool")
+
+        sig_sync = inspect.signature(guard.sync_repo_brigade_station)
+        self.assertIn("model", sig_sync.parameters, "sync_repo_brigade_station must accept model parameter")
+
+        # 1. Daemon Ban blocks narrator / monitor / monitor-1
+        for banned_name in ("narrator", "monitor", "monitor-1"):
+            res_ban = guard.handle_pre_tool({
+                "conversationId": "orch-1",
+                "toolCall": {
+                    "name": "swarm",
+                    "args": {"action": "add", "name": banned_name, "brief": "Watch board"},
+                },
+            })
+            self.assertEqual(res_ban.get("decision"), "deny", f"Expected {banned_name} to be banned")
+            self.assertIn("EDGE SWARM DAEMON BAN", res_ban.get("reason", ""))
+
+        # 2. SSOT Auto-Preload injects model + fork="spec_writer" for examiner
+        res_ex = guard.handle_pre_tool({
+            "conversationId": "orch-1",
+            "toolCall": {
+                "name": "swarm",
+                "args": {"action": "add", "name": "examiner", "brief": "Audit PR"},
+            },
+        })
+        self.assertEqual(res_ex.get("decision"), "allow")
+        self.assertIn("overwrite", res_ex)
+        self.assertEqual(res_ex["overwrite"].get("model"), "gemini-4-hydrogen-high")
+        self.assertEqual(res_ex["overwrite"].get("fork"), "spec_writer")
+
+        # Effort override applies suffix via apply_effort_to_model
+        res_coder = guard.handle_pre_tool({
+            "conversationId": "orch-1",
+            "toolCall": {
+                "name": "swarm",
+                "args": {"action": "add", "name": "coder", "effort": "xhigh", "brief": "Implement"},
+            },
+        })
+        self.assertEqual(res_coder.get("decision"), "allow")
+        self.assertEqual(res_coder.get("overwrite", {}).get("model"), "gemini-4-hydrogen-xhigh")
+
+        # 3. AFK mode blocks swarm(action="add")
+        with patch.dict(os.environ, {"EDGE_AFK": "1", "EDGE_AFK_MODE": "strict"}):
+            res_afk = guard.handle_pre_tool({
+                "conversationId": "afk-swarm-1",
+                "toolCall": {"name": "swarm", "args": {"action": "add", "name": "coder", "brief": "Code"}},
+            })
+            self.assertEqual(res_afk.get("decision"), "deny")
+
+        # 4. PostTool sync for swarm(add), swarm(model), swarm(kill)
+        repo_dir = self.temp_path / "swarm_sync_repo"
+        (repo_dir / ".edge").mkdir(parents=True, exist_ok=True)
+        swarm_cid = "bbbbbbbb-1111-2222-3333-444444444444"
+        guard.handle_post_tool({
+            "conversationId": "orch-1",
+            "cwd": str(repo_dir),
+            "toolCall": {"name": "swarm", "args": {"action": "add", "name": "coder", "brief": "Code"}},
+            "toolResponse": {"conversationId": swarm_cid},
+        })
+        stations = self.store.load().get_stations()
+        self.assertIn(swarm_cid, stations)
+        self.assertEqual(stations[swarm_cid]["canonicalRole"], "CODER")
+        brigade_json = json.loads((repo_dir / ".edge" / "brigade.json").read_text(encoding="utf-8"))
+        self.assertEqual(brigade_json["stations"]["CODER"]["conversation_id"], swarm_cid)
+
+        guard.handle_post_tool({
+            "conversationId": "orch-1",
+            "cwd": str(repo_dir),
+            "toolCall": {"name": "swarm", "args": {"action": "model", "name": "coder", "model": "claude-opus-5-5-high"}},
+        })
+        self.assertEqual(self.store.load().get_stations()[swarm_cid]["model"], "claude-opus-5-5-high")
+
+        guard.handle_post_tool({
+            "conversationId": "orch-1",
+            "cwd": str(repo_dir),
+            "toolCall": {"name": "swarm", "args": {"action": "kill", "name": "coder"}},
+        })
+        self.assertEqual(self.store.load().get_stations()[swarm_cid]["status"], "TERMINATED")
+
+    def test_pre_invocation_tier_aware_orchestrator_and_swarm_transcript_detection(self):
+        self.assertIsNotNone(getattr(guard, "_handle_swarm_guard", None), "orchestrator_guard must define _handle_swarm_guard")
+
+        repo_dir = self.temp_path / "tier_repo"
+        repo_dir.mkdir(parents=True, exist_ok=True)
+        tier_file = self.temp_path / "edge_tier.json"
+
+        with patch.dict(os.environ, {"EDGE_TIER_STATE_PATH": str(tier_file)}), patch.object(
+            guard, "detect_session_role", return_value=("ORCHESTRATOR", "test")
+        ):
+            tier_file.write_text(json.dumps({"tier": "pro", "branch": "main", "transport": "invoke_subagent"}), encoding="utf-8")
+            res_pro = guard.handle_pre_invocation({"conversationId": "orch-pro", "cwd": str(repo_dir)})
+            msg_pro = res_pro["injectSteps"][0]["ephemeralMessage"]
+            self.assertIn("Anti-Graveyard Protocol", msg_pro)
+
+            tier_file.write_text(json.dumps({"tier": "ultra", "branch": "main", "transport": "swarm"}), encoding="utf-8")
+            res_ultra = guard.handle_pre_invocation({"conversationId": "orch-ultra", "cwd": str(repo_dir)})
+            msg_ultra = res_ultra["injectSteps"][0]["ephemeralMessage"]
+            self.assertIn("ULTRA SWARM MODE", msg_ultra)
+            self.assertIn("Ultra Swarm-Native Station Dispatch Protocol", msg_ultra)
+
+        tp_swarm = self._write_transcript("swarm_canonical_station.jsonl", [{
+            "step_index": 0,
+            "source": "SYSTEM",
+            "content": "[Swarm] @coder You are operating as the canonical coder station worker.",
+        }])
+        role_sw, _ = guard.detect_session_role({"conversationId": "unreg-sw-2", "transcriptPath": str(tp_swarm)})
+        self.assertEqual(role_sw, "CODER")
+
 
 if __name__ == "__main__":
     unittest.main()

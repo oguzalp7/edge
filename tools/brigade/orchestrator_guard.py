@@ -48,6 +48,10 @@ from datetime import datetime, timezone
 from dataclasses import dataclass, field, asdict
 from typing import Dict, Any, Optional, Tuple, List, Union
 
+_PLUGIN_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(_PLUGIN_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PLUGIN_ROOT))
+
 # Provide MagicMock in builtins for test harnesses
 builtins.MagicMock = MagicMock
 
@@ -402,7 +406,48 @@ class TranscriptStationScanner:
         return TokenHeatRecord(tokens=total_tokens, heat_zone=heat_zone, last_calculated_at=now_iso)
 
 
-def sync_repo_brigade_station(repo_path: Union[Path, str], role: str, conversation_id: str) -> bool:
+def _load_repo_brigade_data(brigade_json_path: Path) -> Dict[str, Any]:
+    """Loads existing .edge/brigade.json preserving workflow fields."""
+    data: Dict[str, Any] = {}
+    if brigade_json_path.exists():
+        try:
+            with open(brigade_json_path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                data = loaded
+        except Exception:
+            data = {}
+    if not isinstance(data.get("stations"), dict):
+        data["stations"] = {}
+    return data
+
+
+def _build_station_entry(
+    canonical: str,
+    conversation_id: str,
+    now_iso: str,
+    existing: Any = None,
+    model: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Constructs a station entry while preserving prior model metadata if omitted."""
+    entry: Dict[str, Any] = {
+        "role": canonical,
+        "conversation_id": conversation_id,
+        "conversationId": conversation_id,
+        "updated_at": now_iso,
+    }
+    eff_model = model or (existing.get("model") if isinstance(existing, dict) else None)
+    if eff_model:
+        entry["model"] = str(eff_model)
+    return entry
+
+
+def sync_repo_brigade_station(
+    repo_path: Union[Path, str],
+    role: str,
+    conversation_id: str,
+    model: Optional[str] = None,
+) -> bool:
     """
     Atomically records a persistent station mapping to <repo>/.edge/brigade.json
     so that subagents or fresh sessions retain knowledge of the active station.
@@ -413,27 +458,13 @@ def sync_repo_brigade_station(repo_path: Union[Path, str], role: str, conversati
         edge_dir.mkdir(parents=True, exist_ok=True)
         brigade_json_path = edge_dir / "brigade.json"
 
-        data = {}
-        if brigade_json_path.exists():
-            try:
-                with open(brigade_json_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-            except Exception:
-                data = {}
-
-        if not isinstance(data, dict):
-            data = {}
-        if "stations" not in data or not isinstance(data["stations"], dict):
-            data["stations"] = {}
-
+        data = _load_repo_brigade_data(brigade_json_path)
         canonical = normalize_role(role) or role.strip().upper()
         now_iso = datetime.now(timezone.utc).isoformat()
-        data["stations"][canonical] = {
-            "role": canonical,
-            "conversation_id": conversation_id,
-            "conversationId": conversation_id,
-            "updated_at": now_iso,
-        }
+        existing = data["stations"].get(canonical)
+        data["stations"][canonical] = _build_station_entry(
+            canonical, conversation_id, now_iso, existing=existing, model=model
+        )
 
         tmp_path = edge_dir / f"brigade.json.tmp.{os.getpid()}"
         with open(tmp_path, "w", encoding="utf-8") as f:
@@ -1007,12 +1038,12 @@ def apply_afk_guard(payload: Dict[str, Any], afk_mode: str) -> Optional[Dict[str
     tool_name = tool_call.get("name", "")
     args = tool_call.get("args", {})
 
-    if tool_name == "invoke_subagent":
+    if tool_name in ("invoke_subagent", "swarm"):
         return {
             "decision": "deny",
             "reason": (
                 "❌ [EDGE AFK GUARD]: Autonomous overnight sessions run strictly as a single agent. "
-                "Spawning child subagents via invoke_subagent is strictly prohibited to prevent quota leaks and zombie loops."
+                "Spawning child subagents or swarm workers (invoke_subagent / swarm) is strictly prohibited to prevent quota leaks and zombie loops."
             ),
         }
 
@@ -1328,6 +1359,94 @@ def is_no_mistakes_invocation(payload: Dict[str, Any]) -> Tuple[bool, str]:
     return False, ""
 
 
+def _load_ultra_ssot_config() -> Dict[str, Any]:
+    """Safe loader for ultra SSOT config."""
+    try:
+        from tools.brigade.tier import load_ssot_station_config
+        return load_ssot_station_config("ultra")
+    except Exception:
+        return {}
+
+
+def _resolve_preload_model(current_model: Any, target_effort: Any, entry: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+    """Resolves whether a model must be injected or normalized."""
+    from tools.brigade.tier import apply_effort_to_model
+    ssot_model = entry.get("model")
+    if not current_model and ssot_model:
+        final_m = apply_effort_to_model(ssot_model, target_effort) if target_effort else ssot_model
+        return True, final_m
+    if current_model and target_effort:
+        applied = apply_effort_to_model(str(current_model), target_effort)
+        if applied != str(current_model):
+            return True, applied
+    return False, None
+
+
+def _apply_fork_preload(entry: Dict[str, Any], args: Dict[str, Any], overwritten: Dict[str, Any]) -> bool:
+    """Preloads context fork if defined in SSOT and missing in args."""
+    fork = entry.get("fork")
+    if fork and not args.get("fork"):
+        overwritten["fork"] = fork
+        return True
+    return False
+
+
+def _resolve_swarm_ssot_preload(raw_name: str, args: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Resolves canonical station role slug, looks up SSOT station config,
+    and returns overwritten args if model or fork need auto-preloading.
+    """
+    if not args.get("brief"):
+        return None
+
+    base_name = re.sub(r"-\d+$", "", raw_name.strip().lower())
+    canonical = normalize_role(base_name) or base_name
+    role_slug = canonical.lower()
+
+    ssot_config = _load_ultra_ssot_config()
+    entry = ssot_config.get(role_slug)
+    if not entry:
+        return None
+
+    overwritten = dict(args)
+    modified = False
+
+    should_mod, new_model = _resolve_preload_model(args.get("model"), args.get("effort"), entry)
+    if should_mod and new_model:
+        overwritten["model"] = new_model
+        modified = True
+
+    if _apply_fork_preload(entry, args, overwritten):
+        modified = True
+
+    return overwritten if modified else None
+
+
+def _handle_swarm_guard(args: Dict[str, Any], parent_cid: str) -> Optional[Dict[str, Any]]:
+    """
+    Guards native swarm tool invocations:
+    1. Strictly denies spawning 'narrator' or 'monitor' daemons to conserve quota.
+    2. Auto-preloads SSOT model, effort, and fork if omitted.
+    """
+    action = str(args.get("action", "")).strip().lower()
+    if action != "add":
+        return {"decision": "allow"}
+
+    raw_name = str(args.get("name", "")).strip().lower()
+    base_name = re.sub(r"-\d+$", "", raw_name)
+    if base_name in ("narrator", "monitor"):
+        return {
+            "decision": "deny",
+            "reason": "❌ [EDGE SWARM DAEMON BAN]: Spawning narrator or monitor daemons is strictly prohibited to conserve quota.",
+        }
+
+    overwritten = _resolve_swarm_ssot_preload(raw_name, args)
+    if overwritten is not None:
+        return {"decision": "allow", "overwrite": overwritten}
+
+    return {"decision": "allow"}
+
+
 def handle_pre_tool(payload: dict) -> dict:
     is_nm, _ = is_no_mistakes_invocation(payload)
     if is_nm:
@@ -1354,6 +1473,11 @@ def handle_pre_tool(payload: dict) -> dict:
     # 1. invoke_subagent: Anti-Graveyard & Station Reuse Enforcement
     if tool_name == "invoke_subagent":
         return _handle_invoke_subagent_guard(args, parent_cid)
+
+    # 1.1 swarm: Ultra Swarm Daemon Ban & SSOT Preload Enforcement
+    if tool_name == "swarm":
+        swarm_res = _handle_swarm_guard(args, parent_cid)
+        return swarm_res if swarm_res is not None else {"decision": "allow"}
 
     target_file = get_target_file(args)
 
@@ -1610,6 +1734,82 @@ def _resolve_repo_candidate(payload: dict) -> Optional[Path]:
     return rp if rp.exists() else None
 
 
+def _resolve_swarm_canonical_role(raw_name: str) -> str:
+    """Resolves canonical station role for a swarm worker name (e.g. coder-1 -> CODER)."""
+    base_name = re.sub(r"-\d+$", "", raw_name.strip().lower())
+    return normalize_role(base_name) or base_name.upper()
+
+
+def _resolve_swarm_default_model(raw_name: str) -> str:
+    """Looks up SSOT model for a swarm worker role with Ultra fallback."""
+    canonical = _resolve_swarm_canonical_role(raw_name).lower()
+    entry = _load_ultra_ssot_config().get(canonical)
+    if isinstance(entry, dict) and entry.get("model"):
+        return str(entry["model"])
+    return "gemini-4-hydrogen-high"
+
+
+def _update_swarm_station_records(
+    raw_name: str,
+    parent_cid: str,
+    field_name: str,
+    field_value: str,
+) -> Optional[str]:
+    """Updates model or status on matching active swarm station records; returns first matched cid."""
+    canonical = _resolve_swarm_canonical_role(raw_name)
+    envelope = load_active_stations()
+    stations = envelope.get_stations()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    matched_cid: Optional[str] = None
+
+    for cid, info in stations.items():
+        if not _is_active_station_for_role(info, canonical, parent_cid):
+            continue
+        info[field_name] = field_value
+        info["lastActiveAt"] = now_iso
+        if matched_cid is None:
+            matched_cid = cid
+
+    if matched_cid is not None:
+        save_active_stations(envelope)
+    return matched_cid
+
+
+def _handle_swarm_post_tool(payload: Dict[str, Any], args: Dict[str, Any], parent_cid: str) -> None:
+    """
+    Handles post-tool side effects for swarm add, model, and kill actions:
+    syncs conversationId, model, and TERMINATED status to ACTIVE_STATIONS_FILE and .edge/brigade.json.
+    """
+    action = str(args.get("action", "")).strip().lower()
+    raw_name = str(args.get("name", "")).strip().lower()
+    if not raw_name:
+        return
+
+    rp = _resolve_repo_candidate(payload)
+    if action == "add":
+        created_cid = _extract_cid_from_payload(payload)
+        if not created_cid and payload.get("transcriptPath"):
+            created_cid = _extract_cid_from_transcript_fallback(payload.get("transcriptPath", ""), expected_tool="swarm")
+        created_cid = created_cid or f"swarm:{raw_name}"
+        model = str(args.get("model") or _resolve_swarm_default_model(raw_name))
+        register_station(created_cid, raw_name, parent_cid, model=model)
+        if rp:
+            sync_repo_brigade_station(rp, raw_name, created_cid, model=model)
+        return
+
+    if action == "model":
+        new_model = str(args.get("model") or "").strip()
+        if not new_model:
+            return
+        matched_cid = _update_swarm_station_records(raw_name, parent_cid, "model", new_model)
+        if rp and matched_cid:
+            sync_repo_brigade_station(rp, raw_name, matched_cid, model=new_model)
+        return
+
+    if action == "kill":
+        _update_swarm_station_records(raw_name, parent_cid, "status", "TERMINATED")
+
+
 def handle_post_tool(payload: dict) -> dict:
     is_afk, _ = is_afk_session(payload)
     if is_afk:
@@ -1638,7 +1838,49 @@ def handle_post_tool(payload: dict) -> dict:
             if rp:
                 sync_repo_brigade_station(rp, role, created_cid)
 
+    if tool_name == "swarm":
+        _handle_swarm_post_tool(payload, args, parent_cid)
+
     return {}
+
+
+def _resolve_active_tier_for_payload(payload: dict) -> str:
+    """Resolves active tier ('pro' or 'ultra') using payload cwd/workspace."""
+    repo = _resolve_repo_candidate(payload) or Path.cwd()
+    try:
+        from tools.brigade.tier import get_tier_status
+        tier_name = str(get_tier_status(repo).tier).strip().lower()
+        return tier_name if tier_name in ("pro", "ultra") else "pro"
+    except Exception:
+        return "pro"
+
+
+def _build_orchestrator_ephemeral_message(payload: dict) -> str:
+    """Constructs tier-aware Orchestrator protocol prompt (Pro Anti-Graveyard vs Ultra Swarm)."""
+    tier_name = _resolve_active_tier_for_payload(payload)
+    common_head = (
+        "- You do NOT write production source code (only Antigravity brain artifacts and `.edge/**` checkpoints are permitted).\n"
+        "- UI Visual Gate (`lavish-axi`): When SPEC_WRITER produces `.lavish/*.html`, present the active session URL to the human and run `lavish-axi poll <file>` in the background (WaitMsBeforeAsync: 1000, IsDaemon: false). Await user approval before advancing to SEAM_ARCHITECT.\n"
+    )
+    if tier_name == "ultra":
+        return (
+            "🚨 [EDGE ORCHESTRATOR ENFORCED — ULTRA SWARM MODE]: You are the Sovereign Commander (Orchestrator) in the Green Zone.\n"
+            + common_head
+            + "- Canonical Brigade Stations: SPEC_WRITER, RESEARCHER, SEAM_ARCHITECT, CODER, SURGEON, EXAMINER, QA_ENGINEER, SPEC_CRITIC.\n"
+            + "- Ultra Swarm-Native Station Dispatch Protocol: Use `swarm(action=\"add\", name=\"<role>\", model=\"<ssot_model>\", brief=\"...\")` "
+            + "governed by `tools/brigade/station_models.json` (canonical models: default `gemini-4-hydrogen-high`, `seam_architect`: `gemini-4-hydrogen-xhigh`, "
+            + "`spec_critic`: `claude-opus-5-5-high`, `qa_engineer`: `gemini-4-hydrogen-medium`, `examiner`: `fork=\"spec_writer\"`). "
+            + "Always reuse existing waiting/stopped swarm stations via `post_message` and read results via `read_board`. "
+            + "Spawning narrator or monitor daemons is strictly forbidden."
+        )
+    return (
+        "🚨 [EDGE ORCHESTRATOR ENFORCED]: You are the Sovereign Commander (Orchestrator) in the Green Zone.\n"
+        + common_head
+        + "- Canonical Brigade Stations: SPEC_WRITER, RESEARCHER, SEAM_ARCHITECT, CODER, SURGEON, EXAMINER, QA_ENGINEER.\n"
+        + "- Anti-Graveyard Protocol: ALWAYS check existing stations with `manage_subagents(Action: 'list')`. "
+        + "If an active station exists for the role, REUSE it via `send_message`. Only call `invoke_subagent` if no station exists yet.\n"
+        + "- Ultra Tier Note: Runtime switch to `Ultra Swarm-Native Station Dispatch Protocol` via `python3 tools/brigade/tier.py switch ultra` (branchless)."
+    )
 
 
 def handle_pre_invocation(payload: dict) -> dict:
@@ -1653,20 +1895,7 @@ def handle_pre_invocation(payload: dict) -> dict:
     role, source = detect_session_role(payload)
 
     if role == "ORCHESTRATOR":
-        return {
-            "injectSteps": [
-                {
-                    "ephemeralMessage": (
-                        "🚨 [EDGE ORCHESTRATOR ENFORCED]: You are the Sovereign Commander (Orchestrator) in the Green Zone.\n"
-                        "- You do NOT write production source code (only Antigravity brain artifacts and `.edge/**` checkpoints are permitted).\n"
-                        "- UI Visual Gate (`lavish-axi`): When SPEC_WRITER produces `.lavish/*.html`, present the active session URL to the human and run `lavish-axi poll <file>` in the background (WaitMsBeforeAsync: 1000, IsDaemon: false). Await user approval before advancing to SEAM_ARCHITECT.\n"
-                        "- Canonical Brigade Stations: SPEC_WRITER, RESEARCHER, SEAM_ARCHITECT, CODER, SURGEON, EXAMINER, QA_ENGINEER.\n"
-                        "- Anti-Graveyard Protocol: ALWAYS check existing stations with `manage_subagents(Action: 'list')`. "
-                        "If an active station exists for the role, REUSE it via `send_message`. Only call `invoke_subagent` if no station exists yet."
-                    )
-                }
-            ]
-        }
+        return {"injectSteps": [{"ephemeralMessage": _build_orchestrator_ephemeral_message(payload)}]}
     elif role == "QA_ENGINEER":
         return {
             "injectSteps": [

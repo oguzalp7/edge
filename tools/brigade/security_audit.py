@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from fnmatch import fnmatch
+import ast
 import hashlib
 import json
 import os
@@ -23,6 +24,8 @@ except ImportError:
 
 
 _AUDIT_EXTS = {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py"}
+_JS_TS_EXTS = {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"}
+_USE_SERVER_DIRECTIVE_RE = re.compile(r'^\s*["\']use server["\']\s*;?\s*$', re.MULTILINE)
 _IGNORED_DIRS = {".git", "node_modules", ".next", "dist", "build", ".edge", "__pycache__", "tests", "__tests__"}
 _VALID_VERDICTS = {"confirmed", "needs_validation", "rejected"}
 _VALID_SEVERITIES = {"CRITICAL", "HIGH", "MEDIUM", "LOW"}
@@ -38,7 +41,9 @@ _SQL_RAW_INTERP_RE = re.compile(r"sql\.raw\s*\([^)]*\$\{")
 _DANGEROUS_HTML_RE = re.compile(r"\bdangerouslySetInnerHTML\b")
 _HTML_SANITIZER_RE = re.compile(r"\b(?:DOMPurify|sanitize[A-Za-z0-9_]*)\b")
 _CMD_EXEC_RE = re.compile(r"(?:\bchild_process\.exec\s*\(|\bexecSync\s*\(|\bos\.system\s*\(|\bsubprocess\.run\s*\([^)]*shell\s*=\s*True)")
+_PY_CMD_EXEC_RE = re.compile(r"(?:\bos\.system\s*\(|\bsubprocess\.run\s*\([^)]*shell\s*=\s*True)")
 _EVAL_SINK_RE = re.compile(r"(?:\beval\s*\(|\bnew\s+Function\s*\()")
+_PY_EVAL_SINK_RE = re.compile(r"\beval\s*\(")
 _MATH_RANDOM_RE = re.compile(r"\bMath\.random\s*\(")
 _SEC_CTX_RE = re.compile(r"\b(?:token|secret|otp|password|key|salt|nonce|session|auth)\b", re.IGNORECASE)
 _HARDCODED_SECRET_RE = re.compile(r"(?:sk_live_[A-Za-z0-9_]+|ghp_[A-Za-z0-9]{10,}|AKIA[0-9A-Z]{16})")
@@ -251,7 +256,8 @@ def _git_diff_rel_files(repo: Path, base_ref: Optional[str]) -> Set[str]:
 
 
 def _classify_surface_and_boundary(rel: str, content: str) -> Tuple[str, str]:
-    if rel.startswith("src/actions/") or '"use server"' in content or "'use server'" in content:
+    is_js_ts = Path(rel).suffix.lower() in _JS_TS_EXTS
+    if rel.startswith("src/actions/") or (is_js_ts and bool(_USE_SERVER_DIRECTIVE_RE.search(content))):
         return "server_action", "auth_abac"
     if "/api/" in f"/{rel}":
         return "api_route", "auth_abac"
@@ -260,6 +266,76 @@ def _classify_surface_and_boundary(rel: str, content: str) -> Tuple[str, str]:
     if rel.endswith((".tsx", ".jsx")):
         return "component", "xss_sink"
     return "module", "boundary"
+
+
+def _ast_call_name(func_node: ast.AST) -> str:
+    if isinstance(func_node, ast.Name):
+        return func_node.id
+    if isinstance(func_node, ast.Attribute) and isinstance(func_node.value, ast.Name):
+        return f"{func_node.value.id}.{func_node.attr}"
+    return ""
+
+
+def _is_docstring_stmt(stmt: ast.stmt) -> bool:
+    return isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, str)
+
+
+def _collect_python_ast_exclusions(content: str) -> Optional[Set[int]]:
+    """Collects line ranges of re.compile / _make_finding calls and docstrings via Python AST."""
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return None
+    excluded: Set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and _ast_call_name(node.func) in ("re.compile", "_make_finding"):
+            excluded.update(range(node.lineno, (node.end_lineno or node.lineno) + 1))
+        elif isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and node.body:
+            if _is_docstring_stmt(node.body[0]):
+                doc = node.body[0]
+                excluded.update(range(doc.lineno, (doc.end_lineno or doc.lineno) + 1))
+    return excluded
+
+
+def _compute_js_excluded_lines(lines: List[str]) -> Set[int]:
+    """Excludes blank lines and // or /* ... */ comment lines in JS/TS files."""
+    excluded: Set[int] = set()
+    in_block = False
+    for idx, line in enumerate(lines, start=1):
+        stripped = line.strip()
+        if not stripped:
+            excluded.add(idx)
+            continue
+        if in_block:
+            excluded.add(idx)
+            if "*/" in stripped:
+                in_block = False
+            continue
+        if stripped.startswith("//"):
+            excluded.add(idx)
+        elif stripped.startswith("/*"):
+            if "*/" not in stripped[2:]:
+                excluded.add(idx)
+                in_block = True
+            elif stripped.endswith("*/"):
+                excluded.add(idx)
+    return excluded
+
+
+def _compute_excluded_lines(content: str, lines: List[str], is_python: bool) -> Set[int]:
+    """Computes 1-based line numbers to exclude (comments, blanks, Python regex/finding metadata, docstrings)."""
+    if not is_python:
+        return _compute_js_excluded_lines(lines)
+
+    ast_excl = _collect_python_ast_exclusions(content)
+    excluded: Set[int] = set(ast_excl) if ast_excl is not None else set()
+    for idx, line in enumerate(lines, start=1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            excluded.add(idx)
+        elif ast_excl is None and ("re.compile(" in line or "_make_finding(" in line):
+            excluded.add(idx)
+    return excluded
 
 
 def _make_finding(
@@ -306,12 +382,21 @@ def _enclosing_fn_ranges(lines: List[str]) -> Dict[int, Tuple[int, str]]:
     return mapping
 
 
-def _scan_abac_class(rel: str, content: str, lines: List[str], fn_map: Dict[int, Tuple[int, str]]) -> List[SecurityFinding]:
+def _scan_abac_class(
+    rel: str,
+    content: str,
+    lines: List[str],
+    fn_map: Dict[int, Tuple[int, str]],
+    excluded_lines: Optional[Set[int]] = None,
+) -> List[SecurityFinding]:
     surface, boundary = _classify_surface_and_boundary(rel, content)
     if surface not in ("server_action", "api_route"):
         return []
+    excl = excluded_lines or set()
     findings: List[SecurityFinding] = []
     for idx, line in enumerate(lines, start=1):
+        if idx in excl:
+            continue
         fn_start, fn_name = fn_map[idx]
         if _PRIV_BYPASS_RE.search(line):
             findings.append(_make_finding(
@@ -335,9 +420,17 @@ def _scan_abac_class(rel: str, content: str, lines: List[str], fn_map: Dict[int,
     return findings
 
 
-def _scan_data_isolation_class(rel: str, lines: List[str], fn_map: Dict[int, Tuple[int, str]]) -> List[SecurityFinding]:
+def _scan_data_isolation_class(
+    rel: str,
+    lines: List[str],
+    fn_map: Dict[int, Tuple[int, str]],
+    excluded_lines: Optional[Set[int]] = None,
+) -> List[SecurityFinding]:
+    excl = excluded_lines or set()
     findings: List[SecurityFinding] = []
     for idx, line in enumerate(lines, start=1):
+        if idx in excl:
+            continue
         m_mut = _DATA_MUTATION_RE.search(line)
         if not m_mut:
             continue
@@ -350,35 +443,81 @@ def _scan_data_isolation_class(rel: str, lines: List[str], fn_map: Dict[int, Tup
     return findings
 
 
-def _scan_injection_class(rel: str, content: str, lines: List[str], fn_map: Dict[int, Tuple[int, str]]) -> List[SecurityFinding]:
+def _scan_js_injection_line(
+    rel: str,
+    idx: int,
+    line: str,
+    fn_name: str,
+    has_sanitizer: bool,
+) -> List[SecurityFinding]:
     findings: List[SecurityFinding] = []
-    has_sanitizer = bool(_HTML_SANITIZER_RE.search(content))
-    for idx, line in enumerate(lines, start=1):
-        _, fn_name = fn_map[idx]
-        if _SQL_RAW_INTERP_RE.search(line):
-            findings.append(_make_finding("INJECTION_AND_SINKS", "confirmed", "CRITICAL", rel, idx, fn_name, "sql.raw(${...})", line, "sql_sink"))
-        if _DANGEROUS_HTML_RE.search(line):
-            if has_sanitizer:
-                findings.append(_make_finding(
-                    "INJECTION_AND_SINKS", "rejected", None, rel, idx, fn_name, "dangerouslySetInnerHTML", line, "xss_sink",
-                    rejection_reason="Refuted: sanitizer (DOMPurify/sanitize) verified in file",
-                ))
-            else:
-                findings.append(_make_finding("INJECTION_AND_SINKS", "confirmed", "HIGH", rel, idx, fn_name, "dangerouslySetInnerHTML", line, "xss_sink"))
-        if _CMD_EXEC_RE.search(line) or _EVAL_SINK_RE.search(line):
-            sev = "CRITICAL" if _CMD_EXEC_RE.search(line) else "HIGH"
-            sink_lbl = "shell_exec" if _CMD_EXEC_RE.search(line) else "eval_sink"
-            findings.append(_make_finding("INJECTION_AND_SINKS", "confirmed", sev, rel, idx, fn_name, sink_lbl, line, "exec_sink"))
+    if _SQL_RAW_INTERP_RE.search(line):
+        findings.append(_make_finding("INJECTION_AND_SINKS", "confirmed", "CRITICAL", rel, idx, fn_name, "sql.raw(${...})", line, "sql_sink"))
+    if _DANGEROUS_HTML_RE.search(line):
+        if has_sanitizer:
+            findings.append(_make_finding(
+                "INJECTION_AND_SINKS", "rejected", None, rel, idx, fn_name, "dangerouslySetInnerHTML", line, "xss_sink",
+                rejection_reason="Refuted: sanitizer (DOMPurify/sanitize) verified in file",
+            ))
+        else:
+            findings.append(_make_finding("INJECTION_AND_SINKS", "confirmed", "HIGH", rel, idx, fn_name, "dangerouslySetInnerHTML", line, "xss_sink"))
     return findings
 
 
-def _scan_crypto_class(rel: str, lines: List[str], fn_map: Dict[int, Tuple[int, str]]) -> List[SecurityFinding]:
+def _scan_injection_line(
+    rel: str,
+    idx: int,
+    line: str,
+    fn_name: str,
+    has_sanitizer: bool,
+    is_python: bool,
+) -> List[SecurityFinding]:
+    findings = [] if is_python else _scan_js_injection_line(rel, idx, line, fn_name, has_sanitizer)
+    cmd_re = _PY_CMD_EXEC_RE if is_python else _CMD_EXEC_RE
+    eval_re = _PY_EVAL_SINK_RE if is_python else _EVAL_SINK_RE
+    is_cmd = bool(cmd_re.search(line))
+    if is_cmd or eval_re.search(line):
+        sev = "CRITICAL" if is_cmd else "HIGH"
+        sink_lbl = "shell_exec" if is_cmd else "eval_sink"
+        findings.append(_make_finding("INJECTION_AND_SINKS", "confirmed", sev, rel, idx, fn_name, sink_lbl, line, "exec_sink"))
+    return findings
+
+
+def _scan_injection_class(
+    rel: str,
+    content: str,
+    lines: List[str],
+    fn_map: Dict[int, Tuple[int, str]],
+    excluded_lines: Optional[Set[int]] = None,
+    is_python: bool = False,
+) -> List[SecurityFinding]:
+    excl = excluded_lines or set()
+    findings: List[SecurityFinding] = []
+    has_sanitizer = bool(_HTML_SANITIZER_RE.search(content))
+    for idx, line in enumerate(lines, start=1):
+        if idx in excl:
+            continue
+        _, fn_name = fn_map[idx]
+        findings.extend(_scan_injection_line(rel, idx, line, fn_name, has_sanitizer, is_python))
+    return findings
+
+
+def _scan_crypto_class(
+    rel: str,
+    lines: List[str],
+    fn_map: Dict[int, Tuple[int, str]],
+    excluded_lines: Optional[Set[int]] = None,
+    is_python: bool = False,
+) -> List[SecurityFinding]:
+    excl = excluded_lines or set()
     findings: List[SecurityFinding] = []
     for idx, line in enumerate(lines, start=1):
+        if idx in excl:
+            continue
         _, fn_name = fn_map[idx]
         if _HARDCODED_SECRET_RE.search(line):
             findings.append(_make_finding("CRYPTO_AND_SECRETS", "confirmed", "CRITICAL", rel, idx, fn_name, "hardcoded_secret", line, "secret_literal"))
-        if _MATH_RANDOM_RE.search(line):
+        if not is_python and _MATH_RANDOM_RE.search(line):
             win = " ".join(lines[max(0, idx - 3) : min(len(lines), idx + 3)]) + f" {fn_name}"
             if _SEC_CTX_RE.search(win):
                 findings.append(_make_finding("CRYPTO_AND_SECRETS", "confirmed", "HIGH", rel, idx, fn_name, "Math.random()", line, "crypto_prng"))
@@ -388,12 +527,14 @@ def _scan_crypto_class(rel: str, lines: List[str], fn_map: Dict[int, Tuple[int, 
 def _scan_single_file(rel: str, path: Path) -> List[SecurityFinding]:
     content = path.read_text(encoding="utf-8", errors="ignore")
     lines = content.splitlines()
+    is_python = Path(rel).suffix.lower() == ".py"
+    excluded_lines = _compute_excluded_lines(content, lines, is_python)
     fn_map = _enclosing_fn_ranges(lines)
     found: List[SecurityFinding] = []
-    found.extend(_scan_abac_class(rel, content, lines, fn_map))
-    found.extend(_scan_data_isolation_class(rel, lines, fn_map))
-    found.extend(_scan_injection_class(rel, content, lines, fn_map))
-    found.extend(_scan_crypto_class(rel, lines, fn_map))
+    found.extend(_scan_abac_class(rel, content, lines, fn_map, excluded_lines))
+    found.extend(_scan_data_isolation_class(rel, lines, fn_map, excluded_lines))
+    found.extend(_scan_injection_class(rel, content, lines, fn_map, excluded_lines, is_python))
+    found.extend(_scan_crypto_class(rel, lines, fn_map, excluded_lines, is_python))
     return found
 
 

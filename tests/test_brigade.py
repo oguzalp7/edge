@@ -7628,6 +7628,61 @@ class TestEvidenceFirstReviewAndShipBridge(unittest.TestCase):
             self.assertEqual(rc_sec, 0)
             self.assertTrue(cli_buf.getvalue().startswith("security_audit["))
 
+    # ------------------------------------------------------------------
+    # SPEC-EDGE-BRIGADE-011 (AC-2 & AC-4): Unified Stations Swarm Dispatch & Security Self-Match Fix
+    # ------------------------------------------------------------------
+
+    def test_unified_stations_swarm_dispatch_and_doorbell_handoffs(self):
+        stations_mod = importlib.import_module("tools.brigade.stations")
+
+        resolve_fn = getattr(stations_mod, "resolve_default_station_model", None)
+        directive_fn = getattr(stations_mod, "build_swarm_dispatch_directive", None)
+        self.assertIsNotNone(resolve_fn, "tools.brigade.stations must define resolve_default_station_model")
+        self.assertIsNotNone(directive_fn, "tools.brigade.stations must define build_swarm_dispatch_directive")
+
+        self.assertEqual(resolve_fn("seam_architect", tier="ultra"), "gemini-4-hydrogen-xhigh")
+        self.assertEqual(resolve_fn("coder", tier="pro"), "flash")
+        self.assertEqual(resolve_fn("spec_critic", tier="pro"), "gemini-3.8-flash-high")
+
+        examiner_dir = directive_fn("examiner", "Audit PR")
+        self.assertEqual(examiner_dir.get("action"), "add")
+        self.assertEqual(examiner_dir.get("name"), "examiner")
+        self.assertEqual(examiner_dir.get("model"), "gemini-4-hydrogen-high")
+        self.assertEqual(examiner_dir.get("brief"), "Audit PR")
+        self.assertEqual(examiner_dir.get("fork"), "spec_writer")
+
+        coder_dir = directive_fn("coder", "Implement slice", model="claude-opus-5-5-high")
+        self.assertEqual(coder_dir.get("model"), "claude-opus-5-5-high")
+        self.assertNotIn("fork", coder_dir)
+
+        roster_text = StationRegistry.format_kitchen_roster({
+            "coder": Station(role="coder", conversation_id="cid-1", name="Coder Station", status="IDLE"),
+        })
+        self.assertIn("send_message", roster_text)
+        self.assertIn("post_message", roster_text)
+        self.assertIn("@<role>", roster_text)
+
+    def test_security_audit_zero_self_match_on_security_audit_py(self):
+        sec_mod = importlib.import_module("tools.brigade.security_audit")
+
+        with tempfile.TemporaryDirectory() as tmp_out:
+            out_dir = Path(tmp_out)
+            report = sec_mod.run_security_audit(
+                self.repo_root,
+                scopes=["tools/brigade/security_audit.py"],
+                out_dir=out_dir,
+            )
+            self.assertTrue(report.passed, f"Expected security_audit.py to have 0 self-matches, got: {report.findings}")
+            self.assertEqual(report.confirmed_count, 0)
+            self.assertEqual(report.rejected_count, 0)
+            self.assertEqual(len(report.findings), 0)
+
+            ledger = json.loads((out_dir / "coverage-ledger.json").read_text(encoding="utf-8"))
+            units = {u["file_path"]: u for u in ledger.get("units", [])}
+            self.assertIn("tools/brigade/security_audit.py", units)
+            self.assertEqual(units["tools/brigade/security_audit.py"]["status"], "covered")
+            self.assertNotEqual(units["tools/brigade/security_audit.py"]["surface"], "server_action")
+
 
 if __name__ == "__main__":
     unittest.main()

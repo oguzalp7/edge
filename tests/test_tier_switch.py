@@ -266,9 +266,15 @@ def test_get_tier_status_reads_persisted_file(tmp_path):
 
 
 def test_switch_tier_to_ultra_creates_branch_and_updates_state(tmp_path):
-    """Validates switching from Pro to Ultra: creates branch, checks it out, and writes state atomically."""
+    """Validates branchless default (checkout=False) and opt-in legacy checkout (checkout=True) for Ultra."""
     assert tier is not None, "tools.brigade.tier module must be implemented"
+    import inspect
 
+    sig = inspect.signature(switch_tier)
+    assert "checkout" in sig.parameters, "switch_tier must accept checkout: bool = False"
+    assert sig.parameters["checkout"].default is False
+
+    # 1. Default branchless mode (checkout=False): preserves active branch 'main'
     repo = create_mock_git_repo(tmp_path / "repo_switch", branch="main")
     state_file = tmp_path / "edge_tier.json"
 
@@ -277,85 +283,117 @@ def test_switch_tier_to_ultra_creates_branch_and_updates_state(tmp_path):
     assert ok is True
     assert "Edge Execution Tier: ULTRA" in card
     assert state.tier == "ultra"
-    assert state.branch == "ultra"
+    assert state.branch == "main"
     assert state.transport == "swarm"
     assert state.station_models == ULTRA_STATION_MODELS
+    assert get_current_branch(repo) == "main"
 
-    # Verify git working tree branch
-    assert get_current_branch(repo) == "ultra"
-
-    # Verify persisted state file on disk
     assert state_file.is_file()
     disk_data = json.loads(state_file.read_text(encoding="utf-8"))
     assert disk_data["tier"] == "ultra"
     assert disk_data["transport"] == "swarm"
 
+    # 2. Opt-in legacy checkout=True: creates and checks out 'ultra' branch
+    repo_legacy = create_mock_git_repo(tmp_path / "repo_switch_legacy", branch="main")
+    state_file_legacy = tmp_path / "edge_tier_legacy.json"
+    ok_leg, _, state_leg = switch_tier(repo_legacy, "ultra", state_path=state_file_legacy, checkout=True)
+    assert ok_leg is True
+    assert state_leg.tier == "ultra"
+    assert state_leg.branch == "ultra"
+    assert get_current_branch(repo_legacy) == "ultra"
+
 
 def test_switch_tier_to_pro_switches_to_main_and_updates_state(tmp_path):
-    """Validates switching from Ultra back to Pro: checks out main and writes Pro state."""
+    """Validates branchless Pro switch and opt-in checkout=True back to main."""
     assert tier is not None, "tools.brigade.tier module must be implemented"
+    import inspect
 
-    repo = create_mock_git_repo(tmp_path / "repo_switch_back", branch="main")
+    sig = inspect.signature(switch_tier)
+    assert "checkout" in sig.parameters, "switch_tier must accept checkout: bool = False"
+
+    # 1. Default branchless mode preserves current feature branch
+    repo = create_mock_git_repo(tmp_path / "repo_switch_back", branch="feat/my-work")
     state_file = tmp_path / "edge_tier.json"
 
-    # First switch to ultra
     ok1, _, _ = switch_tier(repo, "ultra", state_path=state_file)
     assert ok1 is True
-    assert get_current_branch(repo) == "ultra"
+    assert get_current_branch(repo) == "feat/my-work"
 
-    # Now switch back to pro
     ok2, card, state = switch_tier(repo, "pro", state_path=state_file)
     assert ok2 is True
     assert "Edge Execution Tier: PRO" in card
     assert state.tier == "pro"
-    assert state.branch == "main"
+    assert state.branch == "feat/my-work"
     assert state.transport == "invoke_subagent"
     assert state.station_models == PRO_STATION_MODELS
+    assert get_current_branch(repo) == "feat/my-work"
 
-    # Verify git working tree branch
-    assert get_current_branch(repo) == "main"
-
-    # Verify persisted state file on disk
     disk_data = json.loads(state_file.read_text(encoding="utf-8"))
     assert disk_data["tier"] == "pro"
     assert disk_data["transport"] == "invoke_subagent"
 
+    # 2. Opt-in checkout=True switches ultra -> main
+    repo_leg = create_mock_git_repo(tmp_path / "repo_switch_back_legacy", branch="main")
+    state_leg = tmp_path / "edge_tier_back_legacy.json"
+    ok_u, _, _ = switch_tier(repo_leg, "ultra", state_path=state_leg, checkout=True)
+    assert ok_u is True
+    assert get_current_branch(repo_leg) == "ultra"
+
+    ok_p, _, state_p = switch_tier(repo_leg, "pro", state_path=state_leg, checkout=True)
+    assert ok_p is True
+    assert state_p.tier == "pro"
+    assert state_p.branch == "main"
+    assert get_current_branch(repo_leg) == "main"
+
 
 def test_switch_tier_blocked_by_dirty_tracked_files(tmp_path):
     """
-    Clean Working Tree Invariant:
-    A tier switch must be blocked if uncommitted tracked files outside .edge/ are present.
+    Branchless mode (checkout=False) succeeds even with dirty tracked files and NEVER calls git checkout;
+    explicit checkout=True still enforces Clean Working Tree Invariant.
     """
     assert tier is not None, "tools.brigade.tier module must be implemented"
+    import inspect
+    from unittest.mock import patch
+
+    sig = inspect.signature(switch_tier)
+    assert "checkout" in sig.parameters, "switch_tier must accept checkout: bool = False"
 
     repo = create_mock_git_repo(tmp_path / "repo_dirty", branch="main")
     state_file = tmp_path / "edge_tier.json"
 
-    # Mutate tracked file README.md
     readme = repo / "README.md"
     readme.write_text("# Mock Repository - Modified!\n", encoding="utf-8")
 
-    ok, err_msg, state = switch_tier(repo, "ultra", state_path=state_file)
+    # 1. Default branchless mode: succeeds on dirty working tree without calling git checkout
+    with patch.object(tier, "_checkout_git_branch", side_effect=AssertionError("git checkout must not be called")) as _:
+        ok_bl, _, state_bl = switch_tier(repo, "ultra", state_path=state_file)
+    assert ok_bl is True
+    assert state_bl.tier == "ultra"
+    assert get_current_branch(repo) == "main"
 
+    # 2. Explicit checkout=True: blocked by dirty tracked file
+    state_file_leg = tmp_path / "edge_tier_dirty_leg.json"
+    ok, err_msg, _ = switch_tier(repo, "ultra", state_path=state_file_leg, checkout=True)
     assert ok is False
     assert "README.md" in err_msg or "uncommitted tracked changes" in err_msg.lower()
-    # Branch must remain unchanged
     assert get_current_branch(repo) == "main"
-    # State file must not be modified to ultra
-    assert not state_file.is_file()
+    assert not state_file_leg.is_file()
 
 
 def test_switch_tier_allows_dirty_edge_and_untracked_files(tmp_path):
     """
     Dirty Tolerance Invariant:
-    Modifications inside .edge/ and untracked files (??) must NEVER block a tier switch.
+    Modifications inside .edge/ and untracked files (??) succeed in both branchless and checkout=True modes.
     """
     assert tier is not None, "tools.brigade.tier module must be implemented"
+    import inspect
+
+    sig = inspect.signature(switch_tier)
+    assert "checkout" in sig.parameters, "switch_tier must accept checkout: bool = False"
 
     repo = create_mock_git_repo(tmp_path / "repo_edge_dirty", branch="main")
     state_file = tmp_path / "edge_tier.json"
 
-    # Create tracked file in .edge/ and modify it
     edge_dir = repo / ".edge"
     edge_dir.mkdir(parents=True, exist_ok=True)
     brigade_json = edge_dir / "brigade.json"
@@ -363,15 +401,16 @@ def test_switch_tier_allows_dirty_edge_and_untracked_files(tmp_path):
     subprocess.run(["git", "add", ".edge/brigade.json"], cwd=str(repo), check=True, capture_output=True)
     subprocess.run(["git", "commit", "-m", "Add .edge state"], cwd=str(repo), check=True, capture_output=True)
 
-    # Now dirty .edge/brigade.json
     brigade_json.write_text('{"state": "MUTATED_UNCOMMITTED"}\n', encoding="utf-8")
-
-    # Add an untracked scratch file
     scratch = repo / "scratch_notes.txt"
     scratch.write_text("temporary scratch notes\n", encoding="utf-8")
 
-    ok, card, state = switch_tier(repo, "ultra", state_path=state_file)
+    ok_bl, _, state_bl = switch_tier(repo, "ultra", state_path=state_file)
+    assert ok_bl is True
+    assert state_bl.tier == "ultra"
+    assert get_current_branch(repo) == "main"
 
+    ok, _, state = switch_tier(repo, "ultra", state_path=state_file, checkout=True)
     assert ok is True
     assert state.tier == "ultra"
     assert get_current_branch(repo) == "ultra"
@@ -572,3 +611,84 @@ def test_skills_edge_pro_and_ultra_definitions():
     assert "name: edge-ultra" in ultra_content
     assert "description:" in ultra_content
     assert "switch ultra" in ultra_content
+    assert "station_models.json" in ultra_content
+    assert "--checkout" in ultra_content
+    assert "set-model" in ultra_content
+
+    assert "station_models.json" in pro_content
+    assert "--checkout" in pro_content
+
+
+# =========================================================================
+# 9. SPEC-EDGE-BRIGADE-011 (AC-1): SSOT station_models.json & set_station_model
+# =========================================================================
+
+
+def test_station_models_ssot_load_and_apply_effort(tmp_path):
+    """Validates station_models.json SSOT schema, load_ssot_station_config, and apply_effort_to_model."""
+    assert tier is not None, "tools.brigade.tier module must be implemented"
+
+    ssot_file = REPO_ROOT / "tools" / "brigade" / "station_models.json"
+    assert ssot_file.is_file(), "tools/brigade/station_models.json SSOT must exist"
+
+    ssot_data = json.loads(ssot_file.read_text(encoding="utf-8"))
+    assert ssot_data.get("default_tier") == "pro"
+    assert ssot_data["tiers"]["ultra"]["branch"] == "main"
+    assert ssot_data["tiers"]["ultra"]["transport"] == "swarm"
+    assert ssot_data["tiers"]["ultra"]["stations"]["examiner"]["fork"] == "spec_writer"
+    assert ssot_data["tiers"]["pro"]["branch"] == "main"
+    assert ssot_data["tiers"]["pro"]["transport"] == "invoke_subagent"
+
+    load_fn = getattr(tier, "load_ssot_station_config", None)
+    apply_fn = getattr(tier, "apply_effort_to_model", None)
+    assert load_fn is not None, "tools.brigade.tier must define load_ssot_station_config"
+    assert apply_fn is not None, "tools.brigade.tier must define apply_effort_to_model"
+
+    ultra_cfg = load_fn("ultra", ssot_path=ssot_file)
+    assert ultra_cfg["seam_architect"]["model"] == "gemini-4-hydrogen-xhigh"
+    assert ultra_cfg["examiner"]["fork"] == "spec_writer"
+
+    pro_cfg = load_fn("pro", ssot_path=ssot_file)
+    assert pro_cfg["coder"]["model"] == "flash"
+    assert pro_cfg["spec_critic"]["model"] == "gemini-3.8-flash-high"
+
+    assert apply_fn("gemini-4-hydrogen", "xhigh") == "gemini-4-hydrogen-xhigh"
+    assert apply_fn("gemini-4-hydrogen-high", "xhigh") == "gemini-4-hydrogen-xhigh"
+    assert apply_fn("flash", "high") == "flash"
+    assert apply_fn("gemini-4-hydrogen-high", None) == "gemini-4-hydrogen-high"
+
+
+def test_set_station_model_updates_ssot_and_syncs_matching_tier_only(tmp_path):
+    """Validates set_station_model updates station_models.json and syncs edge_tier.json only when tier matches."""
+    assert tier is not None, "tools.brigade.tier module must be implemented"
+
+    set_fn = getattr(tier, "set_station_model", None)
+    assert set_fn is not None, "tools.brigade.tier must define set_station_model"
+
+    ssot_src = REPO_ROOT / "tools" / "brigade" / "station_models.json"
+    assert ssot_src.is_file(), "tools/brigade/station_models.json SSOT must exist"
+
+    ssot_copy = tmp_path / "station_models.json"
+    ssot_copy.write_text(ssot_src.read_text(encoding="utf-8"), encoding="utf-8")
+
+    # Active tier is 'pro' -> configuring 'ultra' must NOT overwrite active pro state
+    state_file = tmp_path / "edge_tier.json"
+    state_file.write_text(
+        json.dumps(TierState("pro", "main", "invoke_subagent", dict(PRO_STATION_MODELS), "2026-11-20T00:00:00Z").to_dict()),
+        encoding="utf-8",
+    )
+
+    ok_u, _ = set_fn("coder", "gemini-4-hydrogen", effort="xhigh", tier="ultra", ssot_path=ssot_copy, state_path=state_file)
+    assert ok_u is True
+    updated_ssot = json.loads(ssot_copy.read_text(encoding="utf-8"))
+    assert updated_ssot["tiers"]["ultra"]["stations"]["coder"]["model"] == "gemini-4-hydrogen-xhigh"
+    assert json.loads(state_file.read_text(encoding="utf-8"))["station_models"]["coder"] == "flash"
+
+    # Active tier is 'ultra' -> configuring 'ultra' syncs edge_tier.json atomically
+    state_file.write_text(
+        json.dumps(TierState("ultra", "main", "swarm", dict(ULTRA_STATION_MODELS), "2026-11-20T00:00:00Z").to_dict()),
+        encoding="utf-8",
+    )
+    ok_sync, _ = set_fn("coder", "gemini-4-hydrogen", effort="medium", tier="ultra", ssot_path=ssot_copy, state_path=state_file)
+    assert ok_sync is True
+    assert json.loads(state_file.read_text(encoding="utf-8"))["station_models"]["coder"] == "gemini-4-hydrogen-medium"
