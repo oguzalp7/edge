@@ -193,18 +193,20 @@ npm run test:unit
 ```
 If any compilation or test failure occurs, revert and fix immediately before continuing.
 
-### Step 6: Edge Verification Gate & Ledger Update
-1. **Run Edge Verification Gate:**
-   Run the deterministic verification gate (`MigrationGate` + `Max CC Non-Regression` + `Layer Leakage Gate`):
+### Step 6: Edge Verification Gate, 4-Seal `RefactorReceipt` & Ledger Update
+1. **Run Edge Verification Gate (`--format json`):**
+   Run the deterministic verification gate (`MigrationGate` + `Max CC Non-Regression` + `Layer Leakage Gate` + `Differential SDL`):
    ```bash
-   python3 tools/gate.py /home/oguz/MS-Randevu-monolith --base HEAD~1 --track core
+   python3 tools/gate.py /home/oguz/MS-Randevu-monolith --base HEAD~1 --track core --format json
    ```
+   Missing analyzers (such as `tree-sitter`) emit `null` for `dryer_clones` — never `0`.
 
-2. **Verify Ledger Status & Hillclimbing Monotonicity:**
+2. **Seal 4-Seal `RefactorReceipt` & Verify Ledger Status:**
    ```bash
+   python3 tools/brigade/cli.py seal-refactor /home/oguz/MS-Randevu-monolith --base development
    python3 tools/radar/cli.py status /home/oguz/MS-Randevu-monolith
    ```
-   Ensure the targeted finding in `.edge/ledger/core.json` is resolved and `health_score` is improved ($\text{Score}_{t+1} \ge \text{Score}_t$).
+   Ensure the 4-seal receipt at `.edge/receipts/refactor/<slug>.{json,md}` passes `RefactorReceiptVerifier` (`commit_sha`, `changed_files_hash`, non-null `metric_targets`, `ExaminerReceipt PASS` with distinct `examiner_cid != surgeon_cid`).
 
 3. **Commit & Submit:**
    Create a clean, atomic micro-commit following Conventional Commits:

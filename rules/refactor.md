@@ -34,5 +34,8 @@ Bu doküman, otonom ve yarı-otonom refaktör görevlerini icra eden tüm alt-aj
    * **`Layer Leakage Gate`:** Action/controller dosyalarında (`src/actions/**`, `app/actions/**`, `*/actions/*.ts*`) doğrudan DB sızıntısı (`db.select`, `db.insert`, `db.update`, `db.delete`, `db.transaction`, `db.query`) artamaz (`after_leaks <= before_leaks`) ve yeni action dosyalarında `0` olmalıdır.
 5. **Tip Güvenliği ve Standart Uyumu:**
    * Projenin `coding_standards.md` dosyasına riayet edilir; `any` veya gevşek tip kaçamakları yasaktır.
-6. **Kapı Kontrolü (Gate Execution):**
-   * Değişiklik bittiğinde `python tools/gate.py <repo>` ve görsel regresyon kontrolleri (UI için) 0 exit code ile geçmelidir.
+6. **Kapı Kontrolü ve 4-Mühürlü `RefactorReceipt` (Gate & Receipt):**
+   * Refaktör bileti `brigade create-refactor-ticket` veya `radar export-tasks` ile `target_repo/.edge/tickets/refactor/<slug>.md` altında (+ opsiyonel `tasks-axi`) oluşturulur.
+   * Değişiklik bittiğinde `python3 tools/gate.py <repo> --format json` (eksik analizörlerde `null`, asla `0` değil) ve görsel regresyon kontrolleri (UI için `<= 0.15%`) 0 exit code ile geçmelidir.
+   * `brigade advance` (`GATE -> REVIEW -> STAGING`) veya `brigade seal-refactor` ile `(commit_sha, changed_files_hash)` bağlı 4-mühürlü `RefactorReceipt` (`.edge/receipts/refactor/<slug>.{json,md}`) üretilir; `examiner_cid != surgeon_cid` nötrlüğü zorunludur.
+   * `brigade finish-slice <repo> --pr` One-Way Door tetikleyicilerini (export API kırılması, auth segmentleri, `>15` dosya veya `>500` satır) açık tutar; Two-Way Door auto-merge kuyruklandığında `AWAITING_MERGE` durumuna geçer ve `brigade confirm-merge <repo>` ile `tasks-axi done` + `IDLE` dönüşü tamamlanır.

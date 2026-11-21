@@ -867,5 +867,249 @@ class TestDeterministicOmissionAndSafetyGates(_HermeticGitRepoTestCase):
         )
 
 
+class TestGateStructuredJsonAndMetrics(_HermeticGitRepoTestCase):
+    """AC-2 RED contract tests for GateResult.metrics, run_all_structured, null dryer_clones, and pure --format json."""
+
+    def _head_sha(self) -> str:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=self.repo_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return proc.stdout.strip()
+
+    def test_gate_result_metrics_defaults_to_empty_dict_and_run_all_returns_bool(self) -> None:
+        default_res = GateResult(0, "Stage", True, "ok")
+        self.assertTrue(hasattr(default_res, "metrics"), "GateResult must expose a .metrics attribute")
+        self.assertEqual(default_res.metrics, {})
+
+        custom_res = GateResult(1, "Stage", True, "ok", metrics={"max_cc": 4})
+        self.assertEqual(custom_res.metrics, {"max_cc": 4})
+
+        self._write_and_commit({"src/core/clean.ts": "export const ok = 1;\n"}, "chore: init")
+        with redirect_stdout(io.StringIO()):
+            passed = self.gate.run_all(base_ref="HEAD", is_refactor=True, skip_verification=True, track="core")
+        self.assertIs(type(passed), bool)
+        self.assertTrue(passed)
+
+    def test_run_all_structured_returns_contract_shape_silences_stdout_and_scopes_changed_files(self) -> None:
+        # Commit 1: unrelated legacy file with type escape, high CC, and large SLOC
+        self._write_and_commit(
+            {
+                "src/lib/unrelated_legacy.ts": (
+                    "export function legacyHuge(x: unknown): number {\n"
+                    "    const unsafe = x as any;\n"
+                    + "".join(f"    if (unsafe === {i}) return {i + 1};\n" for i in range(15))
+                    + "    return 0;\n}\n"
+                ),
+            },
+            "chore: add unrelated legacy file",
+        )
+        # Commit 2: clean refactor file only
+        self._write_and_commit(
+            {
+                "src/actions/booking.ts": (
+                    "export function normalizeGuestName(name: string): string {\n"
+                    "    if (!name.trim()) {\n"
+                    "        return 'Guest';\n"
+                    "    }\n"
+                    "    return name.trim();\n"
+                    "}\n"
+                ),
+            },
+            "refactor: clean booking action",
+        )
+
+        self.assertTrue(
+            hasattr(self.gate, "run_all_structured"),
+            "EdgeVerificationGate must define run_all_structured",
+        )
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            payload = self.gate.run_all_structured(
+                base_ref="HEAD~1",
+                is_refactor=True,
+                skip_verification=True,
+                track="core",
+            )
+
+        self.assertEqual(buf.getvalue(), "", "run_all_structured must capture/silence console stdout")
+        self.assertIsInstance(payload, dict)
+        for key in ("track", "base_ref", "commit_sha", "all_passed", "stages", "metrics"):
+            self.assertIn(key, payload, f"run_all_structured payload missing key '{key}'")
+
+        self.assertEqual(payload["track"], "core")
+        self.assertEqual(payload["base_ref"], "HEAD~1")
+        self.assertEqual(payload["commit_sha"], self._head_sha())
+        self.assertTrue(payload["all_passed"])
+        self.assertIsInstance(payload["stages"], list)
+        self.assertGreater(len(payload["stages"]), 0)
+
+        metrics = payload["metrics"]
+        self.assertIsInstance(metrics, dict)
+        for mkey in ("db_leaks", "max_cc", "dryer_clones", "type_score", "sloc"):
+            self.assertIn(mkey, metrics, f"metrics dict missing key '{mkey}'")
+
+        # Changed-file scoping: unrelated_legacy.ts (CC=16, as any, >18 SLOC) must NOT contaminate metrics
+        self.assertEqual(metrics["db_leaks"], 0)
+        self.assertIsNotNone(metrics["max_cc"])
+        self.assertLessEqual(metrics["max_cc"], 10)
+        self.assertIsNotNone(metrics["type_score"])
+        self.assertGreaterEqual(metrics["type_score"], 95)
+        self.assertIsNotNone(metrics["sloc"])
+        self.assertGreater(metrics["sloc"], 0)
+        self.assertLess(metrics["sloc"], 20)
+
+    def test_run_all_structured_scopes_dryer_to_resolved_changed_files(self) -> None:
+        from tools.audit import dryer as dryer_mod
+
+        self._write_and_commit(
+            {"src/lib/untouched.ts": "export function untouched() { return 1; }\n"},
+            "chore: add untouched file",
+        )
+        self._write_and_commit(
+            {"src/core/clean.ts": "export function clean(v: number): number { return v + 1; }\n"},
+            "refactor: touch clean.ts only",
+        )
+
+        scan_calls: list[tuple[Path, list[str] | None]] = []
+
+        class FakeDryerScanner:
+            def __init__(self, *args, **kwargs) -> None:
+                pass
+
+            def scan_path(self, target_path, scoped_files=None):
+                scan_calls.append((Path(target_path), list(scoped_files) if scoped_files is not None else None))
+                return [MagicMock()]
+
+            def cluster_clones(self, pairs):
+                return [MagicMock()] if pairs else []
+
+        with (
+            patch.object(dryer_mod, "TREE_SITTER_AVAILABLE", True),
+            patch.object(gate_mod, "TREE_SITTER_AVAILABLE", True),
+            patch.object(dryer_mod, "DryerScanner", FakeDryerScanner),
+            redirect_stdout(io.StringIO()),
+        ):
+            payload = self.gate.run_all_structured(
+                base_ref="HEAD~1",
+                is_refactor=True,
+                skip_verification=True,
+                track="core",
+            )
+
+        self.assertTrue(scan_calls, "DryerScanner.scan_path should be invoked when TREE_SITTER_AVAILABLE is True")
+        _, scoped = scan_calls[0]
+        self.assertIsNotNone(scoped, "DryerScanner.scan_path must receive scoped_files for changed files")
+        resolved_clean = str((self.repo_path / "src" / "core" / "clean.ts").resolve())
+        resolved_untouched = str((self.repo_path / "src" / "lib" / "untouched.ts").resolve())
+        norm_scoped = [str(Path(p).resolve()) for p in scoped]
+        self.assertIn(resolved_clean, norm_scoped)
+        self.assertNotIn(resolved_untouched, norm_scoped)
+        self.assertIsInstance(payload["metrics"]["dryer_clones"], int)
+        self.assertGreaterEqual(payload["metrics"]["dryer_clones"], 1)
+
+    def test_run_all_structured_missing_tree_sitter_emits_null_dryer_clones(self) -> None:
+        from tools.audit import dryer as dryer_mod
+
+        self._write_and_commit({"README.md": "# Init\n"}, "chore: init")
+        self._write_and_commit(
+            {"src/core/clean.ts": "export function clean(v: number): number { return v + 1; }\n"},
+            "refactor: update clean.ts",
+        )
+
+        with (
+            patch.object(dryer_mod, "TREE_SITTER_AVAILABLE", False),
+            patch.object(gate_mod, "TREE_SITTER_AVAILABLE", False),
+            redirect_stdout(io.StringIO()),
+        ):
+            payload = self.gate.run_all_structured(
+                base_ref="HEAD~1",
+                is_refactor=True,
+                skip_verification=True,
+                track="core",
+            )
+
+        self.assertIn("dryer_clones", payload["metrics"])
+        self.assertIsNone(
+            payload["metrics"]["dryer_clones"],
+            "Missing tree-sitter MUST emit dryer_clones=None (null), NEVER 0!",
+        )
+
+    def test_cli_format_json_emits_pure_json_on_pass_and_ghost_root_early_fail(self) -> None:
+        import sys
+
+        self._write_and_commit({"README.md": "# Init\n"}, "chore: init")
+        self._write_and_commit(
+            {"src/core/clean.ts": "export function clean(v: number): number { return v + 1; }\n"},
+            "refactor: clean module",
+        )
+
+        # 1. Passing run emits 100% pure parseable JSON with zero stray stdout lines
+        buf_pass = io.StringIO()
+        with (
+            patch.object(
+                sys,
+                "argv",
+                ["gate.py", str(self.repo_path), "--base", "HEAD~1", "--track", "core", "--skip-verify", "--format", "json"],
+            ),
+            redirect_stdout(buf_pass),
+        ):
+            with self.assertRaises(SystemExit) as exit_pass:
+                gate_mod.main()
+
+        self.assertEqual(exit_pass.exception.code, 0)
+        raw_pass = buf_pass.getvalue().strip()
+        self.assertTrue(raw_pass.startswith("{") and raw_pass.endswith("}"), f"Stray non-JSON output: {raw_pass!r}")
+        parsed_pass = json.loads(raw_pass)
+        self.assertTrue(parsed_pass["all_passed"])
+        self.assertIn("metrics", parsed_pass)
+
+        # 2. Ghost-root Stage 0 early fail ALSO emits pure parseable JSON (zero stray banner lines)
+        (self.repo_path / "rc").mkdir()
+        buf_fail = io.StringIO()
+        with (
+            patch.object(
+                sys,
+                "argv",
+                ["gate.py", str(self.repo_path), "--base", "HEAD~1", "--track", "core", "--skip-verify", "--format", "json"],
+            ),
+            redirect_stdout(buf_fail),
+        ):
+            with self.assertRaises(SystemExit) as exit_fail:
+                gate_mod.main()
+
+        self.assertEqual(exit_fail.exception.code, 1)
+        raw_fail = buf_fail.getvalue().strip()
+        self.assertTrue(raw_fail.startswith("{") and raw_fail.endswith("}"), f"Stray non-JSON output on ghost-root fail: {raw_fail!r}")
+        parsed_fail = json.loads(raw_fail)
+        self.assertFalse(parsed_fail["all_passed"])
+        self.assertTrue(len(parsed_fail["stages"]) >= 1)
+        self.assertFalse(parsed_fail["stages"][0]["passed"])
+
+        # 3. Real subprocess invocation guarantees zero import-time stdout contamination
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(Path(gate_mod.__file__).resolve()),
+                str(self.repo_path),
+                "--base",
+                "HEAD~1",
+                "--track",
+                "core",
+                "--skip-verify",
+                "--format",
+                "json",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(proc.returncode, 1)
+        sub_parsed = json.loads(proc.stdout.strip())
+        self.assertFalse(sub_parsed["all_passed"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -205,8 +205,9 @@ brigade worktree /path/to/repo --action return --force     # Worktree'yi havuza 
 # 5. Şartname Danışman Denetimi (Cross-Provider Spec Critic)
 brigade critique-spec /path/to/repo --spec .edge/specs/<slice-adi>.md
 
-# 6. Dikey Dilim Başlat (Feature için worktree peşin kiralanır ve RED_TEST durumunda başlar)
+# 6. Dikey Dilim Başlat (Feature için worktree peşin kiralanır ve RED_TEST durumunda başlar; core/ui için allow_migration=False varsayılanıdır)
 brigade start-slice /path/to/repo --name staff-allocation --track feature
+brigade create-refactor-ticket /path/to/repo --slug bookings-leak --track core --rules RULE-ACTION-DB-LEAK --files src/actions/bookings.ts --targets db_leaks=0,max_cc=10 --sync-tasks --hold-captain
 
 # 7. Radar Bilet Triage (Refactor borç defterinden bilet alır ve worktree kiralar)
 brigade triage /path/to/repo --track core
@@ -214,14 +215,16 @@ brigade triage /path/to/repo --track core
 # 8. Aktif İstasyon Prompt Payload'unu İncele (Negatif kısıtlar ve worktree yolu içerir)
 brigade ticket /path/to/repo --prompt
 
-# 9. Examiner 3-Axis Seal (REVIEW durumunda zorunlu mühür)
+# 9. Examiner 3-Axis Seal (REVIEW durumunda zorunlu mühür) ve 4-Mühürlü RefactorReceipt
 brigade seal-review /path/to/repo --verdict PASS --summary "3-axis & evidence verified" --evidence-reviewed ".edge/qa/proofs/slug.json"
+brigade seal-refactor /path/to/repo --slug bookings-leak --base development
 
-# 10. Durum Makinesini İlerlet (Deterministik kapıları çalıştırır)
+# 10. Durum Makinesini İlerlet (Deterministik kapıları çalıştırır; GATE -> REVIEW/QA aşamasında RefactorReceipt sentezler)
 brigade advance /path/to/repo
 
-# 11. Dikey Dilimi Tamamla (development Dalına Fast-Forward Merge, Şartname Arşivleme & Worktree İadesi)
+# 11. Dikey Dilimi Tamamla (development Dalına Fast-Forward Merge veya --pr ile AWAITING_MERGE / confirm-merge)
 brigade finish-slice /path/to/repo
+brigade confirm-merge /path/to/repo
 
 # 12. Specs-to-PR Köprüsü (no-mistakes öncesi PR gövdesi, intent ve One-way/Two-way Door risk analizi)
 brigade prepare-ship /path/to/repo --base staging --format pr

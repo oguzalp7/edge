@@ -13,12 +13,14 @@ Stage: Hermetic Verification Gate (TypeScript + Unit Tests)
 """
 
 import ast
+import io
 import json
 import sys
 import os
 import re
 import argparse
 import subprocess
+from contextlib import redirect_stdout
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional, Any, Set
 
@@ -317,12 +319,31 @@ def _find_dual_theme_and_a11y_violations(rel_path: str, content: str) -> List[st
 
 
 class GateResult:
-    def __init__(self, stage_num: int, name: str, passed: bool, message: str, details: Optional[List[str]] = None):
+    def __init__(
+        self,
+        stage_num: int,
+        name: str,
+        passed: bool,
+        message: str,
+        details: Optional[List[str]] = None,
+        metrics: Optional[Dict[str, Any]] = None,
+    ):
         self.stage_num = stage_num
         self.name = name
         self.passed = passed
         self.message = message
         self.details = details or []
+        self.metrics: Dict[str, Any] = dict(metrics) if metrics is not None else {}
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "stage_num": self.stage_num,
+            "name": self.name,
+            "passed": self.passed,
+            "message": self.message,
+            "details": list(self.details),
+            "metrics": dict(self.metrics),
+        }
 
     def __str__(self) -> str:
         icon = "✅ PASS" if self.passed else "❌ FAIL"
@@ -1008,6 +1029,174 @@ class EdgeVerificationGate:
     # =========================================================================
     # Runner
     # =========================================================================
+    def _get_head_commit_sha(self) -> str:
+        code, stdout, _ = self._run_cmd(["git", "rev-parse", "HEAD"])
+        return stdout.strip() if code == 0 and stdout.strip() else ""
+
+    @staticmethod
+    def _count_source_sloc(content: str, suffix: str) -> int:
+        if suffix in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"):
+            from tools.audit.ts_discipline import _compute_sloc
+            return _compute_sloc(content)
+        count = 0
+        for line in content.splitlines():
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                count += 1
+        return count
+
+    def _compute_dryer_clones(self, abs_changed_files: List[str]) -> Optional[int]:
+        from tools.audit import dryer as dryer_mod
+
+        ts_avail = bool(TREE_SITTER_AVAILABLE and getattr(dryer_mod, "TREE_SITTER_AVAILABLE", False))
+        if not ts_avail:
+            return None
+        if not abs_changed_files:
+            return 0
+        scanner = dryer_mod.DryerScanner()
+        pairs = scanner.scan_path(self.target_repo, scoped_files=abs_changed_files)
+        if hasattr(scanner, "cluster_clones"):
+            clusters = scanner.cluster_clones(pairs)
+            if clusters:
+                return len(clusters)
+        return len(pairs)
+
+    def _compute_changed_metrics(self, base_ref: str) -> Dict[str, Any]:
+        rel_paths, _, _ = self._get_changed_rel_paths(base_ref)
+        prod_files: List[str] = [
+            rel
+            for rel in (rel_paths or [])
+            if _is_eligible_prod_path(rel, _PRODUCTION_CODE_SUFFIXES, require_src_prefix=False)
+            and (self.target_repo / rel).is_file()
+        ]
+
+        db_leaks = 0
+        max_cc = 0
+        sloc = 0
+        ts_abs: List[str] = []
+        abs_changed: List[str] = []
+
+        for rel in prod_files:
+            full_path = self.target_repo / rel
+            resolved_str = str(full_path.resolve())
+            abs_changed.append(resolved_str)
+            suffix = full_path.suffix.lower()
+            try:
+                content = full_path.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+
+            if _is_action_controller_path(rel):
+                db_leaks += _count_sql_leaks(content)
+            file_cc, _ = _compute_source_max_cc(content, suffix)
+            if file_cc > max_cc:
+                max_cc = file_cc
+            sloc += self._count_source_sloc(content, suffix)
+            if suffix in (".ts", ".tsx") and not rel.lower().endswith(".d.ts"):
+                ts_abs.append(resolved_str)
+
+        type_score: Optional[float] = None
+        if ts_abs:
+            from tools.audit.ts_discipline import TsDisciplineAuditor
+            ts_summary = TsDisciplineAuditor(self.target_repo).scan(self.target_repo, scoped_files=ts_abs)
+            type_score = ts_summary.overall_score
+
+        dryer_clones = self._compute_dryer_clones(abs_changed)
+        return {
+            "db_leaks": db_leaks,
+            "max_cc": max_cc,
+            "dryer_clones": dryer_clones,
+            "type_score": type_score,
+            "sloc": sloc,
+        }
+
+    def _evaluate_stages(
+        self,
+        base_ref: str = "HEAD~1",
+        is_refactor: bool = True,
+        skip_verification: bool = False,
+        track: str = "all",
+    ) -> Tuple[bool, List[GateResult], bool]:
+        results: List[GateResult] = []
+
+        ghost_result = self.check_ghost_root_directories()
+        ghost_result.stage_num = 0
+        results.append(ghost_result)
+        if not ghost_result.passed:
+            return False, results, True
+
+        results.append(self.check_navigation_gate())
+        if is_refactor and track != "feature":
+            results.append(self.check_migration_gate(base_ref=base_ref))
+
+        results.append(self.check_complexity_non_regression(base_ref=base_ref))
+        results.extend([
+            self.check_mock_fallbacks(base_ref=base_ref),
+            self.check_type_escapes(base_ref=base_ref),
+            self.check_dual_theme_and_a11y(base_ref=base_ref),
+        ])
+
+        if track in ("core", "all"):
+            results.append(self.check_layer_leakage(base_ref=base_ref))
+            results.append(
+                self.check_differential_mutation_gate(base_ref=base_ref, skip_verify=skip_verification)
+            )
+
+        if track in ("ui", "all"):
+            results.extend([
+                self.check_zero_wrappers(base_ref=base_ref),
+                self.check_domain_purity(base_ref=base_ref),
+            ])
+
+        if not skip_verification:
+            results.append(self.check_verification())
+
+        all_passed = True
+        for idx, r in enumerate(results):
+            r.stage_num = idx
+            if not r.passed:
+                all_passed = False
+
+        return all_passed, results, False
+
+    def run_all_structured(
+        self,
+        base_ref: str = "HEAD~1",
+        is_refactor: bool = True,
+        skip_verification: bool = False,
+        target_file: Optional[str] = None,
+        scaffolding_allowance: int = 0,
+        track: str = "all",
+    ) -> Dict[str, Any]:
+        """Runs all gate stages with stdout captured/silenced and returns structured JSON payload."""
+        with redirect_stdout(io.StringIO()):
+            all_passed, results, ghost_failed = self._evaluate_stages(
+                base_ref=base_ref,
+                is_refactor=is_refactor,
+                skip_verification=skip_verification,
+                track=track,
+            )
+            commit_sha = self._get_head_commit_sha()
+            if ghost_failed:
+                metrics: Dict[str, Any] = {
+                    "db_leaks": None,
+                    "max_cc": None,
+                    "dryer_clones": None,
+                    "type_score": None,
+                    "sloc": None,
+                }
+            else:
+                metrics = self._compute_changed_metrics(base_ref=base_ref)
+
+        return {
+            "track": track,
+            "base_ref": base_ref,
+            "commit_sha": commit_sha,
+            "all_passed": all_passed,
+            "stages": [r.to_dict() for r in results],
+            "metrics": metrics,
+        }
+
     def run_all(
         self,
         base_ref: str = "HEAD~1",
@@ -1021,57 +1210,27 @@ class EdgeVerificationGate:
         print(f"🛡️  EDGE VERIFICATION GATE — ARCHITECTURAL AUDIT [{track.upper()} TRACK]")
         print("=" * 70)
 
-        results: List[GateResult] = []
+        all_passed, results, ghost_failed = self._evaluate_stages(
+            base_ref=base_ref,
+            is_refactor=is_refactor,
+            skip_verification=skip_verification,
+            track=track,
+        )
 
-        # Stage 0: Ghost root directory check (fail fast)
-        ghost_result = self.check_ghost_root_directories()
-        results.append(ghost_result)
-        if not ghost_result.passed:
-            print(str(ghost_result))
+        if ghost_failed:
+            print(str(results[0]))
             print("-" * 70)
             print("\n" + ("=" * 70))
             print("🚫 GATE CHECK FAILED: Ghost root directories present. Halting audit immediately.")
             print("=" * 70)
             return False
 
-        results.append(self.check_navigation_gate())
-
-        if is_refactor and track != "feature":
-            results.append(self.check_migration_gate(base_ref=base_ref))
-
-        results.append(self.check_complexity_non_regression(base_ref=base_ref))
-        results.extend([
-            self.check_mock_fallbacks(base_ref=base_ref),
-            self.check_type_escapes(base_ref=base_ref),
-            self.check_dual_theme_and_a11y(base_ref=base_ref),
-        ])
-
-        # Core track specific gates
-        if track in ("core", "all"):
-            results.append(self.check_layer_leakage(base_ref=base_ref))
-            results.append(
-                self.check_differential_mutation_gate(base_ref=base_ref, skip_verify=skip_verification)
-            )
-
-        # UI track specific gates
-        if track in ("ui", "all"):
-            results.extend([
-                self.check_zero_wrappers(base_ref=base_ref),
-                self.check_domain_purity(base_ref=base_ref),
-            ])
-
-        if not skip_verification:
-            results.append(self.check_verification())
-        else:
+        if skip_verification:
             print("  (Skipping Hermetic verification per --skip-verify)")
 
-        all_passed = True
-        for idx, r in enumerate(results):
-            r.stage_num = idx
+        for r in results:
             print(str(r))
             print("-" * 70)
-            if not r.passed:
-                all_passed = False
 
         print("\n" + ("=" * 70))
         if all_passed:
@@ -1191,11 +1350,24 @@ def main() -> None:
     parser.add_argument("--target-file", default=None, help="(Deprecated/Legacy) Retained for CLI compatibility; SLOC contraction is retired")
     parser.add_argument("--allow-scaffolding", type=int, default=0, help="(Deprecated/Legacy) Retained for CLI compatibility; SLOC budget is retired")
     parser.add_argument("--track", choices=["core", "ui", "all", "feature"], default="all", help="Audit track: core, ui, all, or feature (default: all)")
+    parser.add_argument("--format", choices=["text", "json"], default="text", help="Output format: text (default) or json")
 
     args = parser.parse_args()
     target_path = normalize_target_path(args.target)
 
     gate = EdgeVerificationGate(target_path)
+    if args.format == "json":
+        payload = gate.run_all_structured(
+            base_ref=args.base,
+            is_refactor=not args.no_refactor,
+            skip_verification=args.skip_verify,
+            target_file=args.target_file,
+            scaffolding_allowance=args.allow_scaffolding,
+            track=args.track,
+        )
+        print(json.dumps(payload, indent=2))
+        sys.exit(0 if payload.get("all_passed") else 1)
+
     passed = gate.run_all(
         base_ref=args.base,
         is_refactor=not args.no_refactor,

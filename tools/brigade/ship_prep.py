@@ -23,11 +23,15 @@ try:
     from .fsm import ProofVerifier
     from .smoke_routes import SmokeScanReport, triage_smoke_failures
     from .security_audit import run_security_audit, triage_security_findings
+    from .refactor_receipt import RefactorReceiptVerifier, compute_changed_files_hash
+    from .tasks_bridge import resolve_target_repo_root
 except ImportError:
     from tools.brigade.models import BrigadeState, Ticket
     from tools.brigade.fsm import ProofVerifier
     from tools.brigade.smoke_routes import SmokeScanReport, triage_smoke_failures
     from tools.brigade.security_audit import run_security_audit, triage_security_findings
+    from tools.brigade.refactor_receipt import RefactorReceiptVerifier, compute_changed_files_hash
+    from tools.brigade.tasks_bridge import resolve_target_repo_root
 
 from tools.common import normalize_target_path, run_command
 
@@ -123,6 +127,8 @@ class SpecShipPlan:
     ticket_id: Optional[str] = None
     commit_shas: List[str] = field(default_factory=list)
     realization_audit: Optional[RealizationAudit] = None
+    kind: str = "spec"
+    refactor_receipt: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -234,6 +240,12 @@ def parse_index_diff(diff_text: str) -> List[IndexChange]:
     return changes
 
 
+_AUTH_SEGMENT_RE = re.compile(
+    r"(?:^|/)(auth|middleware|permissions|rbac|session|security)(?:/|\.|$)",
+    re.IGNORECASE,
+)
+
+
 def _is_one_way_door_path(norm_path: str) -> bool:
     low = norm_path.lower()
     if low.startswith("drizzle/") or "/drizzle/" in low:
@@ -241,6 +253,172 @@ def _is_one_way_door_path(norm_path: str) -> bool:
     if low.startswith("src/db/schema") or "/db/schema/" in low or low.endswith("/db/schema"):
         return True
     return low.endswith(".sql")
+
+
+def _is_refactor_auth_path(norm_path: str) -> bool:
+    return bool(_AUTH_SEGMENT_RE.search(_norm_rel_path(norm_path)))
+
+
+def _strip_line_comments_for_diff(lines: List[str]) -> str:
+    cleaned: List[str] = []
+    in_block = False
+    for raw in lines:
+        s = raw.strip()
+        if not s:
+            continue
+        if in_block:
+            if "*/" in s:
+                in_block = False
+                after = s.split("*/", 1)[1].strip()
+                if after and not after.startswith("//"):
+                    cleaned.append(after)
+            continue
+        if s.startswith("/*"):
+            if "*/" not in s:
+                in_block = True
+            else:
+                after = s.split("*/", 1)[1].strip()
+                if after and not after.startswith("//"):
+                    cleaned.append(after)
+            continue
+        if s.startswith(("//", "*")):
+            continue
+        cleaned.append(raw)
+    return "\n".join(cleaned)
+
+
+def _extract_balanced_parens(text: str, open_idx: int) -> str:
+    depth = 0
+    chars: List[str] = []
+    for ch in text[open_idx:]:
+        if ch == "(":
+            depth += 1
+            if depth > 1:
+                chars.append(ch)
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                break
+            chars.append(ch)
+        elif depth >= 1:
+            chars.append(ch)
+    return re.sub(r"\s+", " ", "".join(chars)).strip().rstrip(",").strip()
+
+
+def _extract_export_summary(text: str) -> Dict[str, Any]:
+    named_exports: set = set()
+    func_sigs: Dict[str, set] = {}
+    star_exports: set = set()
+    module_export_keys: set = set()
+
+    for m in re.finditer(
+        r"\bexport\s+(?:declare\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*(?:<[^>]*>)?\s*\(",
+        text,
+    ):
+        fn_name = m.group(1)
+        sig = _extract_balanced_parens(text, m.end() - 1)
+        named_exports.add(fn_name)
+        func_sigs.setdefault(fn_name, set()).add(sig)
+
+    for m in re.finditer(
+        r"\bexport\s+(?:declare\s+)?(?:const|let|var|class|type|interface|enum)\s+([A-Za-z_$][\w$]*)",
+        text,
+    ):
+        named_exports.add(m.group(1))
+
+    for m in re.finditer(r"\bexport\s+(?:type\s+)?\{([^}]+)\}", text, re.DOTALL):
+        for part in m.group(1).split(","):
+            tok = part.strip()
+            if not tok:
+                continue
+            if tok.startswith("type "):
+                tok = tok[5:].strip()
+            if " as " in tok:
+                tok = tok.split(" as ", 1)[1].strip()
+            if tok:
+                named_exports.add(tok)
+
+    for m in re.finditer(
+        r"\bexport\s+\*(?:\s+as\s+([A-Za-z_$][\w$]*))?\s+from\s+['\"]([^'\"]+)['\"]",
+        text,
+    ):
+        star_exports.add((m.group(1) or "", m.group(2)))
+
+    has_default = bool(re.search(r"\bexport\s+default\b", text))
+
+    has_module_exports = bool(re.search(r"\bmodule\.exports\s*=", text))
+    for m in re.finditer(r"\bmodule\.exports\s*=\s*\{([^}]+)\}", text, re.DOTALL):
+        for part in m.group(1).split(","):
+            key = part.split(":", 1)[0].strip()
+            if key:
+                module_export_keys.add(key)
+
+    return {
+        "named_exports": named_exports,
+        "func_sigs": func_sigs,
+        "star_exports": star_exports,
+        "has_default": has_default,
+        "has_module_exports": has_module_exports,
+        "module_export_keys": module_export_keys,
+    }
+
+
+def _split_diff_by_file(diff_text: str) -> List[Tuple[str, List[str], List[str]]]:
+    chunks: List[Tuple[str, List[str], List[str]]] = []
+    cur_file = "<diff>"
+    rem: List[str] = []
+    add: List[str] = []
+
+    for line in (diff_text or "").splitlines():
+        if line.startswith("diff --git "):
+            if rem or add:
+                chunks.append((cur_file, rem, add))
+            parts = line.split()
+            cur_file = parts[-1][2:] if parts and parts[-1].startswith("b/") else "<diff>"
+            rem, add = [], []
+        elif line.startswith("-") and not line.startswith("---"):
+            rem.append(line[1:])
+        elif line.startswith("+") and not line.startswith("+++"):
+            add.append(line[1:])
+    if rem or add:
+        chunks.append((cur_file, rem, add))
+    return chunks
+
+
+def _detect_exported_api_breaks(diff_text: str) -> List[str]:
+    if not diff_text or not diff_text.strip():
+        return []
+
+    reasons: List[str] = []
+    for fpath, rem_lines, add_lines in _split_diff_by_file(diff_text):
+        low = fpath.lower()
+        if any(marker in low for marker in (".test.", ".spec.", ".md", ".json")):
+            continue
+        rem_text = _strip_line_comments_for_diff(rem_lines)
+        add_text = _strip_line_comments_for_diff(add_lines)
+        if not rem_text.strip():
+            continue
+
+        rem = _extract_export_summary(rem_text)
+        add = _extract_export_summary(add_text)
+
+        for sym in sorted(rem["named_exports"] - add["named_exports"]):
+            reasons.append(f"Exported symbol removed ({fpath}): {sym}")
+        for fn_name, rem_sigs in sorted(rem["func_sigs"].items()):
+            if fn_name in add["func_sigs"] and not rem_sigs.issubset(add["func_sigs"][fn_name]):
+                reasons.append(f"Exported function signature changed ({fpath}): {fn_name}")
+        for alias, mod in sorted(rem["star_exports"] - add["star_exports"]):
+            label = f"* as {alias} from {mod}" if alias else f"* from {mod}"
+            reasons.append(f"Wildcard re-export removed ({fpath}): {label}")
+        if rem["has_default"] and not add["has_default"]:
+            reasons.append(f"Default export removed ({fpath})")
+        if rem["module_export_keys"] and add["module_export_keys"]:
+            for key in sorted(rem["module_export_keys"] - add["module_export_keys"]):
+                reasons.append(f"CommonJS module.exports key removed ({fpath}): {key}")
+        elif rem["has_module_exports"] and not add["has_module_exports"]:
+            reasons.append(f"CommonJS module.exports removed ({fpath})")
+
+    return reasons
 
 
 _LAYER_RULES: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
@@ -279,23 +457,52 @@ def _parse_stat_counts(diff_stat: str) -> Tuple[int, int]:
     return (int(ins_m.group(1)) if ins_m else 0), (int(del_m.group(1)) if del_m else 0)
 
 
-def classify_merge_danger(changed_files: List[str], diff_stat: str = "") -> Tuple[str, Dict[str, Any]]:
-    """Retained helper for JSON telemetry & backward compatibility (not rendered in PR bodies)."""
+def classify_merge_danger(
+    changed_files: List[str],
+    diff_stat: str = "",
+    diff_text: str = "",
+    is_refactor: bool = False,
+) -> Tuple[str, Dict[str, Any]]:
+    """Classifies merge door risk (Two-Way vs One-Way) and populates blast_radius telemetry."""
     norm_files = [_norm_rel_path(f) for f in changed_files if str(f).strip()]
-    one_way_triggers = [f for f in norm_files if _is_one_way_door_path(f)]
-    door_type = (
-        "One-way door (Database Migration / Schema Change)"
-        if one_way_triggers
-        else "Two-way door (Reversible Code / Configuration Change)"
-    )
-    layers = sorted({_classify_layer(f) for f in norm_files})
+    db_triggers = [f for f in norm_files if _is_one_way_door_path(f)]
+    one_way_triggers = list(db_triggers)
+    one_way_reasons: List[str] = [f"Database migration/schema touched: {f}" for f in db_triggers]
+
     ins, dels = _parse_stat_counts(diff_stat)
+    if is_refactor:
+        for f in norm_files:
+            if _is_refactor_auth_path(f):
+                if f not in one_way_triggers:
+                    one_way_triggers.append(f)
+                one_way_reasons.append(f"Security/auth path touched: {f}")
+
+        api_breaks = _detect_exported_api_breaks(diff_text)
+        one_way_reasons.extend(api_breaks)
+
+        if len(norm_files) > 15:
+            one_way_reasons.append(f"Large refactor blast radius: {len(norm_files)} files changed (> 15)")
+        if (ins + dels) > 500:
+            one_way_reasons.append(f"Large refactor diff size: {ins + dels} lines changed (> 500)")
+
+    if one_way_reasons:
+        summary_reason = "; ".join(one_way_reasons[:2])
+        door_type = (
+            f"One-way door ({summary_reason})"
+            if is_refactor or not db_triggers
+            else "One-way door (Database Migration / Schema Change)"
+        )
+    else:
+        door_type = "Two-way door (Reversible Code / Configuration Change)"
+
+    layers = sorted({_classify_layer(f) for f in norm_files})
     blast_radius = {
         "changed_file_count": len(norm_files),
         "changed_files": norm_files,
         "layers": layers,
         "domains": _extract_domains(norm_files),
         "one_way_triggers": one_way_triggers,
+        "one_way_reasons": one_way_reasons,
         "insertions": ins,
         "deletions": dels,
         "diff_stat": diff_stat.strip(),
@@ -1191,7 +1398,12 @@ def _load_brigade_history_snapshot(
 ) -> Tuple[Optional[Ticket], Optional[Dict[str, Any]], str, Dict[str, Dict[str, Any]]]:
     state_file = repo / ".edge" / "brigade.json"
     if not state_file.is_file():
-        return None, None, "Not recorded", {}
+        common_root = resolve_target_repo_root(repo)
+        alt_file = common_root / ".edge" / "brigade.json"
+        if alt_file.is_file():
+            state_file = alt_file
+        else:
+            return None, None, "Not recorded", {}
     try:
         raw = json.loads(state_file.read_text(encoding="utf-8"))
         state = BrigadeState.from_dict(raw)
@@ -1795,6 +2007,73 @@ def _format_included_specs_subsection(included_plans: List[SpecShipPlan]) -> Lis
     return lines
 
 
+def _format_refactor_summary_block(
+    refactor_receipts: List[Dict[str, Any]],
+    door_type: str = "",
+    blast_radius: Optional[Dict[str, Any]] = None,
+) -> List[str]:
+    if not refactor_receipts:
+        return []
+    lines: List[str] = []
+    eff_door = door_type or str(refactor_receipts[0].get("seal_1_intent", {}).get("door_type") or "Two-way door (Reversible Code / Configuration Change)")
+    reasons: List[str] = list((blast_radius or {}).get("one_way_reasons") or [])
+    for rec in refactor_receipts:
+        for r in rec.get("seal_1_intent", {}).get("one_way_reasons") or []:
+            if r not in reasons:
+                reasons.append(r)
+
+    lines.append(f"- **Door Classification:** {eff_door}")
+    if reasons:
+        lines.append(f"- **One-Way Reasons:** {'; '.join(reasons)}")
+
+    for rec in refactor_receipts:
+        s1 = rec.get("seal_1_intent") or {}
+        s2 = rec.get("seal_2_metrics") or {}
+        slug = rec.get("slug") or s1.get("slug") or "refactor"
+        rules = ", ".join(f"`{r}`" for r in (s1.get("target_rules") or [])) or "—"
+        lines.extend([
+            "",
+            f"### Before/After Metric Delta (`{slug}`)",
+            f"- **Intent & Rules:** {rules} (`behavior_preserved: {s1.get('behavior_preserved')}`)",
+            "| Metric | Before | Target | After | Delta |",
+            "| :--- | ---: | ---: | ---: | ---: |",
+        ])
+        before = s2.get("before") or {}
+        after = s2.get("after") or {}
+        targets = s2.get("metric_targets") or {}
+        keys = list(dict.fromkeys([*before.keys(), *after.keys(), *targets.keys()]))
+        for k in keys:
+            b_v = before.get(k)
+            t_v = targets.get(k)
+            a_v = after.get(k)
+            delta_s = f"{a_v - b_v:+g}" if isinstance(b_v, (int, float)) and isinstance(a_v, (int, float)) else "—"
+            lines.append(
+                f"| `{k}` | {b_v if b_v is not None else 'null'} | "
+                f"{t_v if t_v is not None else '—'} | "
+                f"{a_v if a_v is not None else 'null'} | {delta_s} |"
+            )
+    return lines
+
+
+def _format_refactor_evidence_block(refactor_receipts: List[Dict[str, Any]]) -> List[str]:
+    if not refactor_receipts:
+        return []
+    lines: List[str] = ["", "### RefactorReceipt & Deterministic Gate"]
+    for rec in refactor_receipts:
+        slug = rec.get("slug") or rec.get("seal_1_intent", {}).get("slug") or "refactor"
+        s3 = rec.get("seal_3_gate") or {}
+        stages = s3.get("stages") or []
+        passed_cnt = sum(1 for st in stages if st.get("passed"))
+        lines.append(
+            f"- **RefactorReceipt:** `.edge/receipts/refactor/{slug}.json` "
+            f"(Gate: `{passed_cnt}/{len(stages)}` stages passed, `all_passed={s3.get('all_passed')}`)"
+        )
+        s4 = rec.get("seal_4_examiner") or {}
+        if s4:
+            lines.extend(_format_examiner_seal_block(s4))
+    return lines
+
+
 def _format_summary_section(
     head_branch: str,
     base_branch: str,
@@ -1804,6 +2083,9 @@ def _format_summary_section(
     spec_digests: List[SpecDigest],
     audit: Optional[RealizationAudit] = None,
     included_plans: Optional[List[SpecShipPlan]] = None,
+    refactor_receipts: Optional[List[Dict[str, Any]]] = None,
+    door_type: str = "",
+    blast_radius: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
     lines = [
         "## Summary",
@@ -1816,6 +2098,8 @@ def _format_summary_section(
         lines.append(f"- **Domain Vocabulary (`CONTEXT.md`):** {', '.join(context_terms)}")
     for digest in spec_digests:
         lines.append(f"- **Spec (`{digest.path}`):** {digest.title}" + (f" — {digest.summary}" if digest.summary else ""))
+    if refactor_receipts:
+        lines.extend(_format_refactor_summary_block(refactor_receipts, door_type=door_type, blast_radius=blast_radius))
     lines.extend(_format_realization_subsection(audit))
     if audit is None and included_plans:
         lines.extend(_format_included_specs_subsection(included_plans))
@@ -1919,12 +2203,18 @@ def _format_evidence_section(
     gate_status: str,
     smoke_report: Optional[Dict[str, Any]] = None,
     security_report: Optional[Dict[str, Any]] = None,
+    refactor_receipts: Optional[List[Dict[str, Any]]] = None,
 ) -> List[str]:
     lines = ["", "## Evidence"]
     if specs_linked:
         lines.append(f"- **Specs:** {', '.join(f'`{s}`' for s in specs_linked)}")
     lines.append(f"- **Gate Status:** {gate_status}")
-    lines.extend(_format_examiner_seal_block(examiner_receipt))
+    if refactor_receipts:
+        lines.extend(_format_refactor_evidence_block(refactor_receipts))
+        if examiner_receipt:
+            lines.extend(_format_examiner_seal_block(examiner_receipt))
+    else:
+        lines.extend(_format_examiner_seal_block(examiner_receipt))
     if verified_proofs or failed_proofs:
         lines.extend(["", "### Live QA Proof & Visual Evidence"])
         for p in verified_proofs:
@@ -1952,6 +2242,9 @@ def _format_markdown_sections(
     included_plans: Optional[List[SpecShipPlan]] = None,
     smoke_report: Optional[Dict[str, Any]] = None,
     security_report: Optional[Dict[str, Any]] = None,
+    refactor_receipts: Optional[List[Dict[str, Any]]] = None,
+    door_type: str = "",
+    blast_radius: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Renders lean 2-section PR body (## Summary + ## Evidence only; no ## Merge Danger)."""
     lines = _format_summary_section(
@@ -1963,6 +2256,9 @@ def _format_markdown_sections(
         spec_digests or [],
         audit=audit,
         included_plans=included_plans,
+        refactor_receipts=refactor_receipts,
+        door_type=door_type,
+        blast_radius=blast_radius,
     )
     lines.extend(
         _format_evidence_section(
@@ -1973,6 +2269,7 @@ def _format_markdown_sections(
             gate_status,
             smoke_report=smoke_report,
             security_report=security_report,
+            refactor_receipts=refactor_receipts,
         )
     )
     return "\n".join(lines)
@@ -1998,11 +2295,11 @@ def _filter_plan_index_changes(
     return [ch for ch in index_changes if any(tok in ch.raw_line.lower() for tok in tokens)]
 
 
-def _clean_pr_title(spec_slug: str, raw_title: str) -> str:
+def _clean_pr_title(spec_slug: str, raw_title: str, kind: str = "spec") -> str:
     cleaned = re.sub(r"^[^\w\s]+\s*", "", raw_title or "").strip()
     cleaned = re.sub(r"^(Edge Brigade Specification|Specification|Spec)\s*:\s*", "", cleaned, flags=re.IGNORECASE).strip()
     summary = cleaned or f"deliver {spec_slug}"
-    prefix = f"feat({spec_slug}): "
+    prefix = f"refactor({spec_slug}): " if kind == "refactor" else f"feat({spec_slug}): "
     full = f"{prefix}{summary}"
     if len(full) <= 96:
         return full
@@ -2081,15 +2378,19 @@ def _render_plan_bodies(
     context_terms: List[str],
     plan_receipt: Optional[Dict[str, Any]],
     gate_status: str,
+    door_type: str = "",
+    blast_radius: Optional[Dict[str, Any]] = None,
 ) -> None:
     if plan.realization_audit is None:
         plan.realization_audit = compute_realization_audit(plan, plan.spec_digest, plan_receipt)
     code_count = len(plan.realization_audit.actual_code_files)
     digests = [plan.spec_digest] if plan.spec_digest else []
+    ref_list = [plan.refactor_receipt] if plan.refactor_receipt else []
     pr_body = _format_markdown_sections(
         plan.pr_branch, base_branch, code_count, plan.index_changes,
         context_terms, [plan.spec_path], plan.verified_proofs, plan.failed_proofs,
         plan_receipt, gate_status, digests, audit=plan.realization_audit,
+        refactor_receipts=ref_list, door_type=door_type, blast_radius=blast_radius,
     )
     ship_cmd = (
         f"git push -u origin {shlex.quote(plan.pr_branch)}\n"
@@ -2159,21 +2460,37 @@ def _collect_plan_tree_files(plan: SpecShipPlan, head_tree: set) -> List[str]:
 
 
 def _list_range_commits(repo: Path, eff_base: str) -> List[Tuple[str, str, List[str]]]:
-    code, out, _ = run_command(["git", "log", "--reverse", "--format=%H%x00%s", f"{eff_base}..HEAD"], cwd=repo)
+    code, out, _ = run_command(["git", "log", "--reverse", "--format=%H%x00%B%x1e", f"{eff_base}..HEAD"], cwd=repo)
     if code != 0 or not out.strip():
         return []
     commits: List[Tuple[str, str, List[str]]] = []
-    for line in out.splitlines():
-        if "\x00" not in line:
+    for record in out.split("\x1e"):
+        if "\x00" not in record:
             continue
-        sha, subj = line.split("\x00", 1)
+        sha, msg = record.split("\x00", 1)
+        sha = sha.strip()
+        if not sha:
+            continue
         _, f_out, _ = run_command(
             ["git", "diff-tree", "--no-commit-id", "--name-only", "-r", "--root", sha],
             cwd=repo,
         )
         c_files = [_norm_rel_path(f) for f in f_out.splitlines() if f.strip()]
-        commits.append((sha.strip(), subj.strip(), c_files))
+        commits.append((sha, msg.strip(), c_files))
     return commits
+
+
+def _ticket_commit_owners(
+    message: str,
+    plans: List[SpecShipPlan],
+    ticket_map: Dict[str, str],
+) -> List[str]:
+    owners: List[str] = []
+    for p in plans:
+        tid = p.ticket_id or ticket_map.get(p.spec_path)
+        if tid and re.search(rf"(?<![A-Za-z0-9-]){re.escape(tid)}(?![A-Za-z0-9-])", message):
+            owners.append(p.pr_branch)
+    return owners
 
 
 def _explicit_commit_owners(
@@ -2181,13 +2498,15 @@ def _explicit_commit_owners(
     plans: List[SpecShipPlan],
     ticket_map: Dict[str, str],
 ) -> List[str]:
+    tid_owners = _ticket_commit_owners(subject, plans, ticket_map)
+    if tid_owners:
+        return tid_owners
     low_subj = subject.lower()
     owners: List[str] = []
     for p in plans:
-        tid = p.ticket_id or ticket_map.get(p.spec_path)
         slug_hit = bool(re.search(rf"(?<![a-z0-9-]){re.escape(p.spec_slug)}(?![a-z0-9-])", low_subj))
-        if (tid and tid in subject) or slug_hit:
-            owners.append(p.spec_slug)
+        if slug_hit:
+            owners.append(p.pr_branch)
     return owners
 
 
@@ -2196,7 +2515,7 @@ def _overlap_commit_owners(c_files: List[str], plans: List[SpecShipPlan]) -> Lis
     for p in plans:
         specific = [pat for pat in p.expected_files if not _is_broad_path(pat)]
         if specific and _match_expected_files(specific, c_files):
-            owners.append(p.spec_slug)
+            owners.append(p.pr_branch)
     return owners
 
 
@@ -2207,15 +2526,18 @@ def _match_commit_owners(
     ticket_map: Dict[str, str],
     last_owner: Optional[str],
 ) -> List[str]:
-    explicit = _explicit_commit_owners(subject, plans, ticket_map)
-    if explicit:
-        return explicit
+    tid_owners = _ticket_commit_owners(subject, plans, ticket_map)
+    if tid_owners:
+        return tid_owners
     overlap = _overlap_commit_owners(c_files, plans)
     if overlap:
         return overlap
+    explicit = _explicit_commit_owners(subject, plans, ticket_map)
+    if explicit:
+        return explicit
     if last_owner:
         return [last_owner]
-    return [plans[0].spec_slug] if len(plans) == 1 else []
+    return [plans[0].pr_branch] if len(plans) == 1 else []
 
 
 def _resolve_spec_commits(
@@ -2224,21 +2546,21 @@ def _resolve_spec_commits(
     plans: List[SpecShipPlan],
     ticket_map: Dict[str, str],
 ) -> Tuple[Dict[str, List[str]], Dict[str, bool], Dict[str, List[str]]]:
-    """Attributes eff_base..HEAD commits per spec (ticket/slug, phase tags, file overlap, contiguous slice)."""
-    exclusive: Dict[str, List[str]] = {p.spec_slug: [] for p in plans}
-    has_shared: Dict[str, bool] = {p.spec_slug: False for p in plans}
-    exc_files: Dict[str, List[str]] = {p.spec_slug: [] for p in plans}
+    """Attributes eff_base..HEAD commits per plan (ticket/file overlap/slug/contiguous)."""
+    exclusive: Dict[str, List[str]] = {p.pr_branch: [] for p in plans}
+    has_shared: Dict[str, bool] = {p.pr_branch: False for p in plans}
+    exc_files: Dict[str, List[str]] = {p.pr_branch: [] for p in plans}
     last_owner: Optional[str] = None
     for sha, subj, c_files in _list_range_commits(repo, eff_base):
         owners = _match_commit_owners(subj, c_files, plans, ticket_map, last_owner)
         if len(owners) == 1:
-            slug = owners[0]
-            exclusive[slug].append(sha)
-            exc_files[slug].extend(f for f in c_files if f not in exc_files[slug])
-            last_owner = slug
+            owner_key = owners[0]
+            exclusive[owner_key].append(sha)
+            exc_files[owner_key].extend(f for f in c_files if f not in exc_files[owner_key])
+            last_owner = owner_key
         else:
-            for slug in owners:
-                has_shared[slug] = True
+            for owner_key in owners:
+                has_shared[owner_key] = True
             last_owner = None
     return exclusive, has_shared, exc_files
 
@@ -2251,9 +2573,10 @@ def _apply_slice_commits_to_plans(
     index_changes: List[IndexChange],
 ) -> None:
     for plan in plans:
-        if not has_shared.get(plan.spec_slug):
-            plan.commit_shas = list(exclusive.get(plan.spec_slug, []))
-        for cf in exc_files.get(plan.spec_slug, []):
+        key = plan.pr_branch
+        if not has_shared.get(key):
+            plan.commit_shas = list(exclusive.get(key, []))
+        for cf in exc_files.get(key, []):
             if not cf.startswith(".edge/") and cf not in plan.matched_files:
                 plan.matched_files.append(cf)
         plan.index_changes = _filter_plan_index_changes(
@@ -2447,8 +2770,8 @@ def create_split_branches(
         for plan in spec_plans:
             ok, err = _materialize_single_branch(
                 repo, eff_base, head_sha, head_tree, plan,
-                exclusive_commits=exclusive.get(plan.spec_slug, []),
-                has_shared_commits=has_shared.get(plan.spec_slug, False),
+                exclusive_commits=exclusive.get(plan.pr_branch, []),
+                has_shared_commits=has_shared.get(plan.pr_branch, False),
             )
             if not ok:
                 return False, created, err
@@ -2713,10 +3036,13 @@ def _render_top_level_bodies(
     spec_digests: List[SpecDigest],
     smoke_report: Optional[Dict[str, Any]] = None,
     security_report: Optional[Dict[str, Any]] = None,
+    door_type: str = "",
+    blast_radius: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, str]:
     if sel_slug and len(selected_plans) == 1:
         return selected_plans[0].pr_body, selected_plans[0].show_me_body
     code_count = len([f for f in changed_files if not _is_evidence_artifact_path(f)])
+    refactor_receipts = [p.refactor_receipt for p in selected_plans if p.kind == "refactor" and p.refactor_receipt]
     pr_body = _format_markdown_sections(
         head_branch,
         base_branch,
@@ -2732,6 +3058,9 @@ def _render_top_level_bodies(
         included_plans=selected_plans,
         smoke_report=smoke_report,
         security_report=security_report,
+        refactor_receipts=refactor_receipts,
+        door_type=door_type,
+        blast_radius=blast_radius,
     )
     ship_cmd = f"gh pr create --base {shlex.quote(base_branch)} --head {shlex.quote(head_branch)}"
     return pr_body, f"{pr_body}\n\n## Ship Command\n```bash\n{ship_cmd}\n```"
@@ -2833,6 +3162,11 @@ def _validate_ship_result(
         return False, result, gate_err
     if result.failed_proofs:
         return False, result, f"ProofVerifier rejected {len(result.failed_proofs)} QA proof receipt(s)."
+    for plan in result.spec_plans:
+        if plan.kind == "refactor" and plan.refactor_receipt is not None:
+            v_ok, v_msg, _ = RefactorReceiptVerifier.verify_receipt(plan.refactor_receipt, strict=True)
+            if not v_ok:
+                return False, result, f"RefactorReceipt blocked ({plan.spec_slug}): {v_msg}"
     if strict_proofs and not result.verified_proofs and not result.examiner_receipt:
         return False, result, "Strict proofs mode failed: no verified QA proofs or ExaminerReceipt found."
     if split_branches:
@@ -2910,6 +3244,109 @@ def _maybe_publish_plan_evidence(
     )
 
 
+def _discover_refactor_receipts(
+    repo: Path,
+    changed_files: List[str],
+) -> List[Tuple[str, Dict[str, Any]]]:
+    """Discovers valid (non-stale) refactor receipts pinned under target_repo/.edge/receipts/refactor/."""
+    roots = [resolve_target_repo_root(repo)]
+    if repo not in roots:
+        roots.append(repo)
+
+    _, head_out, _ = run_command(["git", "rev-parse", "HEAD"], cwd=repo)
+    head_sha = head_out.strip()
+    cur_diff_hash = compute_changed_files_hash(changed_files) if changed_files else ""
+
+    discovered: List[Tuple[str, Dict[str, Any]]] = []
+    seen_slugs: set = set()
+    for root in roots:
+        rec_dir = root / ".edge" / "receipts" / "refactor"
+        if not rec_dir.is_dir():
+            continue
+        for json_file in sorted(rec_dir.glob("*.json")):
+            try:
+                data = json.loads(json_file.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if not isinstance(data, dict):
+                continue
+            s1 = data.get("seal_1_intent")
+            if not isinstance(s1, dict):
+                continue
+            rec_sha = str(s1.get("commit_sha") or "").strip()
+            rec_hash = str(s1.get("changed_files_hash") or "").strip()
+            if not ((head_sha and rec_sha == head_sha) or (cur_diff_hash and rec_hash == cur_diff_hash)):
+                continue
+            slug = _clean_slug(str(data.get("slug") or s1.get("slug") or json_file.stem))
+            if slug in seen_slugs:
+                continue
+            seen_slugs.add(slug)
+            discovered.append((f".edge/receipts/refactor/{json_file.name}", data))
+    return discovered
+
+
+def _build_refactor_plans(
+    refactor_receipts: List[Tuple[str, Dict[str, Any]]],
+    base_branch: str,
+    changed_files: List[str],
+    index_changes: List[IndexChange],
+    context_terms: List[str],
+    gate_status: str,
+    used_branches: set,
+    door_type: str,
+    blast_radius: Dict[str, Any],
+) -> List[SpecShipPlan]:
+    plans: List[SpecShipPlan] = []
+    for rel_path, rec in refactor_receipts:
+        s1 = rec.get("seal_1_intent") or {}
+        slug = _clean_slug(str(rec.get("slug") or s1.get("slug") or Path(rel_path).stem))
+        tid = str(rec.get("ticket_id") or s1.get("ticket_id") or "") or None
+        rec_files = [_norm_rel_path(f) for f in (s1.get("changed_files") or []) if str(f).strip()]
+        target_files = [_norm_rel_path(f) for f in (s1.get("target_files") or []) if str(f).strip()]
+        expected = list(dict.fromkeys([*rec_files, *target_files]))
+        matched = _match_expected_files(expected, changed_files) or list(rec_files)
+
+        cand_branch = f"ship/{slug}"
+        if cand_branch in used_branches:
+            cand_branch = f"ship/refactor-{slug}"
+        used_branches.add(cand_branch)
+
+        rules = [str(r) for r in (s1.get("target_rules") or []) if str(r).strip()]
+        raw_title = f"refactor {', '.join(rules)}" if rules else f"clean {slug}"
+        pr_title = _clean_pr_title(slug, raw_title, kind="refactor")
+
+        plan = SpecShipPlan(
+            spec_slug=slug,
+            spec_path=rel_path,
+            pr_branch=cand_branch,
+            pr_title=pr_title,
+            expected_files=expected,
+            matched_files=matched,
+            index_changes=_filter_plan_index_changes(index_changes, slug, rel_path, matched),
+            ticket_id=tid,
+            kind="refactor",
+            refactor_receipt=rec,
+        )
+        eff_door = str(s1.get("door_type") or door_type)
+        eff_blast = dict(blast_radius)
+        if s1.get("one_way_reasons"):
+            eff_blast["one_way_reasons"] = list(dict.fromkeys([
+                *(eff_blast.get("one_way_reasons") or []),
+                *(s1.get("one_way_reasons") or []),
+            ]))
+        _render_plan_bodies(
+            plan,
+            base_branch,
+            context_terms,
+            rec.get("seal_4_examiner") or None,
+            gate_status,
+            door_type=eff_door,
+            blast_radius=eff_blast,
+        )
+        plans.append(plan)
+    return plans
+
+
 def _assemble_ship_result(
     base_branch: str,
     head_branch: str,
@@ -2933,6 +3370,7 @@ def _assemble_ship_result(
         sel_slug, selected_plans, head_branch, base_branch, changed_files,
         index_changes, context_terms, specs_linked, verified_proofs, failed_proofs,
         examiner_receipt, gate_status, spec_digests, smoke_report=smoke_report, security_report=security_report,
+        door_type=door_type, blast_radius=blast_radius,
     )
     return ShipPrepResult(
         base_branch=base_branch,
@@ -2976,7 +3414,7 @@ def prepare_ship_payload(
     allow_topology_override: bool = False,
     stage_branches: Optional[Dict[str, str]] = None,
 ) -> Tuple[bool, ShipPrepResult, str]:
-    """Collects per-spec ship plans, scoped ProofVerifier results, optional evidence publishing, and PR bodies."""
+    """Collects per-spec and refactor ship plans, scoped ProofVerifier results, optional evidence publishing, and PR bodies."""
     repo = normalize_target_path(repo_path)
     head_branch = _get_head_branch(repo)
     eff_stages = resolve_stage_branches(repo, stage_branches)
@@ -2998,10 +3436,28 @@ def prepare_ship_payload(
     if not diff_ok:
         return False, _empty_result(base_branch, head_branch), diff_err
 
+    _, diff_text, _ = run_command(["git", "diff", f"{eff_base}..HEAD"], cwd=repo)
     index_changes = parse_index_diff(idx_diff)
-    door_type, blast_radius = classify_merge_danger(changed_files, diff_stat)
-    context_terms = _read_context_terms(repo, _compute_search_tokens(blast_radius, index_changes))
     ticket, examiner_receipt, gate_status, receipts_by_ticket = _load_brigade_history_snapshot(repo)
+    refactor_receipts = _discover_refactor_receipts(repo, changed_files)
+    is_refactor_slice = (
+        head_branch.startswith("refactor/")
+        or bool(refactor_receipts)
+        or (ticket is not None and getattr(ticket, "track", "") in ("core", "ui"))
+    )
+    door_type, blast_radius = classify_merge_danger(
+        changed_files, diff_stat, diff_text=diff_text, is_refactor=is_refactor_slice
+    )
+    for _, rec in refactor_receipts:
+        s1 = rec.get("seal_1_intent") or {}
+        for reason in s1.get("one_way_reasons") or []:
+            if reason not in blast_radius["one_way_reasons"]:
+                blast_radius["one_way_reasons"].append(reason)
+        rec_door = str(s1.get("door_type") or "")
+        if rec_door.startswith("One-way") and not door_type.startswith("One-way"):
+            door_type = rec_door
+
+    context_terms = _read_context_terms(repo, _compute_search_tokens(blast_radius, index_changes))
     specs_linked, ticket_map, ticket_by_slug = _discover_specs_and_tickets(
         repo, eff_base, changed_files, index_changes, receipts_by_ticket
     )
@@ -3011,10 +3467,16 @@ def prepare_ship_payload(
         repo, ticket, list(ticket_by_slug.keys()), changed_files,
         selected_slug=selected_slug, eff_base=eff_base, ticket_by_slug=ticket_by_slug,
     )
-    all_plans, plan_receipts = _build_all_spec_plans(
+    spec_plans, plan_receipts = _build_all_spec_plans(
         repo, specs_linked, base_branch, changed_files, index_changes,
         context_terms, verified_proofs, failed_proofs, examiner_receipt, receipts_by_ticket, gate_status, ticket_map,
     )
+    used_branches = {p.pr_branch for p in spec_plans}
+    refactor_plans = _build_refactor_plans(
+        refactor_receipts, base_branch, changed_files, index_changes,
+        context_terms, gate_status, used_branches, door_type, blast_radius,
+    )
+    all_plans = [*spec_plans, *refactor_plans]
     exclusive, has_shared, exc_files = _resolve_spec_commits(repo, eff_base, all_plans, ticket_map)
     _apply_slice_commits_to_plans(all_plans, exclusive, has_shared, exc_files, index_changes)
     if not split_branches:
@@ -3037,9 +3499,16 @@ def prepare_ship_payload(
         return False, res_pub_err, pub_err
 
     for plan in selected_plans:
-        p_rec = plan_receipts.get(plan.spec_slug)
-        plan.realization_audit = compute_realization_audit(plan, plan.spec_digest, p_rec)
-        _render_plan_bodies(plan, base_branch, context_terms, p_rec, gate_status)
+        if plan.kind == "refactor":
+            rec_ex = (plan.refactor_receipt or {}).get("seal_4_examiner") or None
+            _render_plan_bodies(
+                plan, base_branch, context_terms, rec_ex, gate_status,
+                door_type=door_type, blast_radius=blast_radius,
+            )
+        else:
+            p_rec = plan_receipts.get(plan.spec_slug)
+            plan.realization_audit = compute_realization_audit(plan, plan.spec_digest, p_rec)
+            _render_plan_bodies(plan, base_branch, context_terms, p_rec, gate_status)
 
     smoke_report, sec_report, gate_err = _run_tier2_gates(
         repo, base_branch, eff_base, changed_files, require_smoke, eff_stages

@@ -1572,6 +1572,10 @@ class BrigadeFSM:
             self._record_guard_failure(curr, msg, details)
             return False, curr, f"Edge Gate blocked advancement: {msg}"
 
+        ticket = self.state.active_ticket
+        if ticket and getattr(ticket, "track", "core") in ("core", "ui"):
+            self._synthesize_refactor_receipt(ticket)
+
         if self.should_run_qa(self.state.active_ticket):
             drift_ok, drift_msg = self._run_qa_db_drift_preflight()
             if not drift_ok and not force:
@@ -1607,6 +1611,10 @@ class BrigadeFSM:
                 return True, self.state.current_state, msg
             self._record_guard_failure(curr, msg, details)
             return False, curr, msg
+        if next_state == CycleState.STAGING:
+            ticket = self.state.active_ticket
+            if ticket and getattr(ticket, "track", "core") in ("core", "ui"):
+                self._refresh_refactor_seal_4(ticket)
         self._transition(next_state, msg, details)
         return True, self.state.current_state, msg
 
@@ -1922,6 +1930,8 @@ class BrigadeFSM:
         # Measure initial metrics before surgery
         full_target = self.target_repo / file_path
         sloc_b, health_b = self.calculate_file_metrics(full_target)
+        before_metrics = self._capture_before_metrics(target_file=file_path)
+        surgeon_cid = self._resolve_station_cid("surgeon")
 
         # Check flight recorder for prior dead ends / constraints
         recorder = FlightRecorder(self.target_repo, ticket_id)
@@ -1953,6 +1963,8 @@ class BrigadeFSM:
             negative_constraints=all_constraints,
             health_before=health_b,
             sloc_before=sloc_b,
+            before_metrics=before_metrics,
+            surgeon_cid=surgeon_cid,
         )
 
         self.state.active_ticket = ticket
@@ -2036,6 +2048,12 @@ class BrigadeFSM:
                 clean_name=clean_name,
             )
 
+        before_metrics = self._capture_before_metrics(
+            target_file=target_file,
+            expected_files=eff_expected_files,
+        )
+        surgeon_cid = self._resolve_station_cid("surgeon")
+
         ticket = Ticket(
             ticket_id=ticket_id,
             track=track,
@@ -2056,6 +2074,8 @@ class BrigadeFSM:
             spec_path=spec_path,
             lavish_path=resolved_lavish,
             require_qa=require_qa,
+            before_metrics=before_metrics,
+            surgeon_cid=surgeon_cid,
             negative_constraints=all_constraints,
         )
 
@@ -2094,12 +2114,175 @@ class BrigadeFSM:
 
         return True, ticket, f"Slice '{name}' initiated successfully.{worktree_msg} Branch: {branch_name} (State: {state_label})."
 
+    def _resolve_station_cid(self, role_name: str) -> Optional[str]:
+        st = self.state.stations.get(role_name)
+        cid = getattr(st, "conversation_id", None) if st else None
+        return str(cid).strip() if cid and str(cid).strip() else None
+
+    def _capture_before_metrics(
+        self,
+        target_file: str = "",
+        expected_files: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        from tools.gate import (
+            EdgeVerificationGate,
+            _PRODUCTION_CODE_SUFFIXES,
+            _compute_source_max_cc,
+            _count_sql_leaks,
+            _is_action_controller_path,
+            _is_eligible_prod_path,
+        )
+
+        candidates: List[str] = []
+        for raw in [target_file, *(expected_files or [])]:
+            norm = str(raw or "").strip().replace("\\", "/")
+            if norm.startswith("./"):
+                norm = norm[2:]
+            if norm and norm not in candidates:
+                candidates.append(norm)
+
+        db_leaks = 0
+        max_cc = 0
+        sloc = 0
+        abs_files: List[str] = []
+        ts_abs: List[str] = []
+
+        for rel in candidates:
+            if not _is_eligible_prod_path(rel, _PRODUCTION_CODE_SUFFIXES, require_src_prefix=False):
+                continue
+            full_path = self.target_repo / rel
+            if not full_path.is_file():
+                continue
+            abs_str = str(full_path.resolve())
+            abs_files.append(abs_str)
+            suffix = full_path.suffix.lower()
+            try:
+                content = full_path.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            if _is_action_controller_path(rel):
+                db_leaks += _count_sql_leaks(content)
+            file_cc, _ = _compute_source_max_cc(content, suffix)
+            if file_cc > max_cc:
+                max_cc = file_cc
+            sloc += EdgeVerificationGate._count_source_sloc(content, suffix)
+            if suffix in (".ts", ".tsx") and not rel.lower().endswith(".d.ts"):
+                ts_abs.append(abs_str)
+
+        type_score: Optional[float] = None
+        if ts_abs:
+            try:
+                from tools.audit.ts_discipline import TsDisciplineAuditor
+                type_score = TsDisciplineAuditor(self.target_repo).scan(self.target_repo, scoped_files=ts_abs).overall_score
+            except Exception:
+                type_score = None
+
+        dryer_clones = EdgeVerificationGate(self.target_repo)._compute_dryer_clones(abs_files)
+        return {
+            "db_leaks": db_leaks,
+            "max_cc": max_cc,
+            "dryer_clones": dryer_clones,
+            "type_score": type_score,
+            "sloc": sloc,
+        }
+
+    @staticmethod
+    def _derive_refactor_slug(ticket: Ticket) -> str:
+        if ticket.branch_name:
+            return ticket.branch_name.split("/")[-1].strip()
+        if ticket.domain:
+            return ticket.domain.lower().replace("_", "-").strip()
+        return ticket.ticket_id.lower()
+
+    def _synthesize_refactor_receipt(self, ticket: Ticket) -> None:
+        from .refactor_receipt import build_and_write_refactor_receipt
+
+        work_dir = self._get_work_dir()
+        if not (work_dir / ".git").exists() and not (self.target_repo / ".git").exists():
+            return
+        slug = self._derive_refactor_slug(ticket)
+        surgeon_cid = ticket.surgeon_cid or self._resolve_station_cid("surgeon")
+        try:
+            receipt, _, _ = build_and_write_refactor_receipt(
+                target_repo=self.target_repo,
+                work_dir=work_dir,
+                slug=slug,
+                base_branch=self.state.base_branch or "development",
+                ticket=ticket,
+                examiner_receipt=self.state.examiner_receipt,
+                surgeon_cid=surgeon_cid,
+            )
+            after_sloc = receipt.seal_2_metrics.get("after", {}).get("sloc")
+            if isinstance(after_sloc, int):
+                ticket.sloc_after = after_sloc
+            if ticket.target_file:
+                target_in_work = work_dir / ticket.target_file
+                if target_in_work.is_file():
+                    _, health_a = self.calculate_file_metrics(target_in_work)
+                    ticket.health_after = health_a
+            self.save()
+        except Exception as exc:
+            print(f"[WARN] Failed to synthesize RefactorReceipt: {exc}")
+
+    def _refresh_refactor_seal_4(self, ticket: Ticket) -> None:
+        from .refactor_receipt import refresh_receipt_examiner_seal
+
+        slug = self._derive_refactor_slug(ticket)
+        surgeon_cid = ticket.surgeon_cid or self._resolve_station_cid("surgeon")
+        res = refresh_receipt_examiner_seal(
+            target_repo=self.target_repo,
+            slug=slug,
+            examiner_receipt=self.state.examiner_receipt,
+            surgeon_cid=surgeon_cid,
+        )
+        if res is None:
+            self._synthesize_refactor_receipt(ticket)
+
+    def _find_refactor_receipt_file(self, ticket: Ticket) -> Optional[Path]:
+        rec_dir = self.target_repo / ".edge" / "receipts" / "refactor"
+        if not rec_dir.is_dir():
+            return None
+        slug = self._derive_refactor_slug(ticket)
+        cand = rec_dir / f"{slug}.json"
+        if cand.is_file():
+            return cand
+        for json_file in sorted(rec_dir.glob("*.json")):
+            try:
+                data = json.loads(json_file.read_text(encoding="utf-8"))
+                if isinstance(data, dict) and data.get("ticket_id") == ticket.ticket_id:
+                    return json_file
+            except Exception:
+                continue
+        return None
+
     def _is_ticket_one_way_door(self, ticket: Ticket, ship_door_type: str) -> bool:
         if ship_door_type.startswith("One-way"):
             return True
-        from .ship_prep import _is_one_way_door_path
+        from .ship_prep import _is_one_way_door_path, _is_refactor_auth_path
         paths = [ticket.target_file, *(getattr(ticket, "expected_files", None) or [])]
-        return any(_is_one_way_door_path(p) for p in paths if p)
+        if any(_is_one_way_door_path(p) for p in paths if p):
+            return True
+        if getattr(ticket, "track", "core") in ("core", "ui"):
+            return any(_is_refactor_auth_path(p) for p in paths if p)
+        return False
+
+    @staticmethod
+    def _extract_pr_url(stdout: str) -> str:
+        for line in reversed((stdout or "").splitlines()):
+            s = line.strip()
+            if s.startswith("http://") or s.startswith("https://"):
+                return s
+        return (stdout or "").strip()
+
+    @staticmethod
+    def _parse_pr_view_state(stdout: str) -> Tuple[str, str]:
+        try:
+            data = json.loads(stdout or "{}")
+            if isinstance(data, dict):
+                return str(data.get("state") or "").upper(), str(data.get("url") or "")
+        except Exception:
+            pass
+        return "", ""
 
     def _reset_after_slice_finish(self, ticket: Ticket) -> None:
         if ticket.worktree_path:
@@ -2113,16 +2296,80 @@ class BrigadeFSM:
         self.state.blocked_reason = None
         self._transition(CycleState.IDLE, f"Slice {ticket.ticket_id} finished and merged cleanly.")
 
+    def _validate_refactor_ship_preconditions(
+        self, ticket: Ticket, diff_repo: Path
+    ) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
+        from .refactor_receipt import RefactorReceiptVerifier
+
+        if self.state.current_state != CycleState.STAGING:
+            return False, (
+                f"Cannot finish refactor slice via PR: FSM must be in STAGING "
+                f"(currently {self.state.current_state.value})."
+            ), None
+
+        ex = self.state.examiner_receipt
+        if not ex or str(getattr(ex, "verdict", "") or "").upper() != "PASS":
+            return False, "Cannot finish refactor slice via PR: ExaminerReceipt PASS seal is required.", None
+
+        receipt_file = self._find_refactor_receipt_file(ticket)
+        if not receipt_file:
+            return False, (
+                f"Cannot finish refactor slice via PR: missing RefactorReceipt under "
+                f"{self.target_repo / '.edge' / 'receipts' / 'refactor'}."
+            ), None
+
+        v_ok, v_msg, _ = RefactorReceiptVerifier.verify_receipt_file(
+            receipt_file,
+            repo_path=self.target_repo,
+            base_ref=self.state.base_branch,
+            work_dir=diff_repo,
+            strict=True,
+        )
+        if not v_ok:
+            return False, f"Cannot finish refactor slice via PR: RefactorReceipt verification failed ({v_msg}).", None
+
+        try:
+            rec_data = json.loads(receipt_file.read_text(encoding="utf-8"))
+        except Exception:
+            rec_data = None
+        return True, "", rec_data
+
     def _finish_slice_via_pr(self, ticket: Ticket, auto_merge_two_way: bool = True) -> Tuple[bool, str]:
         from .ship_prep import prepare_ship_payload
-        _, ship_res, _ = prepare_ship_payload(self.target_repo, base_branch=self.state.base_branch)
+        from .tasks_bridge import complete_linked_task
+
+        is_refactor_track = getattr(ticket, "track", "core") in ("core", "ui")
+        diff_repo = normalize_target_path(ticket.worktree_path) if ticket.worktree_path else self.target_repo
+
+        rec_data: Optional[Dict[str, Any]] = None
+        if is_refactor_track:
+            pre_ok, pre_err, rec_data = self._validate_refactor_ship_preconditions(ticket, diff_repo)
+            if not pre_ok:
+                return False, pre_err
+
+        ship_ok, ship_res, ship_err = prepare_ship_payload(diff_repo, base_branch=self.state.base_branch)
+        if not ship_ok:
+            return False, f"Cannot finish slice via PR: prepare_ship_payload failed: {ship_err}"
+
         is_one_way = self._is_ticket_one_way_door(ticket, ship_res.door_type)
+        one_way_reasons: List[str] = list(ship_res.blast_radius.get("one_way_reasons") or [])
+        if rec_data:
+            s1 = rec_data.get("seal_1_intent") or {}
+            if str(s1.get("door_type") or "").startswith("One-way"):
+                is_one_way = True
+            for r in s1.get("one_way_reasons") or []:
+                if r not in one_way_reasons:
+                    one_way_reasons.append(r)
+
         badge = "[ONE-WAY DOOR]" if is_one_way else "[TWO-WAY DOOR]"
         branch = ticket.branch_name or self.state.active_branch or "HEAD"
         pr_title = f"{badge} {branch}: {ticket.description}"
         pr_body = ship_res.pr_body or pr_title
 
-        run_command(["git", "push", "-u", "origin", branch], cwd=self.target_repo)
+        p_code, p_out, p_err = run_command(["git", "push", "-u", "origin", branch], cwd=diff_repo)
+        if p_code != 0:
+            return False, f"Failed to push branch '{branch}': {p_err or p_out}"
+
         c_code, c_out, c_err = run_command(
             [
                 "gh", "pr", "create",
@@ -2131,22 +2378,102 @@ class BrigadeFSM:
                 "--title", pr_title,
                 "--body", pr_body,
             ],
-            cwd=self.target_repo,
+            cwd=diff_repo,
         )
         if c_code != 0:
             return False, f"Failed to create GitHub PR for {branch}: {c_err or c_out}"
 
+        pr_url = self._extract_pr_url(c_out)
+        ticket.pr_url = pr_url
+        self.save()
+
         if is_one_way:
+            reasons_msg = f" Reasons: {'; '.join(one_way_reasons)}" if one_way_reasons else ""
             return (
                 True,
-                f"One-way door PR opened ({pr_title}) and held open for mandatory human review before merging.",
+                f"One-way door PR opened ({pr_url or pr_title}) and held open for mandatory human review before merging.{reasons_msg}",
             )
 
         if auto_merge_two_way:
-            run_command(["gh", "pr", "merge", branch, "--auto", "--merge"], cwd=self.target_repo)
+            m_code, m_out, m_err = run_command(["gh", "pr", "merge", branch, "--auto", "--merge"], cwd=diff_repo)
+            if m_code != 0:
+                return False, f"Failed to merge GitHub PR for {branch}: {m_err or m_out}"
+
+            v_code, v_out, _ = run_command(
+                ["gh", "pr", "view", pr_url or branch, "--json", "state,url"],
+                cwd=diff_repo,
+            )
+            pr_state, viewed_url = self._parse_pr_view_state(v_out) if v_code == 0 else ("", "")
+            eff_url = viewed_url or pr_url
+
+            if is_refactor_track:
+                if pr_state == "MERGED":
+                    complete_linked_task(getattr(ticket, "tasks_axi_id", None), eff_url)
+                    self._reset_after_slice_finish(ticket)
+                    return True, f"Two-way door PR ({eff_url or pr_title}) merged into {self.state.base_branch}."
+                ticket.pr_url = eff_url
+                self._transition(
+                    CycleState.AWAITING_MERGE,
+                    f"Auto-merge queued for PR {eff_url or branch}; awaiting merge confirmation.",
+                )
+                return True, (
+                    f"Two-way door PR ({eff_url or pr_title}) created with auto-merge queued; "
+                    f"state transitioned to AWAITING_MERGE."
+                )
+
+            if pr_state == "OPEN":
+                ticket.pr_url = eff_url
+                self._transition(
+                    CycleState.AWAITING_MERGE,
+                    f"Auto-merge queued for PR {eff_url or branch}; awaiting merge confirmation.",
+                )
+                return True, (
+                    f"Two-way door PR ({eff_url or pr_title}) created with auto-merge queued; "
+                    f"state transitioned to AWAITING_MERGE."
+                )
+
+            complete_linked_task(getattr(ticket, "tasks_axi_id", None), eff_url)
+            self._reset_after_slice_finish(ticket)
+            return True, f"Two-way door PR ({pr_title}) created and auto-merged into {self.state.base_branch}."
+
+        if is_refactor_track:
+            self._transition(
+                CycleState.AWAITING_MERGE,
+                f"Two-way door PR {pr_url or branch} opened without auto-merge; awaiting merge confirmation.",
+            )
+            return True, f"Two-way door PR ({pr_url or pr_title}) opened; state transitioned to AWAITING_MERGE."
 
         self._reset_after_slice_finish(ticket)
         return True, f"Two-way door PR ({pr_title}) created and auto-merged into {self.state.base_branch}."
+
+    def confirm_merge(self) -> Tuple[bool, str]:
+        """Confirms a queued AWAITING_MERGE PR has merged, completes tasks-axi, and resets FSM to IDLE."""
+        from .tasks_bridge import complete_linked_task
+
+        ticket = self.state.active_ticket
+        if not ticket or self.state.current_state != CycleState.AWAITING_MERGE:
+            return False, f"Cannot confirm merge: FSM is not in AWAITING_MERGE (currently {self.state.current_state.value})."
+
+        diff_repo = normalize_target_path(ticket.worktree_path) if ticket.worktree_path else self.target_repo
+        ref = getattr(ticket, "pr_url", None) or ticket.branch_name or self.state.active_branch
+        if not ref:
+            return False, "Cannot confirm merge: no PR URL or branch recorded."
+
+        v_code, v_out, v_err = run_command(
+            ["gh", "pr", "view", ref, "--json", "state,url"],
+            cwd=diff_repo,
+        )
+        if v_code != 0:
+            return False, f"Failed to query PR status for '{ref}': {v_err or v_out}"
+
+        pr_state, viewed_url = self._parse_pr_view_state(v_out)
+        if pr_state != "MERGED":
+            return False, f"PR '{ref}' is not merged yet (state: {pr_state or 'UNKNOWN'}). Remaining in AWAITING_MERGE."
+
+        eff_url = viewed_url or getattr(ticket, "pr_url", "") or ""
+        complete_linked_task(getattr(ticket, "tasks_axi_id", None), eff_url)
+        self._reset_after_slice_finish(ticket)
+        return True, f"PR {eff_url or ref} confirmed MERGED; linked task completed and FSM reset to IDLE."
 
     def finish_slice(self, open_pr: bool = False, auto_merge_two_way: bool = True) -> Tuple[bool, str]:
         """

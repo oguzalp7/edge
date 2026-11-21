@@ -215,6 +215,110 @@ def cmd_report(args):
         print(report_content)
 
 
+def _derive_item_slug(item) -> str:
+    import re
+    stem = Path(item.file_path).stem.lower()
+    rule_short = re.sub(r"^rule-", "", item.rule_id.lower())
+    fp_short = (item.fingerprint or "")[:6].lower()
+    raw = f"{item.track}-{stem}-{rule_short}-{fp_short}" if fp_short else f"{item.track}-{stem}-{rule_short}"
+    return re.sub(r"[^a-z0-9-]+", "-", raw).strip("-")
+
+
+def _derive_metric_targets(item) -> dict:
+    details = item.details if isinstance(item.details, dict) else {}
+    rule_upper = (item.rule_id or "").upper()
+    if "db_leaks" in details or "DB-LEAK" in rule_upper or "SQL" in rule_upper:
+        return {"db_leaks": 0}
+    if "max_cc" in details or "CC" in rule_upper or "COMPLEXITY" in rule_upper:
+        return {"max_cc": 10}
+    if "DUPLICATE" in rule_upper or "DRYER" in rule_upper:
+        return {"dryer_clones": 0}
+    if rule_upper.startswith("RULE-TS-"):
+        return {"type_score": 90}
+    return {"max_cc": 10}
+
+
+def _load_existing_ticket_fingerprints(tickets_dir: Path) -> set:
+    existing = set()
+    if not tickets_dir.is_dir():
+        return existing
+    import yaml
+    for md_file in tickets_dir.glob("*.md"):
+        existing.add(md_file.stem)
+        try:
+            text = md_file.read_text(encoding="utf-8", errors="ignore")
+            if text.startswith("---"):
+                parts = text.split("---", 2)
+                if len(parts) >= 3:
+                    fm = yaml.safe_load(parts[1]) or {}
+                    if isinstance(fm, dict):
+                        if fm.get("slug"):
+                            existing.add(str(fm["slug"]))
+                        if fm.get("fingerprint"):
+                            existing.add(str(fm["fingerprint"]))
+        except Exception:
+            continue
+    return existing
+
+
+def cmd_export_tasks(args):
+    from tools.brigade.tasks_bridge import create_refactor_ticket, resolve_target_repo_root
+
+    target_repo = resolve_target_repo_root(normalize_target_path(args.target))
+    ledger = LedgerEngine(target_repo)
+    tracks = ["core", "ui"] if args.track == "all" else [args.track]
+
+    severity_rank = {
+        FindingSeverity.CRITICAL.value: 0,
+        FindingSeverity.WARNING.value: 1,
+        FindingSeverity.ADVISORY.value: 2,
+    }
+
+    open_items = []
+    for trk in tracks:
+        for item in ledger.load_channel(trk):
+            if item.status == FindingStatus.OPEN.value:
+                open_items.append(item)
+
+    open_items.sort(key=lambda i: (severity_rank.get(i.severity, 99), i.file_path, i.line_number))
+
+    tickets_dir = target_repo / ".edge" / "tickets" / "refactor"
+    existing_keys = _load_existing_ticket_fingerprints(tickets_dir)
+
+    exported_count = 0
+    skipped_count = 0
+    seen_fps = set()
+    top_n = max(0, int(getattr(args, "top", 10)))
+
+    for item in open_items:
+        if exported_count >= top_n:
+            break
+        slug = _derive_item_slug(item)
+        if item.fingerprint in seen_fps or item.fingerprint in existing_keys or slug in existing_keys:
+            skipped_count += 1
+            continue
+        seen_fps.add(item.fingerprint)
+        existing_keys.add(slug)
+
+        targets = _derive_metric_targets(item)
+        ok, ticket_path, tasks_id = create_refactor_ticket(
+            repo_path=target_repo,
+            slug=slug,
+            track=item.track,
+            target_rules=[item.rule_id],
+            target_files=[item.file_path],
+            metric_targets=targets,
+            door_type="two-way",
+            sync_tasks=bool(getattr(args, "sync_tasks", False)),
+            hold_captain=False,
+        )
+        if ok:
+            exported_count += 1
+            tid_info = f" (tasks-axi: {tasks_id})" if tasks_id else ""
+            print(f"✅ Exported {ticket_path}{tid_info}")
+
+    print(f"Export complete: {exported_count} ticket(s) created, {skipped_count} duplicate(s) skipped.")
+
 
 def main():
     parser = argparse.ArgumentParser(description="Edge Radar: Scoped Pattern Observation & Idempotent Debt Ledger")
@@ -244,6 +348,13 @@ def main():
     p_report.add_argument("--out", "-o", default=None, help="Output markdown or toon file path")
     p_report.set_defaults(func=cmd_report)
 
+    # export-tasks command
+    p_export = subparsers.add_parser("export-tasks", help="Convert open ledger items into refactor tickets")
+    p_export.add_argument("target", nargs="?", default=".", help="Target repository directory")
+    p_export.add_argument("--track", choices=["all", "core", "ui"], default="all", help="Track filter")
+    p_export.add_argument("--top", type=int, default=10, help="Max open items to export")
+    p_export.add_argument("--sync-tasks", action="store_true", help="Sync exported tickets to tasks-axi")
+    p_export.set_defaults(func=cmd_export_tasks)
 
     args = parser.parse_args()
     args.func(args)

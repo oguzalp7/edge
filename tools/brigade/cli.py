@@ -301,12 +301,15 @@ def cmd_seal_review(args: argparse.Namespace) -> int:
 
     fsm = BrigadeFSM(repo_path)
     ticket_id = fsm.state.active_ticket.ticket_id if fsm.state.active_ticket else None
+    ex_cid = getattr(args, "examiner_cid", None)
+    if not ex_cid and "examiner" in fsm.state.stations:
+        ex_cid = getattr(fsm.state.stations["examiner"], "conversation_id", None) or None
     fsm.state.examiner_receipt = ExaminerReceipt(
         verdict=verdict,
         summary=summary,
         ticket_id=ticket_id,
         evidence_reviewed=evidence,
-        examiner_cid=getattr(args, "examiner_cid", None),
+        examiner_cid=ex_cid,
     )
     fsm.save()
     print(f"✅ Examiner review sealed: [{verdict}] (ticket: {ticket_id or 'N/A'})")
@@ -798,13 +801,17 @@ def cmd_start_slice(args: argparse.Namespace) -> int:
     lavish_path = getattr(args, "lavish", None)
     require_qa = getattr(args, "require_qa", None)
 
+    track = getattr(args, "track", "feature")
+    raw_allow_mig = getattr(args, "allow_migration", None)
+    allow_schema_migration = (track == "feature") if raw_allow_mig is None else bool(raw_allow_mig)
+
     ok, ticket, msg = fsm.start_slice(
         name=args.name,
-        track=getattr(args, "track", "feature"),
+        track=track,
         target_file=getattr(args, "target_file", ""),
         domain=getattr(args, "domain", ""),
         test_seam_command=getattr(args, "test_cmd", "npm run test:unit"),
-        allow_schema_migration=getattr(args, "allow_migration", True),
+        allow_schema_migration=allow_schema_migration,
         auto_lease_worktree=True,
         expected_files=expected_files,
         spec_path=spec_path,
@@ -884,6 +891,91 @@ def cmd_finish_slice(args: argparse.Namespace) -> int:
     print("=======================================================")
     print(msg)
     print("=======================================================\n")
+    return 0
+
+
+def _parse_metric_targets(raw_targets: Optional[str]) -> Dict[str, Any]:
+    targets: Dict[str, Any] = {}
+    for tok in (raw_targets or "").split(","):
+        if "=" not in tok:
+            continue
+        key, raw_val = tok.split("=", 1)
+        k = key.strip()
+        v_s = raw_val.strip()
+        if not k or not v_s:
+            continue
+        try:
+            targets[k] = int(v_s) if "." not in v_s else float(v_s)
+        except ValueError:
+            continue
+    return targets
+
+
+def cmd_create_refactor_ticket(args: argparse.Namespace) -> int:
+    from tools.brigade.tasks_bridge import create_refactor_ticket
+
+    repo_path = normalize_target_path(args.repo)
+    rules = [r.strip() for r in (getattr(args, "rules", "") or "").split(",") if r.strip()]
+    files = [f.strip() for f in (getattr(args, "files", "") or "").split(",") if f.strip()]
+    targets = _parse_metric_targets(getattr(args, "targets", ""))
+    door_type = getattr(args, "door", "two-way") or "two-way"
+
+    ok, ticket_path, tasks_id = create_refactor_ticket(
+        repo_path=repo_path,
+        slug=args.slug,
+        track=args.track,
+        target_rules=rules,
+        target_files=files,
+        metric_targets=targets,
+        door_type=door_type,
+        sync_tasks=bool(getattr(args, "sync_tasks", False)),
+        hold_captain=bool(getattr(args, "hold_captain", False)),
+    )
+    if not ok:
+        print(f"❌ Failed to create refactor ticket at {ticket_path}")
+        return 1
+    print(f"✅ Refactor ticket written: {ticket_path}")
+    if tasks_id:
+        print(f"   Linked tasks-axi ID: {tasks_id}")
+    return 0
+
+
+def cmd_seal_refactor(args: argparse.Namespace) -> int:
+    from tools.brigade.refactor_receipt import build_and_write_refactor_receipt
+
+    repo_path = normalize_target_path(args.repo)
+    fsm = BrigadeFSM(repo_path)
+    ticket = fsm.state.active_ticket
+    base_ref = getattr(args, "base", None) or fsm.state.base_branch or "development"
+    slug = getattr(args, "slug", None) or (
+        fsm._derive_refactor_slug(ticket) if ticket else "refactor"
+    )
+    work_dir = fsm._get_work_dir()
+    surgeon_cid = (ticket.surgeon_cid if ticket else None) or fsm._resolve_station_cid("surgeon")
+
+    receipt, json_path, md_path = build_and_write_refactor_receipt(
+        target_repo=fsm.target_repo,
+        work_dir=work_dir,
+        slug=slug,
+        base_branch=base_ref,
+        ticket=ticket,
+        examiner_receipt=fsm.state.examiner_receipt,
+        surgeon_cid=surgeon_cid,
+    )
+    print(f"✅ RefactorReceipt sealed: {json_path} & {md_path}")
+    print(f"   Commit: {receipt.seal_1_intent.get('commit_sha', '')[:12]}")
+    print(f"   Gate passed: {receipt.seal_3_gate.get('all_passed')}")
+    return 0
+
+
+def cmd_confirm_merge(args: argparse.Namespace) -> int:
+    repo_path = normalize_target_path(args.repo)
+    fsm = BrigadeFSM(repo_path)
+    ok, msg = fsm.confirm_merge()
+    if not ok:
+        print(f"❌ {msg}")
+        return 1
+    print(f"✅ {msg}")
     return 0
 
 
@@ -1217,7 +1309,7 @@ def main() -> int:
     p_start.add_argument("--target-file", default="", help="Primary target file (optional)")
     p_start.add_argument("--domain", default="", help="Domain module (e.g. bookings, staff)")
     p_start.add_argument("--test-cmd", default="npm run test:unit", help="Test seam command")
-    p_start.add_argument("--allow-migration", action="store_true", default=True, help="Allow schema migrations")
+    p_start.add_argument("--allow-migration", action="store_true", default=None, help="Allow schema migrations (defaults True for feature, False for core/ui)")
     p_start.add_argument("--expected-files", help="Comma-separated expected files to create or modify")
     p_start.add_argument("--spec", help="Path to specification document")
     p_start.add_argument("--lavish", help="Path to associated Lavish prototype HTML file")
@@ -1244,6 +1336,28 @@ def main() -> int:
     p_fin.add_argument("repo", help="Path to target repository")
     p_fin.add_argument("--pr", action="store_true", help="Open a Spec-Anchored GitHub PR (auto-merges Two-Way Doors; holds One-Way Doors for human review)")
     p_fin.add_argument("--no-auto-merge", action="store_true", help="Do not auto-merge Two-Way Door PRs when --pr is used")
+
+    # create-refactor-ticket
+    p_crt = subparsers.add_parser("create-refactor-ticket", help="Create dual-layer refactor ticket and optional tasks-axi entry")
+    p_crt.add_argument("repo", help="Path to target repository")
+    p_crt.add_argument("--slug", required=True, help="Refactor ticket slug")
+    p_crt.add_argument("--track", required=True, choices=["core", "ui"], help="Refactor track")
+    p_crt.add_argument("--rules", default="", help="Comma-separated target rules")
+    p_crt.add_argument("--files", default="", help="Comma-separated target files")
+    p_crt.add_argument("--targets", default="", help="Comma-separated metric targets (e.g. max_cc=8,db_leaks=0)")
+    p_crt.add_argument("--door", default="two-way", choices=["two-way", "one-way"], help="Door classification")
+    p_crt.add_argument("--sync-tasks", action="store_true", help="Sync ticket to tasks-axi")
+    p_crt.add_argument("--hold-captain", action="store_true", help="Pass --hold captain to tasks-axi")
+
+    # seal-refactor
+    p_sref = subparsers.add_parser("seal-refactor", help="Synthesize 4-seal machine-generated RefactorReceipt")
+    p_sref.add_argument("repo", help="Path to target repository")
+    p_sref.add_argument("--slug", default=None, help="Refactor receipt slug")
+    p_sref.add_argument("--base", default=None, help="Base branch to diff against")
+
+    # confirm-merge
+    p_cm = subparsers.add_parser("confirm-merge", help="Confirm queued PR merge, complete linked tasks-axi, and reset FSM to IDLE")
+    p_cm.add_argument("repo", help="Path to target repository")
 
     # pause
     p_pause = subparsers.add_parser("pause", help="Safely pause brigade execution and create durable checkpoint")
@@ -1354,6 +1468,9 @@ def main() -> int:
         "worktree": cmd_worktree,
         "start-slice": cmd_start_slice,
         "finish-slice": cmd_finish_slice,
+        "create-refactor-ticket": cmd_create_refactor_ticket,
+        "seal-refactor": cmd_seal_refactor,
+        "confirm-merge": cmd_confirm_merge,
         "pause": cmd_pause,
         "resume": cmd_resume,
         "check-heat": cmd_check_heat,

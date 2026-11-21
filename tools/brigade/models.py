@@ -27,6 +27,7 @@ class CycleState(str, Enum):
     GATE = "GATE"                             # Edge Verification Gate (gate.py)
     QA = "QA"                                 # End-to-End Browser & Visual QA Verification
     STAGING = "STAGING"                       # Squash-merge to base branch & radar ledger update
+    AWAITING_MERGE = "AWAITING_MERGE"         # PR opened with --auto merge queued; waiting for merge confirmation
     COMPLETED = "COMPLETED"                   # Hillclimbing micro-slice verified and delivered
     BLOCKED = "BLOCKED"                       # Guard failed; manual triage or fix needed
     STAGNATED = "STAGNATED"                   # Max retries exceeded without health improvement, rolled back
@@ -138,6 +139,12 @@ class Ticket:
     spec_path: Optional[str] = None
     lavish_path: Optional[str] = None         # Path to associated Lavish prototype HTML
     require_qa: Optional[bool] = None         # Explicit override: True=force QA, False=skip QA
+    tasks_axi_id: Optional[str] = None        # Optional linked tasks-axi task ID
+    metric_targets: Optional[Dict[str, Any]] = None
+    refactor_ticket_path: Optional[str] = None
+    before_metrics: Optional[Dict[str, Any]] = None
+    surgeon_cid: Optional[str] = None         # Station conversation_id of Surgeon who performed surgery
+    pr_url: Optional[str] = None              # Opened PR URL (for AWAITING_MERGE confirmation)
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     @staticmethod

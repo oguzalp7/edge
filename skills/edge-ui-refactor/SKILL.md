@@ -23,9 +23,8 @@ This skill guides a bounded, single-purpose subagent through consolidating dupli
 4. **Zero-Wrapper Left Behind (No Shallow Pass-Throughs):**
    - Whenever you consolidate or create a primitive (e.g. `Modal.tsx`), you MUST NOT leave a shallow wrapper behind (e.g. `ModalDialog.tsx`).
    - You MUST delete the legacy wrapper file completely (`git rm`) and migrate all call sites directly to the underlying primitive. Single-adapter pass-throughs violate Matt Pocock's Deletion Test.
-5. **Net SLOC Budget Gate (Refactoring Must Shrink Code):**
-   - For refactoring and pruning tasks, the net lines of code must decrease: $\Delta \text{SLOC} = \text{Added} - \text{Deleted} \le 0$ (excluding tests).
-   - Any refactoring task that adds more production lines than it removes will fail at the gate.
+5. **Max CC Non-Regression & Deterministic Metrics Gate:**
+   - Artificial line-count contraction rules are retired; clean primitive extractions are evaluated by `Max CC Non-Regression` ($\text{CC}_{\text{after}} \le \max(\text{CC}_{\text{before}}, 10)$), `Zero-Wrapper`, `Domain Purity`, and `tools/gate.py --format json` metric deltas (`max_cc`, `dryer_clones`, `type_score`, `sloc` — missing analyzers report `null`, never `0`).
 6. **Domain Schema vs Presentation State Purity:**
    - Presentation state (e.g. `isOpen`, `isClosed`, `activeTab`, local Tailwind animation classes) belongs to the UI component.
    - Domain semantics, canonical arrays (e.g. `CANONICAL_*`), table headers, business calculation parameters, and status lists MUST NOT be hardcoded inside JSX or frontend constants. They must come from the server/DB schema or domain dictionary.
@@ -83,14 +82,12 @@ uv run --with pillow python -m tools.ui_audit.diff_image <slice>-baseline.png <s
 - If mismatch $\le 0.15\%$: **PASS** (Zero vision tokens spent, visual parity guaranteed).
 - If mismatch $> 0.15\%$: **FAIL** (Inspect the highlighted bounding box, adjust Tailwind classes, max 3 attempts).
 
-### Step 7: 4-Stage Edge Verification Gate & PR Gatekeeping
-Before submitting or creating a PR, run the deterministic Edge Verification Gate:
+### Step 7: Edge Verification Gate, 4-Seal `RefactorReceipt` & PR Delivery
+Before submitting or creating a PR, run the deterministic Edge Verification Gate in JSON mode and seal the 4-seal `RefactorReceipt`:
 ```bash
-python3 /mnt/c/Users/oguz_/.gemini/config/plugins/edge/tools/gate.py /home/oguz/MS-Randevu-monolith --base HEAD~1
+python3 /mnt/c/Users/oguz_/.gemini/config/plugins/edge/tools/gate.py /home/oguz/MS-Randevu-monolith --base HEAD~1 --track ui --format json
+python3 /mnt/c/Users/oguz_/.gemini/config/plugins/edge/tools/brigade/cli.py seal-refactor /home/oguz/MS-Randevu-monolith --base development
 ```
-All 4 stages (Net SLOC Budget, Zero-Wrapper, Domain Purity, and Hermetic Verification) must pass.
-Then submit through the local `no-mistakes` verification gate:
-```bash
-no-mistakes axi run --skip ci --intent "Consolidate repeated <Primitive> JSX into centralized src/components/ui/<Primitive>.tsx with variant props"
-```
+All stages (`MigrationGate`, `Max CC Non-Regression`, `Mock Fallback`, `Type Escape`, `Dual-Theme & A11y`, `Zero-Wrapper`, `Domain Purity`, and `Hermetic Verification`) plus `RefactorReceiptVerifier` (`ExaminerReceipt PASS`, `examiner_cid != surgeon_cid`) must pass.
+Then deliver via Brigade PR flow (`brigade finish-slice <repo> --pr`, followed by `brigade confirm-merge <repo>` once Two-Way Door auto-merge completes).
 Report the resulting PR link or commit hash back to the parent agent.

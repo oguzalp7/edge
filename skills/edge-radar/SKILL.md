@@ -72,6 +72,9 @@ python3 /path/to/plugins/edge/tools/radar/cli.py status .
 
 # 4. Generate proposal report for user review
 python3 /path/to/plugins/edge/tools/radar/cli.py report . --top 10 -o debt-proposals.md
+
+# 5. Export open ledger findings to dual-layer refactor tickets (.edge/tickets/refactor/<slug>.md + optional tasks-axi)
+python3 /path/to/plugins/edge/tools/radar/cli.py export-tasks . --track all --top 10 --sync-tasks
 ```
 
 ---
