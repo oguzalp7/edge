@@ -59,6 +59,7 @@ from tools.common.paths import to_wsl_path, is_wsl_path
 # SSOT Heat Zone Thresholds (SPEC-002)
 GREEN_HEAT_THRESHOLD: int = 45_000
 YELLOW_HEAT_THRESHOLD: int = 75_000
+VERIFICATION_TIMEOUT_SECONDS: int = 300
 
 
 def _parse_porcelain_paths(porcelain_output: str) -> List[str]:
@@ -669,7 +670,12 @@ class BrigadeFSM:
                 return wt_path
         return self.target_repo
 
-    def _run_cmd(self, cmd: List[str], cwd: Optional[Path] = None) -> Tuple[int, str, str]:
+    def _run_cmd(
+        self,
+        cmd: List[str],
+        cwd: Optional[Path] = None,
+        timeout: Optional[int] = None,
+    ) -> Tuple[int, str, str]:
         """Runs a subprocess command with transparent WSL / Windows path handling."""
         if cwd:
             work_dir = cwd
@@ -677,7 +683,9 @@ class BrigadeFSM:
             work_dir = normalize_target_path(self.state.active_ticket.worktree_path)
         else:
             work_dir = self.target_repo
-        return run_command(cmd, cwd=work_dir)
+        if timeout is None:
+            return run_command(cmd, cwd=work_dir)
+        return run_command(cmd, cwd=work_dir, timeout=timeout)
 
     # =========================================================================
     # State Transition Guards (Deterministic QA)

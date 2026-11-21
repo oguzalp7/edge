@@ -7684,6 +7684,49 @@ class TestEvidenceFirstReviewAndShipBridge(unittest.TestCase):
             self.assertNotEqual(units["tools/brigade/security_audit.py"]["surface"], "server_action")
 
 
+class TestBrigadeVerificationTimeout(unittest.TestCase):
+    def test_verify_default_timeout_is_300_seconds(self):
+        import inspect
+        from unittest.mock import MagicMock
+        from tools.brigade import fsm as fsm_module
+        from tools.common import runner as runner_module
+
+        self.assertEqual(fsm_module.VERIFICATION_TIMEOUT_SECONDS, 300)
+        self.assertEqual(
+            inspect.signature(runner_module.run_command).parameters["timeout"].default,
+            300,
+        )
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir)
+            (repo / "package.json").write_text('{"scripts":{"test:unit":"vitest run"}}', encoding="utf-8")
+            (repo / "tsconfig.json").write_text("{}", encoding="utf-8")
+            fsm = BrigadeFSM(repo)
+            fsm.state.active_ticket = Ticket(
+                ticket_id="TICK-TIMEOUT-300",
+                track="core",
+                domain="core",
+                rule_id="RULE-TS-DOUBLE-CAST",
+                severity="CRITICAL",
+                target_file="src/core/sample.ts",
+                line_number=1,
+                fingerprint="fp_timeout_300",
+                description="Verify 300s default timeout",
+                suggested_fix="None",
+                branch_name="refactor/timeout-300",
+            )
+            recorded_timeouts = []
+
+            def fake_subprocess_run(exec_cmd, **kwargs):
+                recorded_timeouts.append(kwargs.get("timeout"))
+                return MagicMock(returncode=0, stdout="ok", stderr="")
+
+            with patch("tools.common.runner.subprocess.run", side_effect=fake_subprocess_run):
+                passed, msg, _ = fsm.guard_verify_to_review()
+
+            self.assertTrue(passed, msg)
+            self.assertEqual(recorded_timeouts, [300, 300])
+
+
 if __name__ == "__main__":
     unittest.main()
 

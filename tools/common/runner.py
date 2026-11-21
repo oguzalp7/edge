@@ -21,7 +21,7 @@ def _build_wsl_bash_command(cmd: Union[List[str], str], wsl_cwd: str) -> str:
 def run_command(
     cmd: Union[List[str], str],
     cwd: Optional[Union[Path, str]] = None,
-    timeout: int = 120,
+    timeout: int = 300,
 ) -> Tuple[int, str, str]:
     """
     Executes a command cleanly.

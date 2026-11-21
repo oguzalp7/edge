@@ -847,6 +847,25 @@ class TestDeterministicOmissionAndSafetyGates(_HermeticGitRepoTestCase):
         self.assertTrue(res_static.passed, msg=str(res_static))
         self.assertIn("SDL", res_static.message)
 
+    def test_verification_default_timeout_is_300s_or_higher(self) -> None:
+        recorded: list[tuple[list[str], int]] = []
+
+        def fake_run_command(cmd, cwd=None, timeout=None):
+            recorded.append((list(cmd), timeout))
+            return (0, "ok", "")
+
+        with patch("tools.gate.run_command", side_effect=fake_run_command):
+            res = self.gate.check_verification()
+
+        self.assertTrue(res.passed, msg=str(res))
+        self.assertEqual(
+            recorded,
+            [
+                (["npx", "tsc", "--noEmit"], 300),
+                (["npm", "run", "test:unit"], 360),
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

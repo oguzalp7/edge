@@ -370,7 +370,7 @@ class EdgeVerificationGate:
         )
         self.target_repo = target_repo_path
 
-    def _run_cmd(self, cmd: List[str], cwd: Optional[Path] = None, timeout: int = 120) -> Tuple[int, str, str]:
+    def _run_cmd(self, cmd: List[str], cwd: Optional[Path] = None, timeout: int = 300) -> Tuple[int, str, str]:
         """Run a command in target repo or specified directory using tools.common.runner."""
         work_dir = cwd or self.target_repo
         return run_command(cmd, cwd=work_dir, timeout=timeout)
