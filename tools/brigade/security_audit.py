@@ -34,7 +34,15 @@ _VALID_LEDGER_STATUSES = {"covered", "planned", "out_of_scope"}
 _PRIV_BYPASS_RE = re.compile(r"\b(system-caller|bypassAuth|skipAuth)\b")
 _ABAC_SINK_RE = re.compile(r"\b(db\.(?:insert|update|delete)|[A-Za-z0-9_]*Repository\.[A-Za-z0-9_]+|\.upsert\s*\()")
 _ABAC_GUARD_RE = re.compile(
-    r"\b(?:requireAuth|assert[A-Za-z0-9_]*Access|evaluate[A-Za-z0-9_]*Access|getSession|checkPermission|getServerSession|auth)\s*\("
+    r"\b(?:requireAuth|getCurrentSessionAction|assert[A-Za-z0-9_]*Access|evaluate[A-Za-z0-9_]*Access|getSession|checkPermission|getServerSession|auth)\s*\("
+)
+_TOKEN_GUARD_RE = re.compile(
+    r"\b(?:hashInvitationToken|verify[A-Za-z0-9_]*Token|validate[A-Za-z0-9_]*Token|timingSafeEqual)\s*\("
+)
+_POLICY_AUTH_FIELD_RE = re.compile(r"\b(?:minAuthLevel|authLevel|requireAuth)\b")
+_RUN_ACTION_CALL_RE = re.compile(r"\brunAction(?:\s*<[^>]*>)?\s*\(\s*([^,)]+)")
+_READ_ONLY_REPO_METHOD_RE = re.compile(
+    r"^[A-Za-z0-9_]*Repository\.(?:find|list|get|search|lookup|count|exists|validate)[A-Za-z0-9_]*$"
 )
 _DATA_MUTATION_RE = re.compile(r"\bdb\.(update|delete)\s*\(")
 _SQL_RAW_INTERP_RE = re.compile(r"sql\.raw\s*\([^)]*\$\{")
@@ -48,8 +56,12 @@ _MATH_RANDOM_RE = re.compile(r"\bMath\.random\s*\(")
 _SEC_CTX_RE = re.compile(r"\b(?:token|secret|otp|password|key|salt|nonce|session|auth)\b", re.IGNORECASE)
 _HARDCODED_SECRET_RE = re.compile(r"(?:sk_live_[A-Za-z0-9_]+|ghp_[A-Za-z0-9]{10,}|AKIA[0-9A-Z]{16})")
 _FN_START_RE = re.compile(
-    r"(?:export\s+(?:async\s+)?)?(?:function\s+([A-Za-z0-9_$]+)|(?:const|let|var)\s+([A-Za-z0-9_$]+)\s*=\s*(?:async\s*)?\()"
+    r"^(?:export\s+(?:default\s+)?)?(?:async\s+)?(?:function\s*\*?\s*([A-Za-z0-9_$]+)|(?:const|let|var)\s+([A-Za-z0-9_$]+)\s*(?::[^=]+)?=\s*(?:async\s*)?(?:<[^>]*>\s*)?\()"
 )
+_PY_FN_START_RE = re.compile(r"^(?:async\s+)?def\s+([A-Za-z0-9_]+)\s*\(")
+_POLICY_OBJ_START_RE = re.compile(r"^(?:export\s+)?const\s+([A-Za-z0-9_$]+)\s*=\s*\{")
+_POLICY_KEY_START_RE = re.compile(r"^\s*([A-Za-z0-9_$]+)\s*:\s*\{")
+_EXPORT_SPEC_RE = re.compile(r"\bexport\s+(?:type\s+)?\{([^}]*)\}")
 
 
 @dataclass
@@ -369,17 +381,293 @@ def _make_finding(
     )
 
 
-def _enclosing_fn_ranges(lines: List[str]) -> Dict[int, Tuple[int, str]]:
+def _mask_js_comments_and_strings(content: str) -> str:
+    """Masks JS/TS comments and string bodies with spaces while preserving newlines and ${...} braces."""
+    n = len(content)
+    out = [" "] * n
+    stack: List[List[Any]] = [["code"]]
+    i = 0
+    while i < n:
+        state = stack[-1][0]
+        ch = content[i]
+        if ch == "\n":
+            out[i] = "\n"
+            i += 1
+            continue
+        if state == "template":
+            if ch == "\\" and i + 1 < n:
+                if content[i + 1] == "\n":
+                    out[i + 1] = "\n"
+                i += 2
+                continue
+            if ch == "`":
+                stack.pop()
+                i += 1
+                continue
+            if ch == "$" and i + 1 < n and content[i + 1] == "{":
+                out[i] = "$"
+                out[i + 1] = "{"
+                stack.append(["tpl_expr", 1])
+                i += 2
+                continue
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n and content[i + 1] == "/":
+            i += 2
+            while i < n and content[i] != "\n":
+                i += 1
+            continue
+        if ch == "/" and i + 1 < n and content[i + 1] == "*":
+            i += 2
+            while i < n:
+                if content[i] == "*" and i + 1 < n and content[i + 1] == "/":
+                    i += 2
+                    break
+                if content[i] == "\n":
+                    out[i] = "\n"
+                i += 1
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            i += 1
+            while i < n:
+                sc = content[i]
+                if sc == "\n":
+                    out[i] = "\n"
+                    i += 1
+                    break
+                if sc == "\\" and i + 1 < n:
+                    if content[i + 1] == "\n":
+                        out[i + 1] = "\n"
+                    i += 2
+                    continue
+                if sc == quote:
+                    i += 1
+                    break
+                i += 1
+            continue
+        if ch == "`":
+            stack.append(["template"])
+            i += 1
+            continue
+        if ch == "{" and state == "tpl_expr":
+            stack[-1][1] += 1
+        elif ch == "}" and state == "tpl_expr":
+            stack[-1][1] -= 1
+            if stack[-1][1] == 0:
+                stack.pop()
+        out[i] = ch
+        i += 1
+    return "".join(out)
+
+
+@dataclass
+class _FnDef:
+    name: str
+    start_line: int
+    end_line: int
+    is_exported: bool
+
+
+def _extract_reexported_names(masked_content: str) -> Set[str]:
+    names: Set[str] = set()
+    for m in _EXPORT_SPEC_RE.finditer(masked_content):
+        for item in m.group(1).split(","):
+            tok = item.strip().split(" as ")[0].strip()
+            if tok:
+                names.add(tok)
+    return names
+
+
+def _extract_top_level_fn_defs(
+    lines: List[str],
+    masked_lines: List[str],
+    is_python: bool = False,
+) -> List[_FnDef]:
+    if is_python:
+        defs: List[_FnDef] = []
+        for idx, line in enumerate(lines, start=1):
+            if line[:1].isspace():
+                continue
+            m = _PY_FN_START_RE.match(line)
+            if m:
+                if defs:
+                    defs[-1].end_line = idx - 1
+                defs.append(_FnDef(name=m.group(1), start_line=idx, end_line=len(lines), is_exported=True))
+        return defs
+
+    reexported = _extract_reexported_names("\n".join(masked_lines))
+    defs = []
+    brace_depth = 0
+    for idx, mline in enumerate(masked_lines, start=1):
+        stripped = mline.strip()
+        if brace_depth == 0 and stripped:
+            m = _FN_START_RE.match(stripped)
+            if m:
+                if defs:
+                    defs[-1].end_line = idx - 1
+                name = m.group(1) or m.group(2) or "handler"
+                is_exp = stripped.startswith("export ") or name in reexported
+                defs.append(_FnDef(name=name, start_line=idx, end_line=len(lines), is_exported=is_exp))
+        brace_depth = max(0, brace_depth + mline.count("{") - mline.count("}"))
+    return defs
+
+
+def _enclosing_fn_ranges(lines: List[str], is_python: bool = False) -> Dict[int, Tuple[int, str]]:
+    masked_lines = lines if is_python else _mask_js_comments_and_strings("\n".join(lines)).splitlines()
+    if len(masked_lines) < len(lines):
+        masked_lines.extend([""] * (len(lines) - len(masked_lines)))
+    defs = _extract_top_level_fn_defs(lines, masked_lines, is_python=is_python)
     mapping: Dict[int, Tuple[int, str]] = {}
-    fn_start = 1
-    fn_name = "module"
-    for idx, line in enumerate(lines, start=1):
-        m = _FN_START_RE.search(line)
-        if m:
-            fn_start = idx
-            fn_name = m.group(1) or m.group(2) or "handler"
-        mapping[idx] = (fn_start, fn_name)
+    def_idx = 0
+    for line_no in range(1, len(lines) + 1):
+        while def_idx < len(defs) and line_no > defs[def_idx].end_line:
+            def_idx += 1
+        if def_idx < len(defs) and defs[def_idx].start_line <= line_no <= defs[def_idx].end_line:
+            mapping[line_no] = (defs[def_idx].start_line, defs[def_idx].name)
+        else:
+            mapping[line_no] = (1, "module")
     return mapping
+
+
+def _extract_auth_policies(masked_lines: List[str]) -> Set[str]:
+    """Extracts `<OBJ>.<key>` entries from top-level policy objects declaring minAuthLevel/authLevel/requireAuth."""
+    auth_policies: Set[str] = set()
+    brace_depth = 0
+    active_obj: Optional[str] = None
+    active_key: Optional[str] = None
+    key_depth: Optional[int] = None
+    key_buf: List[str] = []
+
+    for mline in masked_lines:
+        stripped = mline.strip()
+        if active_obj is None and brace_depth == 0:
+            m_obj = _POLICY_OBJ_START_RE.match(stripped)
+            if m_obj:
+                active_obj = m_obj.group(1)
+
+        if active_obj is not None:
+            if active_key is None and brace_depth == 1:
+                m_key = _POLICY_KEY_START_RE.match(mline)
+                if m_key:
+                    active_key = m_key.group(1)
+                    key_depth = 1
+                    key_buf = [mline]
+            elif active_key is not None:
+                key_buf.append(mline)
+
+        prev_depth = brace_depth
+        brace_depth = max(0, brace_depth + mline.count("{") - mline.count("}"))
+
+        if active_obj is not None and active_key is not None and key_depth is not None:
+            if brace_depth <= key_depth and prev_depth >= key_depth:
+                if _POLICY_AUTH_FIELD_RE.search("\n".join(key_buf)):
+                    auth_policies.add(f"{active_obj}.{active_key}")
+                active_key = None
+                key_depth = None
+                key_buf = []
+
+        if active_obj is not None and brace_depth == 0:
+            active_obj = None
+            active_key = None
+            key_depth = None
+            key_buf = []
+
+    return auth_policies
+
+
+def _upstream_refutation_reason(
+    upstream: str,
+    sink_name: str,
+    sink_window: str,
+    auth_policies: Set[str],
+    guard_helpers: Set[str],
+    allow_read_only_run_action: bool = True,
+) -> Optional[str]:
+    if _ABAC_GUARD_RE.search(upstream):
+        return "Refuted: auth/ABAC guard verified upstream before sink"
+    if _TOKEN_GUARD_RE.search(upstream):
+        return "Refuted: cryptographic token guard verified upstream before sink"
+    for helper in guard_helpers:
+        if re.search(rf"\b{re.escape(helper)}\s*\(", upstream):
+            return f"Refuted: intra-file guard helper '{helper}' verified upstream before sink"
+    for m_ra in _RUN_ACTION_CALL_RE.finditer(upstream):
+        policy_arg = m_ra.group(1).strip()
+        if policy_arg in auth_policies or _POLICY_AUTH_FIELD_RE.search(policy_arg):
+            return f"Refuted: runAction policy '{policy_arg}' enforces auth level"
+        if allow_read_only_run_action and _READ_ONLY_REPO_METHOD_RE.match(sink_name):
+            return "Refuted: non-mutating repository read wrapped in runAction"
+    if allow_read_only_run_action and _READ_ONLY_REPO_METHOD_RE.match(sink_name) and "publicOnly" in sink_window:
+        return "Refuted: publicOnly read-only repository query"
+    return None
+
+
+def _compute_guard_and_caller_helpers(
+    lines: List[str],
+    fn_defs: List[_FnDef],
+    auth_policies: Set[str],
+) -> Tuple[Set[str], Set[str]]:
+    """Computes intra-file guard helpers and private helpers called exclusively under auth guards."""
+    fn_bodies: Dict[str, str] = {
+        fn.name: "\n".join(lines[fn.start_line - 1 : fn.end_line])
+        for fn in fn_defs
+    }
+    fn_by_name: Dict[str, _FnDef] = {fn.name: fn for fn in fn_defs}
+
+    # 1. Fixed-point guard helpers (non-exported helpers executing auth/token guards)
+    guard_helpers: Set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for fn in fn_defs:
+            if fn.is_exported or fn.name in guard_helpers:
+                continue
+            body = fn_bodies[fn.name]
+            if _ABAC_GUARD_RE.search(body) or _TOKEN_GUARD_RE.search(body) or any(
+                re.search(rf"\b{re.escape(gh)}\s*\(", body) for gh in guard_helpers
+            ):
+                guard_helpers.add(fn.name)
+                changed = True
+
+    # 2. Fixed-point caller-guarded private helpers
+    caller_guarded: Set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for fn in fn_defs:
+            if fn.is_exported or fn.name in caller_guarded:
+                continue
+            call_pat = re.compile(rf"\b{re.escape(fn.name)}\s*\(")
+            call_sites: List[Tuple[_FnDef, int]] = []
+            for other in fn_defs:
+                if other.name == fn.name:
+                    continue
+                for line_no in range(other.start_line, other.end_line + 1):
+                    if call_pat.search(lines[line_no - 1]):
+                        call_sites.append((other, line_no))
+            if not call_sites:
+                continue
+            all_guarded = True
+            for caller_fn, call_line in call_sites:
+                if caller_fn.name in caller_guarded:
+                    continue
+                upstream = "\n".join(lines[caller_fn.start_line - 1 : call_line])
+                reason = _upstream_refutation_reason(
+                    upstream,
+                    sink_name="",
+                    sink_window="",
+                    auth_policies=auth_policies,
+                    guard_helpers=guard_helpers,
+                    allow_read_only_run_action=False,
+                )
+                if reason is None:
+                    all_guarded = False
+                    break
+            if all_guarded:
+                caller_guarded.add(fn.name)
+                changed = True
+
+    return guard_helpers, caller_guarded
 
 
 def _scan_abac_class(
@@ -393,6 +681,13 @@ def _scan_abac_class(
     if surface not in ("server_action", "api_route"):
         return []
     excl = excluded_lines or set()
+    masked_lines = _mask_js_comments_and_strings(content).splitlines()
+    if len(masked_lines) < len(lines):
+        masked_lines.extend([""] * (len(lines) - len(masked_lines)))
+    fn_defs = _extract_top_level_fn_defs(lines, masked_lines, is_python=False)
+    auth_policies = _extract_auth_policies(masked_lines)
+    guard_helpers, caller_guarded = _compute_guard_and_caller_helpers(lines, fn_defs, auth_policies)
+
     findings: List[SecurityFinding] = []
     for idx, line in enumerate(lines, start=1):
         if idx in excl:
@@ -406,16 +701,29 @@ def _scan_abac_class(
         m_sink = _ABAC_SINK_RE.search(line)
         if not m_sink:
             continue
+        sink_name = m_sink.group(1)
         upstream = "\n".join(lines[fn_start - 1 : idx])
-        if _ABAC_GUARD_RE.search(upstream):
+        sink_window = " ".join(lines[idx - 1 : min(len(lines), idx + 4)])
+        reason = _upstream_refutation_reason(
+            upstream,
+            sink_name=sink_name,
+            sink_window=sink_window,
+            auth_policies=auth_policies,
+            guard_helpers=guard_helpers,
+            allow_read_only_run_action=True,
+        )
+        if reason is None and fn_name in caller_guarded:
+            reason = f"Refuted: private helper '{fn_name}' called exclusively from auth-guarded action(s)"
+
+        if reason is not None:
             findings.append(_make_finding(
-                "ACCESS_CONTROL_ABAC", "rejected", None, rel, idx, fn_name, m_sink.group(1), line, boundary,
-                rejection_reason="Refuted: auth/ABAC guard verified upstream before sink",
+                "ACCESS_CONTROL_ABAC", "rejected", None, rel, idx, fn_name, sink_name, line, boundary,
+                rejection_reason=reason,
             ))
         else:
             sev = "CRITICAL" if ("delete" in line or "admin" in rel.lower()) else "HIGH"
             findings.append(_make_finding(
-                "ACCESS_CONTROL_ABAC", "confirmed", sev, rel, idx, fn_name, m_sink.group(1), line, boundary
+                "ACCESS_CONTROL_ABAC", "confirmed", sev, rel, idx, fn_name, sink_name, line, boundary
             ))
     return findings
 
@@ -529,7 +837,7 @@ def _scan_single_file(rel: str, path: Path) -> List[SecurityFinding]:
     lines = content.splitlines()
     is_python = Path(rel).suffix.lower() == ".py"
     excluded_lines = _compute_excluded_lines(content, lines, is_python)
-    fn_map = _enclosing_fn_ranges(lines)
+    fn_map = _enclosing_fn_ranges(lines, is_python=is_python)
     found: List[SecurityFinding] = []
     found.extend(_scan_abac_class(rel, content, lines, fn_map, excluded_lines))
     found.extend(_scan_data_isolation_class(rel, lines, fn_map, excluded_lines))

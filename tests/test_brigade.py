@@ -7683,6 +7683,117 @@ class TestEvidenceFirstReviewAndShipBridge(unittest.TestCase):
             self.assertEqual(units["tools/brigade/security_audit.py"]["status"], "covered")
             self.assertNotEqual(units["tools/brigade/security_audit.py"]["surface"], "server_action")
 
+    def test_security_audit_runaction_nested_scope_and_caller_propagation(self):
+        sec_mod = importlib.import_module("tools.brigade.security_audit")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir)
+            actions_dir = repo / "src" / "actions"
+            actions_dir.mkdir(parents=True, exist_ok=True)
+
+            # Positive cases: all legitimate patterns -> 0 confirmed, all refuted
+            (actions_dir / "safe_patterns.ts").write_text(
+                '"use server";\n'
+                "const POLICIES = {\n"
+                "  remove: { minAuthLevel: 4, defaultError: 'err' },\n"
+                "  listPublic: { defaultError: 'err' },\n"
+                "} as const;\n\n"
+                "async function resolveCustomerOrFail() {\n"
+                "  const s = await getCurrentSessionAction();\n"
+                "  return ordersRepository.findCustomerByProfile(s.data.profileId);\n"
+                "}\n\n"
+                "async function resolveValidPendingInvite(raw: string) {\n"
+                "  const h = hashInvitationToken(raw);\n"
+                "  const inv = await invitesRepository.findInvitationByTokenHash(h);\n"
+                "  if (!inv) return null;\n"
+                "  await invitesRepository.expireInvitation(inv.id);\n"
+                "  return inv;\n"
+                "}\n\n"
+                "async function validateDraftEmployee(id: string) {\n"
+                "  return employeesRepository.findDraftById(id);\n"
+                "}\n\n"
+                "async function executeDeleteOrder(id: string) {\n"
+                "  await validateDraftEmployee(id);\n"
+                "  return ordersRepository.deleteOrder(id);\n"
+                "}\n\n"
+                "export async function deleteOrderAction(id: string) {\n"
+                "  return runAction<{ ok: true }>(POLICIES.remove, () => executeDeleteOrder(id));\n"
+                "}\n\n"
+                "export async function listOrdersAction() {\n"
+                "  return runAction(POLICIES.listPublic, () => ordersRepository.findAll());\n"
+                "}\n\n"
+                "export async function toggleFavoriteAction(itemId: string) {\n"
+                "  await resolveCustomerOrFail();\n"
+                "  return favoritesRepository.createFavorite(itemId);\n"
+                "}\n\n"
+                "export async function onboardWithInviteAction(token: string) {\n"
+                "  await resolveValidPendingInvite(token);\n"
+                "  return invitesRepository.completeOnboarding(token);\n"
+                "}\n\n"
+                "export async function getLedgerWithNestedHelperAction(id: string) {\n"
+                "  await requireAuth(4);\n"
+                "  const isUuid = (v: string) => /^[0-9a-f-]+$/i.test(v);\n"
+                "  if (!isUuid(id)) return null;\n"
+                "  return ledgerRepository.findRowsById(id);\n"
+                "}\n\n"
+                "export async function getPublicReviewsAction(empId: string) {\n"
+                "  return reviewsRepository.findStaffReviews(empId, { publicOnly: true });\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            safe_rep = sec_mod.run_security_audit(repo, scopes=["src/actions/safe_patterns.ts"])
+            self.assertTrue(safe_rep.passed, f"Expected 0 confirmed on safe_patterns.ts, got: {safe_rep.findings}")
+            self.assertEqual(safe_rep.confirmed_count, 0)
+            self.assertGreaterEqual(safe_rep.rejected_count, 8)
+
+            # Negative cases: unguarded mutations, unguarded public reads outside runAction,
+            # exported helpers, and private helpers called from unguarded actions MUST stay confirmed
+            (actions_dir / "unsafe_patterns.ts").write_text(
+                '"use server";\n'
+                "const UNSAFE_POLICIES = {\n"
+                "  openPolicy: { defaultError: 'err' },\n"
+                "  authedPolicy: { minAuthLevel: 4 },\n"
+                "} as const;\n\n"
+                "export async function unguardedMutationInRunAction(id: string) {\n"
+                "  return runAction(UNSAFE_POLICIES.openPolicy, () => db.delete(orders));\n"
+                "}\n\n"
+                "export async function unguardedRepoDeleteInRunAction(id: string) {\n"
+                "  return runAction(UNSAFE_POLICIES.openPolicy, () => ordersRepository.delete(id));\n"
+                "}\n\n"
+                "export async function directUnguardedRepoRead(id: string) {\n"
+                "  return ordersRepository.findById(id);\n"
+                "}\n\n"
+                "export async function exportedHelperNoGuard(id: string) {\n"
+                "  return ordersRepository.delete(id);\n"
+                "}\n\n"
+                "async function mixedPrivateHelper(id: string) {\n"
+                "  return ordersRepository.update(id, {});\n"
+                "}\n\n"
+                "export async function authedCaller(id: string) {\n"
+                "  await requireAuth(4);\n"
+                "  await exportedHelperNoGuard(id);\n"
+                "  return mixedPrivateHelper(id);\n"
+                "}\n\n"
+                "export async function unguardedCaller(id: string) {\n"
+                "  return mixedPrivateHelper(id);\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            unsafe_rep = sec_mod.run_security_audit(repo, scopes=["src/actions/unsafe_patterns.ts"])
+            self.assertFalse(unsafe_rep.passed)
+            confirmed_entries = {
+                (f.trace.get("entrypoint", "").split(":")[-1], f.trace.get("sink"))
+                for f in unsafe_rep.findings
+                if f.verdict == "confirmed"
+            }
+            self.assertIn(("unguardedMutationInRunAction", "db.delete"), confirmed_entries)
+            self.assertIn(("unguardedRepoDeleteInRunAction", "ordersRepository.delete"), confirmed_entries)
+            self.assertIn(("directUnguardedRepoRead", "ordersRepository.findById"), confirmed_entries)
+            self.assertIn(("exportedHelperNoGuard", "ordersRepository.delete"), confirmed_entries)
+            self.assertIn(("mixedPrivateHelper", "ordersRepository.update"), confirmed_entries)
+
 
 class TestBrigadeVerificationTimeout(unittest.TestCase):
     def test_verify_default_timeout_is_300_seconds(self):
