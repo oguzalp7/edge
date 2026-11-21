@@ -49,9 +49,10 @@ Findings are strictly partitioned to prevent cognitive context dilution:
 ### 🧹 Zero-Token Mechanical De-Pollution
 By default (`include_mechanical=False`), the UI ledger omits mechanical lint violations such as `RULE-DEAD-IMPORT`. Run mechanical automated fixes (`npx eslint --fix`) via the pre-sweep pipeline rather than consuming LLM reasoning tokens.
 
-### 🧬 Uncle Bob Quality Rules
+### 🧬 Uncle Bob & TypeScript Discipline Quality Rules
 - **`RULE-HIGH-CRAP` (CRITICAL):** Emitted when a function's CRAP score $\ge 30.0$ (combining cyclomatic complexity with LCOV branch coverage). When CRAP $< 15.0$, `RULE-FAT-FUNCTION` is automatically suppressed.
 - **`RULE-AST-DUPLICATE` (WARNING/CRITICAL):** Structural code clones identified by the Tree-Sitter `DRYER` engine across functions, class methods, or JSX blocks (Jaccard similarity $\ge 0.82$).
+- **`RULE-TS-*` (CRITICAL/WARNING/ADVISORY):** TypeScript Type-System Discipline penalty findings (`RULE-TS-EXPLICIT-ANY`, `RULE-TS-SUPPRESSION`, `RULE-TS-DOUBLE-CAST`, `RULE-TS-UNSAFE-AS`, `RULE-TS-NON-NULL`, `RULE-TS-CONSOLE-LOG`, `RULE-TS-RECORD-UNKNOWN`, `RULE-TS-SWITCH-EXHAUSTIVE`, `RULE-TS-OPTIONAL-BAG`, `RULE-TS-POSITIONAL-ARGS`) emitted into `.edge/ledger/core.json` (positive `BONUS-TS-DISCIPLINE` signals are never emitted as debt). Any `RULE-TS-*` recurring across $\ge 3$ distinct files automatically surfaces as a **Systemic Macro Pattern**.
 
 ---
 

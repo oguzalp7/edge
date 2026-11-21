@@ -22,6 +22,13 @@ from tools.audit.reporters import ConsoleReporter, ToonReporter, MarkdownReporte
 from tools.ui_audit.cli import run_ui_audit
 from tools.ui_audit.reporter import UIConsoleReporter, UIMarkdownReporter, UIToonReporter, UIJsonReporter
 from tools.test_audit.cli import TestFileAuditor, format_human as test_format_human, format_markdown as test_format_markdown, format_toon as test_format_toon, format_json as test_format_json
+from tools.audit.ts_discipline import (
+    TsDisciplineAuditor,
+    format_human as ts_format_human,
+    format_markdown as ts_format_markdown,
+    format_toon as ts_format_toon,
+    format_json as ts_format_json,
+)
 
 setup_utf8_console()
 
@@ -134,6 +141,19 @@ def run_tests_track(target_path: Path, output_format: str = "human", top: int = 
         return test_format_human(results, top=top)
 
 
+def run_types_track(target_path: Path, output_format: str = "human", top: int = 15) -> str:
+    auditor = TsDisciplineAuditor(target_path)
+    summary = auditor.scan(target_path)
+    if output_format == "toon":
+        return ts_format_toon(summary, top=top)
+    elif output_format == "markdown":
+        return ts_format_markdown(summary, top=top)
+    elif output_format == "json":
+        return ts_format_json(summary, top=top)
+    else:
+        return ts_format_human(summary, top=top)
+
+
 def run_all_tracks(target_path: Path, output_format: str = "human", top: int = 15) -> str:
     scanner = FileScanner()
     core_summary = scanner.scan(target_path)
@@ -147,6 +167,8 @@ def run_all_tracks(target_path: Path, output_format: str = "human", top: int = 1
     test_files = auditor.get_test_files(test_target)
     test_results = [auditor.analyze_file(f) for f in test_files]
     test_results.sort(key=lambda x: x["score"])
+
+    types_summary = TsDisciplineAuditor(target_path).scan(target_path)
 
     if output_format == "toon":
         data = {
@@ -167,7 +189,13 @@ def run_all_tracks(target_path: Path, output_format: str = "human", top: int = 1
                     "total_files": len(test_results),
                     "average_score": round(sum(r["score"] for r in test_results) / len(test_results)) if test_results else 0,
                     "toxic_count": sum(1 for r in test_results if r["score"] < 50),
-                }
+                },
+                "types": {
+                    "health_score": types_summary.overall_score,
+                    "band": types_summary.overall_band,
+                    "files": types_summary.files_analyzed,
+                    "porous": types_summary.porous_count,
+                },
             }
         }
         return encode(data)
@@ -176,13 +204,20 @@ def run_all_tracks(target_path: Path, output_format: str = "human", top: int = 1
         out = []
         out.append("# 🌐 Edge Unified Codebase Audit Report")
         out.append(f"> **Target Scope:** `{target_path}`  ")
-        out.append(f"> **Core Health:** `{core_summary.overall_health_score}/100` | **UI Health:** `{ui_summary.health_score:.1f}/100` | **Tests Analyzed:** `{len(test_results)}`")
+        out.append(
+            f"> **Core Health:** `{core_summary.overall_health_score}/100` | "
+            f"**UI Health:** `{ui_summary.health_score:.1f}/100` | "
+            f"**Tests Analyzed:** `{len(test_results)}` | "
+            f"Types Health: `{types_summary.overall_score}/100 ({types_summary.overall_band})`"
+        )
         out.append("\n---\n")
         out.append(MarkdownReporter.render(core_summary, top_n=top))
         out.append("\n---\n")
         out.append(UIMarkdownReporter.render(ui_summary))
         out.append("\n---\n")
         out.append(test_format_markdown(test_results, top=top))
+        out.append("\n---\n")
+        out.append(ts_format_markdown(types_summary, top=top))
         return "\n".join(out)
 
     elif output_format == "json":
@@ -192,6 +227,7 @@ def run_all_tracks(target_path: Path, output_format: str = "human", top: int = 1
                 "core": json.loads(JsonReporter.render(core_summary, top_n=top)),
                 "ui": json.loads(UIJsonReporter.render(ui_summary)),
                 "tests": json.loads(test_format_json(test_results, top=top)),
+                "types": json.loads(ts_format_json(types_summary, top=top)),
             }
         }
         return json.dumps(data, indent=2)
@@ -199,14 +235,16 @@ def run_all_tracks(target_path: Path, output_format: str = "human", top: int = 1
     else:
         out = []
         out.append("=" * 80)
-        out.append("🌐  EDGE UNIFIED CODEBASE AUDIT (ALL TRACKS: CORE, UI, TESTS)")
+        out.append("🌐  EDGE UNIFIED CODEBASE AUDIT (ALL TRACKS: CORE, UI, TESTS, TYPES)")
         out.append("=" * 80)
-        out.append("\n--- [TRACK 1/3] CORE ARCHITECTURAL HEALTH & BLOAT ---")
+        out.append("\n--- [TRACK 1/4] CORE ARCHITECTURAL HEALTH & BLOAT ---")
         out.append(ConsoleReporter.render(core_summary, top_n=top))
-        out.append("\n--- [TRACK 2/3] UI COMPONENT & JSX DUPLICATION ---")
+        out.append("\n--- [TRACK 2/4] UI COMPONENT & JSX DUPLICATION ---")
         out.append(UIConsoleReporter.render(ui_summary))
-        out.append("\n--- [TRACK 3/3] UNIT TEST PURITY & ISOLATION ---")
+        out.append("\n--- [TRACK 3/4] UNIT TEST PURITY & ISOLATION ---")
         out.append(test_format_human(test_results, top=top))
+        out.append("\n--- [TRACK 4/4] TYPESCRIPT TYPE-SYSTEM DISCIPLINE ---")
+        out.append(ts_format_human(types_summary, top=top))
         return "\n".join(out)
 
 
@@ -222,9 +260,9 @@ def main():
     )
     parser.add_argument(
         "--track",
-        choices=["core", "ui", "tests", "clones", "dead-code", "all"],
+        choices=["core", "ui", "tests", "clones", "dead-code", "types", "all"],
         default="core",
-        help="Audit track to execute: 'core' (default), 'ui', 'tests', 'clones', 'dead-code', or 'all' (unified)"
+        help="Audit track to execute: 'core' (default), 'ui', 'tests', 'clones', 'dead-code', 'types', or 'all' (unified)"
     )
     parser.add_argument(
         "--format",
@@ -268,6 +306,8 @@ def main():
             from tools.audit.dead_code import run_dead_code_scan, format_dead_code_report
             report = run_dead_code_scan(target_path)
             output = format_dead_code_report(report, fmt)
+        elif args.track == "types":
+            output = run_types_track(target_path, fmt, top=args.top)
         elif args.track == "all":
             output = run_all_tracks(target_path, fmt, top=args.top)
         else:

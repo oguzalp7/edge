@@ -20,7 +20,7 @@ import re
 import argparse
 import subprocess
 from pathlib import Path
-from typing import List, Dict, Tuple, Optional, Any
+from typing import List, Dict, Tuple, Optional, Any, Set
 
 # Add project root to sys.path
 root_dir = Path(__file__).resolve().parent.parent
@@ -267,7 +267,7 @@ def _count_sql_leaks(source_text: str) -> int:
 
 
 _NON_DIRECTIVE_LINE_COMMENT_RE: re.Pattern[str] = re.compile(
-    r"//(?!\s*@ts-(?:ignore|expect-error)\b)[^\n]*"
+    r"//(?!\s*@ts-(?:ignore|expect-error|nocheck)\b)[^\n]*"
 )
 _BG_WHITE_TOKEN_RE: re.Pattern[str] = re.compile(r"(?<![-\w])bg-white\b")
 
@@ -863,15 +863,82 @@ class EdgeVerificationGate:
             )
         return GateResult(1, "Mock Fallback Purity Gate", True, "Zero production DEFAULT_*/MOCK_* fallbacks detected.")
 
+    _DIFF_HUNK_HEADER_RE: re.Pattern[str] = re.compile(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+    _GATE_TS_DISCIPLINE_RULES: Tuple[str, ...] = (
+        "RULE-TS-EXPLICIT-ANY",
+        "RULE-TS-SUPPRESSION",
+        "RULE-TS-DOUBLE-CAST",
+        "RULE-TS-NON-NULL",
+        "RULE-TS-CONSOLE-LOG",
+    )
+
+    def _get_added_line_numbers(self, eff_base: str, rel_path: str, total_lines: int) -> Set[int]:
+        """Return 1-based line numbers added/modified in rel_path relative to eff_base."""
+        show_code, _, _ = self._run_cmd(["git", "show", f"{eff_base}:{rel_path}"])
+        if show_code != 0:
+            return set(range(1, total_lines + 1))
+
+        diff_code, diff_out, _ = self._run_cmd(["git", "diff", "-U0", eff_base, "--", rel_path])
+        if diff_code != 0:
+            return set()
+
+        added: Set[int] = set()
+        for match in self._DIFF_HUNK_HEADER_RE.finditer(diff_out):
+            start = int(match.group(1))
+            count = int(match.group(2)) if match.group(2) is not None else 1
+            if count > 0:
+                added.update(range(start, start + count))
+        return added
+
     def check_type_escapes(self, base_ref: Optional[str] = "HEAD~1") -> GateResult:
-        """Detects `as any`, `as unknown as`, `@ts-ignore`, and `@ts-expect-error` in changed .ts/.tsx files."""
-        files, err = self._read_changed_prod_files(base_ref, (".ts", ".tsx"), require_src_prefix=False)
-        if files is None:
+        """Detects type-safety escapes in changed .ts/.tsx files plus newly added TS discipline violations."""
+        rel_paths, eff_base, err = self._get_changed_rel_paths(base_ref or "HEAD~1")
+        if rel_paths is None:
             return GateResult(1, "Type Escape Gate", False, f"Git diff failed: {err}")
 
+        from tools.audit.ts_discipline import TsDisciplineAuditor
+
+        ts_auditor = TsDisciplineAuditor(self.target_repo)
         violations: List[str] = []
-        for rel_path, content in files:
-            violations.extend(_find_type_escape_violations(rel_path, content))
+        seen_line_keys: Set[Tuple[str, int]] = set()
+
+        for rel_path in rel_paths:
+            if rel_path.endswith(".d.ts") or not _is_eligible_prod_path(rel_path, (".ts", ".tsx"), require_src_prefix=False):
+                continue
+            full_path = self.target_repo / rel_path
+            if not full_path.is_file():
+                continue
+            content = full_path.read_text(encoding="utf-8", errors="replace")
+
+            # Layer 1: full-file type escape regex check (backward-compatible)
+            layer1_hits = _find_type_escape_violations(rel_path, content)
+            for hit in layer1_hits:
+                violations.append(hit)
+                line_m = re.match(r"^.+?:(\d+)\s+-", hit)
+                if line_m:
+                    seen_line_keys.add((rel_path, int(line_m.group(1))))
+
+            # Layer 2: diff-added-lines hardening via TsDisciplineAuditor
+            total_lines = len(content.splitlines())
+            added_lines = self._get_added_line_numbers(eff_base, rel_path, total_lines)
+            if not added_lines:
+                continue
+
+            ts_report = ts_auditor.analyze_source(content, rel_path=rel_path)
+            for finding in ts_report.findings:
+                if finding.rule_id not in self._GATE_TS_DISCIPLINE_RULES:
+                    continue
+                if finding.rule_id == "RULE-TS-CONSOLE-LOG" and not rel_path.startswith("src/"):
+                    continue
+                if finding.line_number not in added_lines:
+                    continue
+                key = (rel_path, finding.line_number)
+                if key in seen_line_keys:
+                    continue
+                seen_line_keys.add(key)
+                violations.append(
+                    f"{rel_path}:{finding.line_number} - {finding.rule_id}: {finding.message}"
+                )
 
         if violations:
             return GateResult(

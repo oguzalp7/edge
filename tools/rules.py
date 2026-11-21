@@ -23,8 +23,16 @@ SHALLOW_WRAPPER_PATTERN = re.compile(
 # Synthetic mock/default fallback constants in production code
 MOCK_FALLBACK_PATTERN = re.compile(r"\b(?:DEFAULT|MOCK)_[A-Z0-9_]+\b")
 
-# TypeScript type-safety escapes (`as any`, `as unknown as`, `@ts-ignore`, `@ts-expect-error`)
-TYPE_ESCAPE_PATTERN = re.compile(r"\bas\s+(?:any|unknown\s+as)\b|@ts-ignore\b|@ts-expect-error\b")
+# TypeScript type-safety escapes (`as any`, `as unknown as`, `@ts-ignore`, `@ts-expect-error`, `@ts-nocheck`)
+TYPE_ESCAPE_PATTERN = re.compile(r"\bas\s+(?:any|unknown\s+as)\b|@ts-(?:ignore|expect-error|nocheck)\b")
+
+# Explicit `any` type annotations, generic args, casts, and array types (`: any`, `<any>`, `as any`, `any[]`, `Array<any>`)
+TS_EXPLICIT_ANY_PATTERN = re.compile(
+    r"(?::|\bas\b|[|&])\s*any\b|<\s*any\s*>|\bany\s*\[\s*\]|,\s*any\s*(?=[>,\]])"
+)
+
+# Shipped production console.log calls
+TS_CONSOLE_LOG_PATTERN = re.compile(r"\bconsole\.log\s*\(")
 
 # JSX className attribute extractor for dual-theme checks
 BG_WHITE_NO_DARK_PATTERN = re.compile(

@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 
 from tools.audit.scanner import FileScanner
+from tools.audit.ts_discipline import TsDisciplineAuditor
 from tools.ui_audit.graph_builder import GraphBuilder
 from tools.ui_audit.jsx_fingerprint import JSXFingerprinter
 from tools.ui_audit.cluster_engine import ClusterEngine
@@ -34,6 +35,7 @@ class RadarScanner:
             return []
 
         summary = scanner.scan(target_dir, scoped_files=file_paths)
+        ts_auditor = TsDisciplineAuditor(self.repo_path)
         findings: List[LedgerItem] = []
 
         # Discover LCOV report for CRAP analysis
@@ -205,6 +207,39 @@ class RadarScanner:
                     first_seen_at="",
                     last_seen_at="",
                 ))
+
+            # 4b. TypeScript Type-System Discipline Rules (RULE-TS-*, penalties only)
+            norm_rel = rel.replace("\\", "/").lstrip("./")
+            if norm_rel.endswith((".ts", ".tsx")) and not norm_rel.endswith(".d.ts"):
+                ts_report = ts_auditor.analyze_file(fmetric.path)
+                for ts_finding in ts_report.findings:
+                    if ts_finding.penalty >= 0:
+                        continue
+                    fp = LedgerItem.generate_fingerprint(
+                        ts_finding.rule_id,
+                        norm_rel,
+                        ts_finding.symbol or "",
+                        str(ts_finding.line_number),
+                    )
+                    findings.append(LedgerItem(
+                        fingerprint=fp,
+                        track=Track.CORE.value,
+                        rule_id=ts_finding.rule_id,
+                        title=f"{ts_finding.message} ({norm_rel}:{ts_finding.line_number})",
+                        file_path=norm_rel,
+                        line_number=ts_finding.line_number,
+                        symbol=ts_finding.symbol,
+                        severity=ts_finding.severity,
+                        status=FindingStatus.OPEN.value,
+                        details={
+                            "penalty": ts_finding.penalty,
+                            "snippet": ts_finding.snippet,
+                            "file_score": ts_report.score,
+                        },
+                        suggested_fix=ts_finding.suggested_fix,
+                        first_seen_at="",
+                        last_seen_at="",
+                    ))
 
         # 5. DRYER Structural AST Clones (RULE-AST-DUPLICATE)
         try:

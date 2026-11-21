@@ -50,8 +50,16 @@ Audits unused files, unreferenced exports, and dead types via Knip with determin
 uv run python ~/.gemini/config/plugins/edge/tools/audit/cli.py <target-path> --track dead-code --format human
 ```
 
-### 6. Unified Whole-Repository Audit
-Runs Core, UI, Test, Clone, and Dead-Code tracks simultaneously:
+### 6. TypeScript Type-System Discipline Track
+Audits `.ts`/`.tsx` production files for type-system discipline (`RULE-TS-*` penalties + `BONUS-TS-DISCIPLINE` bonus, 0–100 SLOC-weighted score):
+```bash
+uv run python ~/.gemini/config/plugins/edge/tools/audit/cli.py <target-path> --track types --format human
+uv run python ~/.gemini/config/plugins/edge/tools/audit/cli.py <target-path> --track types --format toon
+uv run python ~/.gemini/config/plugins/edge/tools/audit/cli.py <target-path> --track types --format markdown -o types_report.md
+```
+
+### 7. Unified Whole-Repository Audit
+Runs Core, UI, Test, and TypeScript Type-System Discipline tracks simultaneously:
 ```bash
 uv run python ~/.gemini/config/plugins/edge/tools/audit/cli.py . --track all --format human
 uv run python ~/.gemini/config/plugins/edge/tools/audit/cli.py . --track all --format markdown -o full_audit.md
@@ -77,3 +85,17 @@ uv run python ~/.gemini/config/plugins/edge/tools/audit/cli.py . --track all --f
 - **Test Seams:** High-complexity files lacking companion test files are flagged as high risk (`MISSING_TEST_SEAM`).
 - **UI Purity & Clean Separation:** TSX/JSX files mixing direct database queries or raw SQL operations are flagged as `UI_ACTION_MIXING`.
 - **Health Score Calculation:** Overall codebase health score is computed using **SLOC-weighted risk** combined with a hotspot penalty to prevent God files from hiding behind clean barrel files.
+- **TypeScript Type-System Discipline (`--track types`, 0–100 Rubric):**
+  - **Bands (SLOC-weighted repo score):** `85–100` 🟢 `STRICT` | `60–84` 🟡 `LOOSE` | `0–59` 🔴 `POROUS`.
+  - **Penalties:**
+    - `RULE-TS-EXPLICIT-ANY` (`-20p`, CRITICAL): `: any`, `<any>`, `as any`, `any[]`, `Array<any>`.
+    - `RULE-TS-SUPPRESSION` (`-20p`, CRITICAL): `@ts-ignore`, `@ts-expect-error`, `@ts-nocheck`.
+    - `RULE-TS-DOUBLE-CAST` (`-20p`, CRITICAL): `as unknown as <T>`.
+    - `RULE-TS-UNSAFE-AS` (`-10p`, WARNING): `expr as <Type>` (excludes `as const`, `as any`, `as unknown as`, import/export aliases; recommends `satisfies` for object/array literals).
+    - `RULE-TS-NON-NULL` (`-10p`, WARNING): Postfix non-null assertion `expr!`.
+    - `RULE-TS-CONSOLE-LOG` (`-8p`, WARNING): `console.log(...)` in non-test production files.
+    - `RULE-TS-RECORD-UNKNOWN` (`-8p`, WARNING): `Record<string, unknown>` inside `src/core/` or `src/lib/` (allowed at perimeter).
+    - `RULE-TS-SWITCH-EXHAUSTIVE` (`-8p`, WARNING): `switch` lacking a `default:` branch with a `: never` exhaustiveness binding.
+    - `RULE-TS-OPTIONAL-BAG` (`-6p`, ADVISORY): Interface/object type mixing status booleans (`loading`, `isLoading`, `error`, `hasError`, `success`, `isSuccess`, `pending`, `isPending`) with $\ge 2$ optional fields.
+    - `RULE-TS-POSITIONAL-ARGS` (`-5p`, ADVISORY): $\ge 4$ positional parameters or $\ge 2$ plain `*Id: string` parameters in one signature.
+  - **Bonus:** `BONUS-TS-DISCIPLINE` (`+5p` once per file, capped at `100`) for `satisfies`, `readonly __brand`, `z.infer<...>`, or `: never` inside a `switch` `default:` block.
