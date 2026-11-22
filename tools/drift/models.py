@@ -331,3 +331,183 @@ class DriftStateStore:
             if isinstance(v, dict):
                 records[k] = DomainDriftRecord.from_dict(v)
         return cls(repo_path=repo_path, records=records, version=version)
+
+
+LEGACY_ERROR_TAGS: Tuple[str, ...] = (
+    "@inputs",
+    "@outputs",
+    "@glossary",
+    "@route",
+    "@spec",
+    "@base_commit",
+    "@domain_jargon",
+)
+LEGACY_WARNING_TAGS: Tuple[str, ...] = ("@module",)
+LEGACY_FRONTMATTER_TAGS: Tuple[str, ...] = LEGACY_ERROR_TAGS + LEGACY_WARNING_TAGS
+INV_PAT_DEF_RE = re.compile(r"^\s*-\s+\*\*\[((?:INV|PAT)-[A-Z0-9]+(?:-[A-Z0-9]+)+)\]\*\*")
+_DOMAIN_HEADING_RE = re.compile(r"^\s*#\s+Domain:\s*(.+?)\s*$")
+_PATHS_META_RE = re.compile(r"^\s*-\s+\*\*Paths:\*\*\s*(.+)$")
+_OWNER_META_RE = re.compile(r"^\s*-\s+\*\*Owner\s*/\s*DRI:\*\*\s*(.+)$")
+_CONCEPTS_META_RE = re.compile(r"^\s*-\s+\*\*Concepts:\*\*\s*(.+)$")
+_ENFORCED_BY_RE = re.compile(r"^\s*\*Enforced by:\*\s*(.+)$")
+_MD_TABLE_SEP_RE = re.compile(r"^\s*\|[\s:\-|]+\|\s*$")
+_CONCEPT_BULLET_RE = re.compile(r"^\s*[-*]\s+`?([a-z0-9][a-z0-9_-]*)`?\s*:")
+
+
+@dataclass
+class CanonicalDomainDoc:
+    """Canonical domain deed parsed from docs/<domain>/DOMAIN.md."""
+    domain: str
+    doc_path: str
+    tracked_paths: List[str] = field(default_factory=list)
+    owner: str = ""
+    concepts: List[str] = field(default_factory=list)
+    invariant_ids: List[str] = field(default_factory=list)
+    pattern_ids: List[str] = field(default_factory=list)
+    enforced_by: List[str] = field(default_factory=list)
+
+
+@dataclass
+class OntologyIssue:
+    """Single ontology validation finding (ERROR or WARNING)."""
+    severity: str       # "ERROR" | "WARNING"
+    code: str           # "UNKNOWN_CONCEPT" | "UNKNOWN_INVARIANT" | "LEGACY_TAG" | "MISSING_ENFORCER" | "GLOB_MISMATCH"
+    file_path: str
+    detail: str
+
+
+@dataclass
+class OntologyReport:
+    """Aggregated deterministic ontology validation output."""
+    skipped: bool = False
+    context_concepts: List[str] = field(default_factory=list)
+    domain_docs: List[CanonicalDomainDoc] = field(default_factory=list)
+    issues: List[OntologyIssue] = field(default_factory=list)
+
+    @property
+    def has_errors(self) -> bool:
+        return any(issue.severity == "ERROR" for issue in self.issues)
+
+
+def _split_csv_tokens(raw_value: str) -> List[str]:
+    """Splits comma-separated backtick/plain tokens and strips whitespace."""
+    return [
+        item.strip().strip("`").strip()
+        for item in raw_value.split(",")
+        if item.strip().strip("`").strip()
+    ]
+
+
+def _append_unique(target: List[str], item: str) -> None:
+    if item and item not in target:
+        target.append(item)
+
+
+def _parse_canonical_meta_line(line: str, doc: CanonicalDomainDoc) -> bool:
+    """Parses heading/metadata lines on CanonicalDomainDoc; returns True if matched."""
+    m_dom = _DOMAIN_HEADING_RE.match(line)
+    if m_dom:
+        doc.domain = m_dom.group(1).strip().strip("`")
+        return True
+    m_paths = _PATHS_META_RE.match(line)
+    if m_paths:
+        doc.tracked_paths.extend(_split_csv_tokens(m_paths.group(1)))
+        return True
+    m_owner = _OWNER_META_RE.match(line)
+    if m_owner:
+        doc.owner = m_owner.group(1).strip()
+        return True
+    m_concepts = _CONCEPTS_META_RE.match(line)
+    if m_concepts:
+        doc.concepts.extend(_split_csv_tokens(m_concepts.group(1)))
+        return True
+    return False
+
+
+def parse_canonical_domain_doc(
+    markdown_text: str,
+    doc_path: str,
+    fallback_domain: str = "",
+) -> CanonicalDomainDoc:
+    """Parses a canonical docs/<domain>/DOMAIN.md contract without YAML frontmatter."""
+    cleaned = markdown_text.lstrip("\ufeff")
+    doc = CanonicalDomainDoc(domain=fallback_domain, doc_path=doc_path)
+
+    for line in cleaned.splitlines():
+        if _parse_canonical_meta_line(line, doc):
+            continue
+        m_def = INV_PAT_DEF_RE.match(line)
+        if m_def:
+            tag_id = m_def.group(1)
+            target = doc.invariant_ids if tag_id.startswith("INV-") else doc.pattern_ids
+            _append_unique(target, tag_id)
+            continue
+        m_enf = _ENFORCED_BY_RE.match(line)
+        if m_enf:
+            for item in _split_csv_tokens(m_enf.group(1)):
+                _append_unique(doc.enforced_by, item.split("::", 1)[0].strip())
+
+    if not doc.domain:
+        doc.domain = fallback_domain
+    return doc
+
+
+def _parse_domain_map_row(line: str, domain_globs: Dict[str, List[str]]) -> None:
+    """Parses one Markdown table row inside ## Domain Map."""
+    stripped = line.strip()
+    if not stripped.startswith("|") or _MD_TABLE_SEP_RE.match(stripped):
+        return
+    cells = [c.strip() for c in stripped.strip("|").split("|")]
+    if len(cells) < 2:
+        return
+    domain_name = cells[0].strip("`").strip()
+    if not domain_name or domain_name.lower() == "domain":
+        return
+    globs = _split_csv_tokens(cells[1])
+    if globs:
+        domain_globs[domain_name] = globs
+
+
+def _parse_glossary_row(line: str, concept_ids: List[str]) -> None:
+    """Parses one bullet or table row inside ## Closed Concept Glossary."""
+    stripped = line.strip()
+    m_bullet = _CONCEPT_BULLET_RE.match(stripped)
+    if m_bullet:
+        _append_unique(concept_ids, m_bullet.group(1))
+        return
+    if stripped.startswith("|") and not _MD_TABLE_SEP_RE.match(stripped):
+        cells = [c.strip() for c in stripped.strip("|").split("|")]
+        if cells:
+            cid = cells[0].strip("`").strip()
+            if cid and cid.lower() != "concept":
+                _append_unique(concept_ids, cid)
+
+
+def parse_context_glossary(markdown_text: str) -> Tuple[Dict[str, List[str]], List[str]]:
+    """
+    Parses root CONTEXT.md into (domain_globs, concept_ids).
+    Concept IDs are strictly scoped to ## Closed Concept Glossary.
+    """
+    cleaned = markdown_text.lstrip("\ufeff")
+    domain_globs: Dict[str, List[str]] = {}
+    concept_ids: List[str] = []
+    section = ""
+
+    for line in cleaned.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            heading = stripped[3:].strip().lower()
+            if heading == "domain map":
+                section = "domain_map"
+            elif heading == "closed concept glossary":
+                section = "glossary"
+            else:
+                section = "other"
+            continue
+
+        if section == "domain_map":
+            _parse_domain_map_row(line, domain_globs)
+        elif section == "glossary":
+            _parse_glossary_row(line, concept_ids)
+
+    return domain_globs, concept_ids

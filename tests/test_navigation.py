@@ -545,5 +545,119 @@ class TestStationNavigationWiringAndRubrics(unittest.TestCase):
         self.assertIn("Env fact 2: App port 3005", env_nav)
 
 
+
+class TestCanonicalDomainAndScopedGlossaryNavigation(unittest.TestCase):
+    """Contracts for canonical docs/<domain>/DOMAIN.md and scoped CONTEXT.md glossary."""
+
+    def setUp(self):
+        self.temp_dir = Path(tempfile.mkdtemp(prefix="test_nav_canon_"))
+        self.repo_dir = self.temp_dir / "repo"
+        self.repo_dir.mkdir(parents=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_canonical_domain_md_discovered_alongside_legacy_and_relative_links_checked(self):
+        from tools.brigade.navigation import build_navigation_context
+
+        (self.repo_dir / "src" / "lib" / "bookings").mkdir(parents=True)
+        (self.repo_dir / "src" / "lib" / "bookings" / "repo.ts").write_text(
+            "export const repo = true;\n", encoding="utf-8"
+        )
+        (self.repo_dir / "src" / "lib" / "orders").mkdir(parents=True)
+        (self.repo_dir / "src" / "lib" / "orders" / "svc.ts").write_text(
+            "export const svc = true;\n", encoding="utf-8"
+        )
+
+        # Canonical docs/<domain>/DOMAIN.md
+        (self.repo_dir / "docs" / "bookings").mkdir(parents=True)
+        (self.repo_dir / "docs" / "bookings" / "DOMAIN.md").write_text(
+            "# Domain: bookings\n\n"
+            "- **Paths:** `src/lib/bookings/**`\n"
+            "- **Owner / DRI:** @bookings\n"
+            "- **Concepts:** `booking-slot`\n\n"
+            "## Core Invariants\n"
+            "- **[INV-BOOK-SLOT]** Hold slot inside transaction ([Repo](../../src/lib/bookings/repo.ts))\n"
+            "- Bad relative link ([Wrong](src/lib/bookings/repo.ts))\n",
+            encoding="utf-8",
+        )
+
+        # Legacy docs/domains/orders.md + docs/domains/DOMAIN.md collision trap
+        (self.repo_dir / "docs" / "domains").mkdir(parents=True)
+        (self.repo_dir / "docs" / "domains" / "orders.md").write_text(
+            '---\ndomain: orders\ntracked_paths: ["src/lib/orders/**"]\n---\n'
+            "- Orders legacy invariant\n",
+            encoding="utf-8",
+        )
+        (self.repo_dir / "docs" / "domains" / "DOMAIN.md").write_text(
+            "# Domain: domains\n- **Paths:** `src/lib/bookings/**`\n- COLLISION_DOMAIN_LEAK\n",
+            encoding="utf-8",
+        )
+
+        out_bookings = build_navigation_context(
+            self.repo_dir,
+            target_paths=["src/lib/bookings/repo.ts"],
+            domain="bookings",
+        )
+        self.assertIn("INV-BOOK-SLOT", out_bookings)
+        self.assertNotIn("COLLISION_DOMAIN_LEAK", out_bookings)
+        valid_line = next((ln for ln in out_bookings.splitlines() if "INV-BOOK-SLOT" in ln), "")
+        self.assertTrue(valid_line)
+        self.assertNotIn("[STALE]", valid_line)
+        wrong_line = next((ln for ln in out_bookings.splitlines() if "Bad relative link" in ln), "")
+        self.assertIn("[STALE]", wrong_line)
+
+        out_orders = build_navigation_context(
+            self.repo_dir,
+            target_paths=["src/lib/orders/svc.ts"],
+            domain="orders",
+        )
+        self.assertIn("Orders legacy invariant", out_orders)
+
+        # Existence-pointer fallback when only canonical docs/<domain>/DOMAIN.md exists
+        canon_only = self.temp_dir / "canon_only"
+        (canon_only / "docs" / "bookings").mkdir(parents=True)
+        (canon_only / "docs" / "bookings" / "DOMAIN.md").write_text(
+            "# Domain: bookings\n- **Paths:** `src/bookings/**`\n- **[INV-B-1]** Hold slot\n",
+            encoding="utf-8",
+        )
+        out_fallback = build_navigation_context(
+            canon_only,
+            target_paths=["src/unrelated.ts"],
+            domain="unknown",
+        )
+        self.assertIn("Navigation docs available:", out_fallback)
+        self.assertIn("DOMAIN.md", out_fallback)
+
+    def test_context_md_glossary_scoped_without_domain_map_leak(self):
+        from tools.brigade.navigation import build_navigation_context
+
+        (self.repo_dir / "src" / "lib" / "bookings").mkdir(parents=True)
+        (self.repo_dir / "src" / "lib" / "bookings" / "slot.ts").write_text(
+            "export const slot = 1;\n", encoding="utf-8"
+        )
+        (self.repo_dir / "CONTEXT.md").write_text(
+            "# Project Context\n\n"
+            "## Domain Map\n\n"
+            "| Domain | Paths | Owner |\n"
+            "| :--- | :--- | :--- |\n"
+            "| `bookings` | `src/lib/bookings/**` | DOMAIN_MAP_LEAK_SENTINEL |\n"
+            "| `billing` | `src/lib/billing/**` | BILLING_MAP_SENTINEL |\n\n"
+            "## Closed Concept Glossary\n\n"
+            "- `booking-slot`: Canonical bookings reservation slot (`src/lib/bookings/slot.ts`)\n"
+            "- `billing-invoice`: Canonical billing invoice (`src/lib/billing/invoice.ts`)\n",
+            encoding="utf-8",
+        )
+
+        out = build_navigation_context(
+            self.repo_dir,
+            target_paths=["src/lib/bookings/slot.ts"],
+            domain="bookings",
+        )
+        self.assertIn("booking-slot", out)
+        self.assertNotIn("DOMAIN_MAP_LEAK_SENTINEL", out)
+        self.assertNotIn("BILLING_MAP_SENTINEL", out)
+        self.assertNotIn("billing-invoice", out)
+
 if __name__ == "__main__":
     unittest.main()
