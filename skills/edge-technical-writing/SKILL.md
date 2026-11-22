@@ -15,7 +15,7 @@ Authoritative How-To guide for writing `CONTEXT.md`, `docs/<domain>/DOMAIN.md`, 
 Assign every document to **one** quadrant before writing; never mix quadrants inside one file:
 - **Reference:** Neutral, present-tense facts (`CONTEXT.md`, `docs/<domain>/DOMAIN.md`, `rules/context-system.md`). Update in place; history stays in `git log`.
 - **How-To Guide:** Task-oriented steps (`skills/*/SKILL.md`, runbooks). Omit tutorials and design history.
-- **Explanation:** Architectural trade-offs and "why" rationale (ADR/design notes). Keep out of `DOMAIN.md`.
+- **Explanation:** Architectural trade-offs and "why" rationale (`git log` and archived 1-spec-1-PR history). Keep out of `DOMAIN.md`.
 - **Tutorial:** Guided learning for humans; omit from agent-facing specs.
 
 ---

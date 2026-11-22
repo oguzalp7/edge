@@ -18,7 +18,7 @@ Edge separates engineering context into three orthogonal pillars:
 Every document MUST belong to exactly one Diátaxis quadrant; never mix modes in the same file:
 - **Reference:** Neutral, present-tense facts (`CONTEXT.md`, `docs/<domain>/DOMAIN.md`, `rules/context-system.md`). Updated in place.
 - **How-To Guide:** Task-oriented operational steps (`skills/*/SKILL.md`, `rules/*.md`).
-- **Explanation:** Architectural rationale and historical evolution (lives in `git log` or ADR notes, never inside `DOMAIN.md`).
+- **Explanation:** Architectural rationale and historical evolution (lives in `git log` and archived 1-spec-1-PR history, never inside `DOMAIN.md`).
 - **Tutorial:** Guided onboarding (human-only; skipped by execution agents).
 
 ---
