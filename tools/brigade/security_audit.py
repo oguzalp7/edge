@@ -40,7 +40,7 @@ _TOKEN_GUARD_RE = re.compile(
     r"\b(?:hashInvitationToken|verify[A-Za-z0-9_]*Token|validate[A-Za-z0-9_]*Token|timingSafeEqual)\s*\("
 )
 _POLICY_AUTH_FIELD_RE = re.compile(r"\b(?:minAuthLevel|authLevel|requireAuth)\b")
-_RUN_ACTION_CALL_RE = re.compile(r"\brunAction(?:\s*<[^>]*>)?\s*\(\s*([^,)]+)")
+_RUN_ACTION_CALL_RE = re.compile(r"\b(runAction|executeAction)\b")
 _READ_ONLY_REPO_METHOD_RE = re.compile(
     r"^[A-Za-z0-9_]*Repository\.(?:find|list|get|search|lookup|count|exists|validate)[A-Za-z0-9_]*$"
 )
@@ -576,6 +576,69 @@ def _extract_auth_policies(masked_lines: List[str]) -> Set[str]:
     return auth_policies
 
 
+def _skip_balanced_generics(text: str, start: int) -> int:
+    """Advances index past balanced `<...>` TypeScript generic arguments."""
+    depth = 0
+    brace_depth = 0
+    i = start
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch in "{(":
+            brace_depth += 1
+        elif ch in "})" and brace_depth > 0:
+            brace_depth -= 1
+        elif brace_depth == 0 and ch == "<":
+            depth += 1
+        elif brace_depth == 0 and ch == ">" and (i == 0 or text[i - 1] != "="):
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return start
+
+
+def _read_first_call_arg(text: str, start: int) -> str:
+    """Extracts the first argument expression from a call respecting nested brackets."""
+    depth = 0
+    i = start
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch in "({[":
+            depth += 1
+        elif ch in ")}]":
+            if depth == 0:
+                return text[start:i].strip()
+            depth -= 1
+        elif ch == "," and depth == 0:
+            return text[start:i].strip()
+        i += 1
+    return text[start:].strip()
+
+
+def _extract_action_policy_args(upstream: str) -> List[Tuple[str, str]]:
+    """Extracts `(fn_name, masked_first_arg)` pairs for runAction/executeAction calls."""
+    masked = _mask_js_comments_and_strings(upstream)
+    results: List[Tuple[str, str]] = []
+    n = len(masked)
+    for m in _RUN_ACTION_CALL_RE.finditer(masked):
+        pos = m.end()
+        while pos < n and masked[pos].isspace():
+            pos += 1
+        if pos < n and masked[pos] == "<":
+            pos = _skip_balanced_generics(masked, pos)
+            while pos < n and masked[pos].isspace():
+                pos += 1
+        if pos >= n or masked[pos] != "(":
+            continue
+        arg_start = pos + 1
+        while arg_start < n and masked[arg_start].isspace():
+            arg_start += 1
+        results.append((m.group(1), _read_first_call_arg(masked, arg_start)))
+    return results
+
+
 def _upstream_refutation_reason(
     upstream: str,
     sink_name: str,
@@ -591,12 +654,12 @@ def _upstream_refutation_reason(
     for helper in guard_helpers:
         if re.search(rf"\b{re.escape(helper)}\s*\(", upstream):
             return f"Refuted: intra-file guard helper '{helper}' verified upstream before sink"
-    for m_ra in _RUN_ACTION_CALL_RE.finditer(upstream):
-        policy_arg = m_ra.group(1).strip()
+    for action_fn, policy_arg in _extract_action_policy_args(upstream):
         if policy_arg in auth_policies or _POLICY_AUTH_FIELD_RE.search(policy_arg):
-            return f"Refuted: runAction policy '{policy_arg}' enforces auth level"
+            desc = "inline options enforce" if policy_arg.startswith("{") else f"policy '{policy_arg}' enforces"
+            return f"Refuted: {action_fn} {desc} auth level"
         if allow_read_only_run_action and _READ_ONLY_REPO_METHOD_RE.match(sink_name):
-            return "Refuted: non-mutating repository read wrapped in runAction"
+            return f"Refuted: non-mutating repository read wrapped in {action_fn}"
     if allow_read_only_run_action and _READ_ONLY_REPO_METHOD_RE.match(sink_name) and "publicOnly" in sink_window:
         return "Refuted: publicOnly read-only repository query"
     return None

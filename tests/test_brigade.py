@@ -7794,6 +7794,77 @@ class TestEvidenceFirstReviewAndShipBridge(unittest.TestCase):
             self.assertIn(("exportedHelperNoGuard", "ordersRepository.delete"), confirmed_entries)
             self.assertIn(("mixedPrivateHelper", "ordersRepository.update"), confirmed_entries)
 
+    def test_security_audit_inline_runaction_and_executeaction_object_literals(self):
+        sec_mod = importlib.import_module("tools.brigade.security_audit")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir)
+            actions_dir = repo / "src" / "actions"
+            actions_dir.mkdir(parents=True, exist_ok=True)
+
+            (actions_dir / "inline_safe.ts").write_text(
+                '"use server";\n'
+                "export async function inlineDeleteWithAuth(id: string) {\n"
+                "  return runAction({ revalidatePaths: ['/orders'], minAuthLevel: 4 }, () => db.delete(orders).where(eq(orders.id, id)));\n"
+                "}\n\n"
+                "export async function inlineExecuteGenericWithNestedTypes(\n"
+                "  id: string,\n"
+                "  callerSession?: SessionData\n"
+                ") {\n"
+                "  return executeAction<{\n"
+                "    id: string;\n"
+                "    extra: Result<string>;\n"
+                "  }, InputDto>(\n"
+                "    {\n"
+                "      session: callerSession,\n"
+                "      minAuthLevel: AuthLevel.BRANCH_MANAGER,\n"
+                "      revalidatePaths: ['/bookings'],\n"
+                "      defaultError: 'err',\n"
+                "    },\n"
+                "    async () => bookingsRepository.softDeleteBooking(id)\n"
+                "  );\n"
+                "}\n\n"
+                "export async function inlineExecuteReadOnly(id: string) {\n"
+                "  return executeAction(\n"
+                "    { defaultError: 'fetch failed' },\n"
+                "    async () => bookingsRepository.getBookingWithDetails(id)\n"
+                "  );\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            safe_rep = sec_mod.run_security_audit(repo, scopes=["src/actions/inline_safe.ts"])
+            self.assertTrue(safe_rep.passed, f"Expected 0 confirmed on inline_safe.ts, got: {safe_rep.findings}")
+            self.assertEqual(safe_rep.confirmed_count, 0)
+            self.assertEqual(safe_rep.rejected_count, 3)
+
+            (actions_dir / "inline_unsafe.ts").write_text(
+                '"use server";\n'
+                "export async function inlineDeleteWithoutMinAuth(id: string) {\n"
+                "  return runAction(\n"
+                "    { revalidatePaths: ['/orders'], defaultError: 'minAuthLevel spoof string' },\n"
+                "    () => db.delete(orders).where(eq(orders.id, id))\n"
+                "  );\n"
+                "}\n\n"
+                "export async function inlineExecuteMutationWithoutMinAuth(id: string) {\n"
+                "  return executeAction(\n"
+                "    { revalidatePaths: ['/bookings'], defaultError: 'err' },\n"
+                "    async () => bookingsRepository.deleteBooking(id)\n"
+                "  );\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            unsafe_rep = sec_mod.run_security_audit(repo, scopes=["src/actions/inline_unsafe.ts"])
+            self.assertFalse(unsafe_rep.passed)
+            confirmed_entries = {
+                (f.trace.get("entrypoint", "").split(":")[-1], f.trace.get("sink"))
+                for f in unsafe_rep.findings
+                if f.verdict == "confirmed"
+            }
+            self.assertIn(("inlineDeleteWithoutMinAuth", "db.delete"), confirmed_entries)
+            self.assertIn(("inlineExecuteMutationWithoutMinAuth", "bookingsRepository.deleteBooking"), confirmed_entries)
+
 
 class TestBrigadeVerificationTimeout(unittest.TestCase):
     def test_verify_default_timeout_is_300_seconds(self):
