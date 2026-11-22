@@ -16,22 +16,22 @@ description: Git-diff gated domain contract drift detector, ephemeral spec archi
 In fast-moving agentic workflows, specifications tend to scatter and rot:
 1. **İskele (Ephemeral Task/Slice Specs - `.edge/specs/*.md`):**  
    Temporary construction scaffolding written by `SPEC_WRITER` to execute a single vertical slice. Once tests are green and the code is merged, keeping task specs active causes context noise, hallucinations, and confusion. They must be safely moved to `.edge/archive/specs/`.
-2. **Tapu (Canonical Domain Deeds - `docs/domains/<domain>.md`):**  
-   Permanent, authoritative architectural deeds ("Tapu") tracking high-level domain invariants, boundary lines, intentional technical debt, and tracked paths.
+2. **Tapu (Canonical Domain Deeds - `docs/<domain>/DOMAIN.md`):**  
+   Permanent, authoritative architectural deeds ("Tapu") tracking high-level domain invariants (`[INV-*]`), adopted patterns (`[PAT-*]`), closed concepts (`CONTEXT.md`), and `Paths:`. Legacy `docs/domains/<domain>.md` remains supported for backward compatibility (`docs/domains/DOMAIN.md` is rejected as a collision).
 
 ```
  [ Vertical Slice Complete ]
               │
               ├──> archive_ephemeral_spec() ──> .edge/archive/specs/ (Archived)
               │
-              └──> consolidate_domain()     ──> docs/domains/<domain>.md (Permanent "Tapu")
+              └──> consolidate_domain()     ──> docs/<domain>/DOMAIN.md (or legacy docs/domains/<domain>.md)
 ```
 
 ---
 
-## 📋 YAML `tracked_paths` Frontmatter Standard
+## 📋 Canonical `DOMAIN.md` & Legacy YAML Frontmatter Standard
 
-Every canonical domain document in `docs/domains/<domain>.md` MUST include leading YAML frontmatter defining its `domain` and `tracked_paths`:
+Canonical domain deeds live at `docs/<domain>/DOMAIN.md` and use structured Markdown metadata (`# Domain: <name>`, `- **Paths:**`, `- **Owner / DRI:**`, `- **Concepts:**`, bullet-defined `**[INV-*]**` + `*Enforced by:*`, and `**[PAT-*]**`). Legacy deeds under `docs/domains/<domain>.md` use leading YAML frontmatter defining `domain` and `tracked_paths`:
 
 ### Format 1: Block List Syntax
 ```yaml
@@ -80,7 +80,7 @@ tracked_paths: ["src/lib/orders/**", "src/actions/orders.ts"]
                   [ edge-drift check <repo> ]
                               │
                               ▼
-                   Read docs/domains/*.md
+       validate_ontology() + Read docs/*/DOMAIN.md & docs/domains/*.md
                               │
                               ▼
             Compare HEAD SHA vs last_checked_sha
@@ -125,10 +125,13 @@ Discovers canonical domain contracts vs scattered ephemeral/task specs:
 python tools/drift/cli.py discover .
 ```
 
-### 2. Check Drift
-Audits domain contracts against live code:
+### 2. Check Drift & Ontology
+Audits `CONTEXT.md`, `docs/<domain>/DOMAIN.md`, code header tags (`validate_ontology()`), and domain contracts against live code:
 ```bash
-# Automated check in CI / pre-push
+# Deterministic zero-LLM ontology check only
+python tools/drift/cli.py check . --ontology-only
+
+# Automated ontology + drift check in CI / pre-push
 python tools/drift/cli.py check .
 
 # Custom model specification
@@ -136,7 +139,7 @@ python tools/drift/cli.py check . --model gemini-3.8-flash-high
 ```
 
 ### 3. Consolidate Domain Contract
-Distills scattered specs and live code into a canonical domain deed (`docs/domains/<domain>.md`):
+Distills scattered specs and live code into a domain deed (`docs/<domain>/DOMAIN.md` or legacy `docs/domains/<domain>.md`):
 ```bash
 python tools/drift/cli.py consolidate . \
   --domain bookings \
@@ -153,10 +156,11 @@ When `edge-drift check` reports `DRIFT_DETECTED`, the engineer or agent selects 
 
 ### 🌟 Path A: Intentional Code Evolution (Update the Deed)
 If the live code changes represent intentional, approved architectural enhancements:
-1. Edit `docs/domains/<domain>.md` to reflect the updated business invariants or boundary definitions.
-2. Mark the domain clean at current HEAD:
+1. Edit `docs/<domain>/DOMAIN.md` (or legacy `docs/domains/<domain>.md`) to reflect the updated business invariants or boundary definitions.
+2. Mark the domain (or all domains) clean at current HEAD:
    ```bash
    python tools/drift/cli.py check . --mark-clean <domain>
+   python tools/drift/cli.py check . --mark-clean all
    ```
 3. Commit the updated domain contract with your feature or refactor branch.
 

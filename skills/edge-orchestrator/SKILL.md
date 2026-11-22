@@ -20,10 +20,13 @@ suggested_skills:
    - Kod keşfi gerektiğinde `researcher` ajanına, şartname gerektiğinde `spec_writer` ajanına delege eder.
    - Odak: İnsanla hizalanma, bilişsel sisi dağıtma (`/grill-me`) ve üst düzey kararlar.
 
-2. **Dikey Dilim İntake & Mülakat (INVEST Slicing):**
-   - Kullanıcının getirdiği ham hikaye veya fikri alır.
-   - **Pocock & Dex Doktrini:** Dilim tam mı? (DB $\rightarrow$ Core $\rightarrow$ API $\rightarrow$ UI).
-   - Eksik katman varsa kullanıcıyı sorgular: *"Backend akışını anlattın, peki kullanıcı bu özelliği UI'da nasıl tetikleyecek?"*
+2. **İki Aşamalı İntake & Mülakat (Phase 0 `grill-with-docs` $\rightarrow$ Phase 1 INVEST Slicing):**
+   - **Phase 0 (`grill-with-docs` — Sözlük ve Adlandırma Kilidi):**
+     - Yeni bir domain veya kavram seti açılmadan önce `CONTEXT.md` (`## Closed Concept Glossary`) ve varsa `docs/<domain>/DOMAIN.md` okunur.
+     - Belirsiz terimler `/grill-with-docs` (veya `/grill-me`) ile netleştirilir; kanonik kebab-case kavram ID'leri ve sahip domain sınırları Phase 1'e geçmeden **`CONTEXT.md`** içine kilitlenir.
+   - **Phase 1 (Dikey Dilim & INVEST Slicing):**
+     - Kullanıcının getirdiği ham hikaye veya fikri alır ve **Pocock & Dex Doktrini** ile tam dikey dilimi doğrular (`DB -> Core -> API -> UI`).
+     - Eksik katman varsa kullanıcıyı sorgular: *"Backend akışını anlattın, peki kullanıcı bu özelliği UI'da nasıl tetikleyecek?"*
 
 3. **Kişisel UI Guardrail & Dinleme Döngüsü (`lavish-axi` - No-Bypass Invariant):**
    - UI içeren işlerde asla varsayımla kod yazılmasına izin vermez.

@@ -156,14 +156,14 @@ class TestEdgeDistillSkillV2(unittest.TestCase):
         Slice 1 Pillar 5:
         SKILL.md must integrate navigation-lens.md, the new TOON digest sections
         (Navigation & Tool Economy, Guardrail Gaps, Rule Inventory), and
-        docs/domains/<domain>.md Context Pointer output.
+        docs/<domain>/DOMAIN.md Context Pointer output.
         """
         text = self.skill_path.read_text(encoding="utf-8")
         self.assertIn("navigation-lens.md", text)
         self.assertIn("Navigation & Tool Economy", text)
         self.assertIn("Guardrail Gaps", text)
         self.assertIn("Rule Inventory", text)
-        self.assertIn("docs/domains/<domain>.md", text)
+        self.assertIn("docs/<domain>/DOMAIN.md", text)
 
 
 class TestDistillReferenceRubrics(unittest.TestCase):
@@ -254,14 +254,14 @@ class TestDistillReferenceRubrics(unittest.TestCase):
         self.assertIn("Navigation & Tool Economy", s_text)
         self.assertIn("Guardrail Gaps", s_text)
         self.assertIn("Rule Inventory", s_text)
-        self.assertIn("docs/domains/<domain>.md", s_text)
+        self.assertIn("docs/<domain>/DOMAIN.md", s_text)
         self.assertIn("1-command", s_text.lower())
 
         # 5. navigation-lens.md covers Context Pointers, 1-command anti-cache, and 3-way routing
         n_path = self.refs_dir / "navigation-lens.md"
         self.assertTrue(n_path.is_file(), f"Missing reference file: {n_path}")
         n_text = n_path.read_text(encoding="utf-8")
-        self.assertIn("docs/domains/<domain>.md", n_text)
+        self.assertIn("docs/<domain>/DOMAIN.md", n_text)
         self.assertIn("1-command", n_text.lower())
         self.assertIn("package.json", n_text)
         self.assertIn("EXPLORATION_BURST", n_text)

@@ -60,7 +60,7 @@ If unprocessed sessions or ready candidates exist, spawn an isolated subagent wi
     1. Lens 1 (`references/judgment-lens.md`): Downstream escapes across all Brigade stations + repeated user corrections (>= 2x).
     2. Lens 2 (`references/tooling-lens.md`): CLI friction, retry loops, meat-proxy handoffs, `Guardrail Gaps`, and `TOKEN_BLOAT`.
     3. Lens 3 (`references/divergent-lens.md`): Contrarian no-op rule pruning using `Rule Inventory` citations and line budget compaction.
-    4. Lens 4 (`references/navigation-lens.md`): `Navigation & Tool Economy` signals (`EXPLORATION_BURST`, `REDUNDANT_READ`, `EMPTY_SEARCH_CHAIN`) into `docs/domains/<domain>.md` Context Pointers.
+    4. Lens 4 (`references/navigation-lens.md`): `Navigation & Tool Economy` signals (`EXPLORATION_BURST`, `REDUNDANT_READ`, `EMPTY_SEARCH_CHAIN`) into `docs/<domain>/DOMAIN.md` Context Pointers.
   - Collect synthesis findings via `send_message`.
 
 ---
@@ -83,16 +83,15 @@ For each proposed invariant:
 ---
 
 ### Step 4: Captain Approval & Dual-Channel Delivery
-Present a structured proposal table to the human captain:
+Present each proposal to the human captain as a **4-Line Commander Decision Card** (if any line is unclear or lacks concrete evidence, mark **`REJECT`** by default):
 
-| # | Channel | Target | Budget | Description | Evidence Citation |
-|---|---------|--------|--------|-------------|-------------------|
-| 1 | Channel A | .edge/stations/surgeon.md | 24/40 | Transaction boundary lock | TICK-101 guard failure |
-| 2 | Channel A | agents/coder.md | 48/60 | Test Immutability Invariant | CAND-a1b2c3d4 (2 projects) |
-| 3 | Channel B | frontier-axi | N/A | Add git branch checkout guard | 6x command failure |
+- **What failed:** `<concrete telemetry failure or escape + evidence citation>`
+- **1-line rule diff:** `<exact Channel A line/budget diff or Channel B frontier-axi/tasks-axi delta>`
+- **Real risk if rejected:** `<specific defect class that recurs without this change>`
+- **Possible conflict:** `<overlapping rule/domain invariant, or "None"; unclear -> REJECT>`
 
 **Delivery Channels:**
-- **Channel A (Prose, Rubrics & Context Pointers):** Apply approved diffs directly to `.edge/stations/<role>.md`, `coding_standards.md`, `docs/domains/<domain>.md`, or plugin `agents/<role>.md`. When promoting a candidate, execute:
+- **Channel A (Prose, Rubrics & Context Pointers):** Apply approved diffs directly to `.edge/stations/<role>.md`, `coding_standards.md`, `docs/<domain>/DOMAIN.md`, or plugin `agents/<role>.md`. When promoting a candidate, execute:
   ```bash
   wsl python3 tools/distill/cli.py promote --candidate <id>
   ```

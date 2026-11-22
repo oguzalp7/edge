@@ -22,7 +22,11 @@ except ImportError:  # pragma: no cover - standalone fallback
         return str(path).replace("\\", "/")
 
 try:
-    from tools.drift.models import matches_tracked_paths, parse_domain_frontmatter
+    from tools.drift.models import (
+        matches_tracked_paths,
+        parse_canonical_domain_doc,
+        parse_domain_frontmatter,
+    )
 except ImportError:  # pragma: no cover - lightweight stdlib fallback
     def parse_domain_frontmatter(markdown_text: str, fallback_domain: str = "") -> Tuple[str, List[str], str]:
         if not markdown_text.startswith("---"):
@@ -31,6 +35,9 @@ except ImportError:  # pragma: no cover - lightweight stdlib fallback
         if len(parts) < 3:
             return fallback_domain, [], markdown_text
         return fallback_domain, [], parts[2].lstrip("\r\n")
+
+    def parse_canonical_domain_doc(markdown_text: str, doc_path: str, fallback_domain: str = "") -> object:
+        return None
 
     def matches_tracked_paths(changed_files: List[str], tracked_paths: List[str]) -> List[str]:
         return []
@@ -250,11 +257,25 @@ def _is_glossary_row(stripped: str) -> bool:
     return ":" in stripped
 
 
+def _slice_closed_concept_glossary(lines: List[str]) -> List[str]:
+    """Scopes lines to ## Closed Concept Glossary when that heading is present."""
+    for idx, line in enumerate(lines):
+        if line.strip().lower() == "## closed concept glossary":
+            scoped: List[str] = []
+            for follow in lines[idx + 1 :]:
+                if follow.strip().startswith("## "):
+                    break
+                scoped.append(follow)
+            return scoped
+    return lines
+
+
 def _extract_glossary_rows(repo_root: Path, tokens: Set[str], limit: int = 4) -> List[str]:
     glossary_file = _find_first_existing(repo_root, _GLOSSARY_CANDIDATES)
     if not glossary_file or not tokens:
         return []
-    lines = glossary_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    raw_lines = glossary_file.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+    lines = _slice_closed_concept_glossary(raw_lines) if glossary_file.name == "CONTEXT.md" else raw_lines
     matched: List[str] = []
     for idx, line in enumerate(lines):
         stripped = line.strip()
@@ -274,24 +295,77 @@ def _deed_matches(
     rel_paths: List[str],
     dom_clean: str,
 ) -> bool:
-    if dom_clean and (deed_domain.lower() == dom_clean or deed_file.stem.lower() == dom_clean):
+    stem_or_dir = deed_file.parent.name if deed_file.name.lower() == "domain.md" else deed_file.stem
+    if dom_clean and (deed_domain.lower() == dom_clean or stem_or_dir.lower() == dom_clean):
         return True
     return bool(matches_tracked_paths(rel_paths, tracked_paths))
 
 
-def _extract_deed_body_lines(body: str, domains_dir: Path, repo_root: Path, cap: int) -> List[str]:
+def _is_canonical_meta_bullet(stripped: str) -> bool:
+    low = stripped.lower()
+    return low.startswith(("- **paths:**", "- **owner / dri:**", "- **owner/dri:**", "- **concepts:**"))
+
+
+def _extract_deed_body_lines(body: str, deed_dir: Path, repo_root: Path, cap: int) -> List[str]:
     bullets: List[str] = []
     prose: List[str] = []
     for raw in body.splitlines():
         s = raw.strip()
-        if not s or s.startswith("#") or s == "---":
+        if not s or s.startswith("#") or s == "---" or _is_canonical_meta_bullet(s):
             continue
-        annotated = _annotate_stale_links(s, domains_dir, repo_root)
+        annotated = _annotate_stale_links(s, deed_dir, repo_root)
         if s.startswith(("- ", "* ")):
             bullets.append(annotated)
         else:
             prose.append(annotated)
     return (bullets + prose)[:cap]
+
+
+def _collect_canonical_nav_deeds(docs_dir: Path) -> Tuple[List[Tuple[Path, bool]], Set[str]]:
+    deeds: List[Tuple[Path, bool]] = []
+    seen_domains: Set[str] = set()
+    for sub in sorted(docs_dir.iterdir()):
+        if not sub.is_dir() or sub.name.lower() == "domains":
+            continue
+        dom_file = sub / "DOMAIN.md"
+        if dom_file.is_file():
+            deeds.append((dom_file, True))
+            seen_domains.add(sub.name.lower())
+    return deeds, seen_domains
+
+
+def _collect_legacy_nav_deeds(legacy_dir: Path, seen_domains: Set[str]) -> List[Tuple[Path, bool]]:
+    if not legacy_dir.is_dir():
+        return []
+    return [
+        (p, False)
+        for p in sorted(legacy_dir.glob("*.md"))
+        if p.is_file() and p.name.lower() != "domain.md" and p.stem.lower() not in seen_domains
+    ]
+
+
+def _iter_nav_domain_deeds(repo_root: Path) -> List[Tuple[Path, bool]]:
+    """Collects canonical docs/<domain>/DOMAIN.md (preferred) and legacy docs/domains/*.md."""
+    docs_dir = repo_root / "docs"
+    if not docs_dir.is_dir():
+        return []
+    deeds, seen_domains = _collect_canonical_nav_deeds(docs_dir)
+    deeds.extend(_collect_legacy_nav_deeds(docs_dir / "domains", seen_domains))
+    return deeds
+
+
+def _parse_deed_for_nav(
+    deed_file: Path,
+    is_canonical: bool,
+    text: str,
+    repo_root: Path,
+) -> Tuple[str, List[str], str]:
+    if is_canonical:
+        rel = deed_file.relative_to(repo_root).as_posix()
+        parsed = parse_canonical_domain_doc(text, doc_path=rel, fallback_domain=deed_file.parent.name)
+        if parsed is not None:
+            return parsed.domain, parsed.tracked_paths, text
+    return parse_domain_frontmatter(text, fallback_domain=deed_file.stem)
 
 
 def _extract_domain_deed_rows(
@@ -300,21 +374,18 @@ def _extract_domain_deed_rows(
     dom_clean: str,
     limit: int = 3,
 ) -> List[str]:
-    domains_dir = repo_root / "docs" / "domains"
-    if not domains_dir.is_dir():
-        return []
     collected: List[str] = []
-    for deed_file in sorted(domains_dir.glob("*.md")):
+    for deed_file, is_canonical in _iter_nav_domain_deeds(repo_root):
         if len(collected) >= limit:
             break
         try:
-            text = deed_file.read_text(encoding="utf-8", errors="replace")
+            text = deed_file.read_text(encoding="utf-8-sig", errors="replace")
         except Exception:
             continue
-        deed_domain, tracked_paths, body = parse_domain_frontmatter(text, fallback_domain=deed_file.stem)
+        deed_domain, tracked_paths, body = _parse_deed_for_nav(deed_file, is_canonical, text, repo_root)
         if _deed_matches(deed_file, deed_domain, tracked_paths, rel_paths, dom_clean):
             remaining = limit - len(collected)
-            collected.extend(_extract_deed_body_lines(body, domains_dir, repo_root, remaining))
+            collected.extend(_extract_deed_body_lines(body, deed_file.parent, repo_root, remaining))
     return collected[:limit]
 
 
@@ -323,8 +394,11 @@ def _inventory_nav_docs(repo_root: Path) -> List[str]:
     for rel in ("AGENTS.md", *_INDEX_CANDIDATES, *_GLOSSARY_CANDIDATES):
         if (repo_root / rel).is_file():
             docs.append(rel)
+    deeds = _iter_nav_domain_deeds(repo_root)
+    if any(is_canon for _, is_canon in deeds):
+        docs.append("docs/*/DOMAIN.md")
     domains_dir = repo_root / "docs" / "domains"
-    if domains_dir.is_dir() and any(domains_dir.glob("*.md")):
+    if domains_dir.is_dir() and any(p.name.lower() != "domain.md" for p in domains_dir.glob("*.md")):
         docs.append("docs/domains/")
     return docs
 

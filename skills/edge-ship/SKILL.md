@@ -26,7 +26,7 @@ user-invocable: true
 
 ## 🎯 Purpose & PR Body Contract
 
-- **Lean 2-Section PR Body:** Emits concise `## Summary` (code-only changed file count, `### Spec Expectations vs. Realization` diff + `AC`/`IC` criteria matrix, `### Architecture & Call-Stack Flow` Mermaid/call-stack blocks, `specs/INDEX.md`, `CONTEXT.md`) and `## Evidence` (spec link, Gate status, `### Examiner 3-Axis Seal` with collapsible repo-relative artifacts, `### Live QA Proof & Visual Evidence` with visited routes, collapsible E2E actions, formatted `db_crosscheck` JSON, and titled visual gallery).
+- **Lean 2-Section PR Body & 1-Minute Briefing:** Emits concise `## Summary` starting with a **1-Minute Briefing** (*What changed*, *Why*, *Risk / Blast Radius*, *Verification* — 60-second scannable overview with verified counts) followed by code-only changed file count, `### Spec Expectations vs. Realization` diff + `AC`/`IC` criteria matrix, `### Architecture & Call-Stack Flow` Mermaid/call-stack blocks, `specs/INDEX.md`, `CONTEXT.md`, and `## Evidence` (spec link, Gate status, `### Examiner 3-Axis Seal` with collapsible repo-relative artifacts, `### Live QA Proof & Visual Evidence` with visited routes, collapsible E2E actions, formatted `db_crosscheck` JSON, and titled visual gallery).
 - **Refactor Receipts & Door Brakes (`kind="refactor"`):** Discovers valid non-stale `.edge/receipts/refactor/<slug>.json` receipts bound to `(commit_sha, changed_files_hash)` under `target_repo`, builds `refactor(<slug>):` `SpecShipPlan` entries (avoiding `ship/<slug>` collisions via `ship/refactor-<slug>`), renders a `### Before/After Metric Delta` table under `## Summary` + `RefactorReceipt` / Gate / `Examiner 3-Axis Seal` under `## Evidence`, and enforces refactor One-Way Door brakes (exported public API removal/signature break, whole-segment auth/security paths excluding `sessionStorage.ts`/`authorName.tsx`, `> 15` files, or `> 500` diff lines). Two-Way Door PRs with `--auto` queued enter `AWAITING_MERGE` until `brigade confirm-merge` confirms `MERGED` and completes `tasks-axi done`.
 - **Decoupled from `/edge-no-mistakes`:** Primary delivery uses native `brigade` + `gh` / `gh-axi` + CI. For optional external auditing, invoke `/edge-no-mistakes` separately.
 
@@ -44,10 +44,11 @@ user-invocable: true
 
 ## ⚡ Tier 1: `1 Spec = 1 PR -> development` (Default)
 
-### Step 1: Docs & Drift Gate
-Verify navigation index integrity and living domain contracts before preparing PRs:
+### Step 1: Docs, Ontology & Drift Gate
+Verify navigation index integrity, ontology consistency (`validate_ontology`), and living domain contracts before preparing PRs:
 ```bash
 npm run check:navigation
+python3 tools/drift/cli.py check . --ontology-only
 python3 tools/drift/cli.py check .
 ```
 

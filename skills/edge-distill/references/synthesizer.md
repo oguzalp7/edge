@@ -19,7 +19,7 @@ Analyze the harvested telemetry digest across four holistic axes in a single eff
    - Recommend concrete `frontier-axi` / `tasks-axi` structural tickets (e.g. CI checks, pre-commit hooks, AXI wrappers) rather than vague prose rules.
 
 3. **Navigation & Context-Pointer Axis (`Navigation & Tool Economy`):**
-   - Convert `EXPLORATION_BURST`, `REDUNDANT_READ`, and `EMPTY_SEARCH_CHAIN` telemetry into front-loaded Context Pointers targeting `docs/domains/<domain>.md` or `.edge/stations/<role>.md`.
+   - Convert `EXPLORATION_BURST`, `REDUNDANT_READ`, and `EMPTY_SEARCH_CHAIN` telemetry into front-loaded Context Pointers targeting `docs/<domain>/DOMAIN.md` or `.edge/stations/<role>.md`.
    - Do NOT cache 1-command lookups (`package.json`, `ls`, directory trees) as prose rules.
 
 4. **Structural Enforcement & Pruning Axis (`Rule Inventory`):**
@@ -28,7 +28,7 @@ Analyze the harvested telemetry digest across four holistic axes in a single eff
 
 ## Output Format
 Return a structured Markdown report citing evidence:
-- **Proposed Rule / Pointer / Ticket:** Exact rule, `docs/domains/<domain>.md` Context Pointer, or `tasks-axi` ticket title.
-- **Target Role / File:** Target station, `docs/domains/<domain>.md`, or `frontier-axi` / `tasks-axi`.
+- **Proposed Rule / Pointer / Ticket:** Exact rule, `docs/<domain>/DOMAIN.md` Context Pointer, or `tasks-axi` ticket title.
+- **Target Role / File:** Target station, `docs/<domain>/DOMAIN.md`, or `frontier-axi` / `tasks-axi`.
 - **Classification:** `REPO_LOCAL` vs `PLUGIN_CANDIDATE`.
 - **Evidence Citation:** Step index, conversation ID, and failure snippet.

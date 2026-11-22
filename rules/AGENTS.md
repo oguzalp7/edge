@@ -57,19 +57,22 @@ Ajanlar çevre birimleriyle (Git, Tarayıcı, Görev Listesi) etkileşime girerk
 > **Proje Bağımsızlığı İlkesi:**  
 > Kodlama kuralları, dosya yerleşimi ve mimari tercihler projeden projeye değişkenlik gösterir. `edge` eklentisi kafasına göre evrensel bir kod stili dayatamaz.
 
-1. **Önce Proje Standartlarını Oku:**
-   * Bir göreve başlamadan önce proje kök dizininde `coding_standards.md` veya `.agents/rules/` dosyası aranır.
-   * Varsa, tüm kodlama kararları doğrudan bu dosyanın çizdiği sınırlara göre verilir.
+1. **Önce Proje Standartlarını ve Bağlam Ontolojisini Oku:**
+   * Bir göreve başlamadan önce proje kök dizininde `coding_standards.md`, `CONTEXT.md` ve `.agents/rules/` dosyaları aranır.
+   * Varsa, tüm kodlama ve terminoloji kararları doğrudan bu belgelerin çizdiği sınırlara göre verilir.
 
-2. **Standart Yoksa Uydurma, Mülakat Yap (`/grill*`):**
-   * Eğer hedef projede bir `coding_standards.md` bulunmuyorsa; ajan rastgele varsayımlarda bulunamaz.
-   * Kullanıcıyı `/grill-me` veya `/grill-with-docs` becerileriyle mülakata alarak; projenin mimari tercihlerini (dil sürümleri, tip katılığı, klasör hiyerarşisi, test ekolü) netleştirir ve `coding_standards.md` belgesini oluşturur.
+2. **Standart veya Terim Yoksa Uydurma, Mülakat Yap (`/grill*`):**
+   * Eğer hedef projede `coding_standards.md` veya `CONTEXT.md` sözlüğü bulunmuyorsa; ajan rastgele varsayımlarda bulunamaz.
+   * Kullanıcıyı `/grill-me` veya `/grill-with-docs` becerileriyle mülakata alarak; projenin mimari tercihlerini (`coding_standards.md`) ve kapalı kavram sözlüğünü (`CONTEXT.md`) netleştirir.
 
 ---
 
 ## 📚 3. Operasyonel El Kitapçıkları (Playbook Routing)
 
 Ajanlar icra ettikleri görevin niteliğine göre ilgili kılavuzu referans almalıdır:
+
+* 🧭 **Bağlam Sistemi & Ontoloji Anayasası (Context System Constitution):**  
+  System Triad, Diátaxis mod ayrımı, `CONTEXT.md`, `docs/<domain>/DOMAIN.md` ve 1–3 satırlık kod ön-bilgisi kuralları için [**`rules/context-system.md`**](file:///C:/Users/oguz_/.gemini/config/plugins/edge/rules/context-system.md) belgesini oku.
 
 * 🧬 **Refaktör Görevleri (Yapısal Değişim, Sıfır Davranış Değişimi):**  
   Detaylı yönergeler için [**`rules/refactor.md`**](file:///C:/Users/oguz_/.gemini/config/plugins/edge/rules/refactor.md) el kitabını oku.  

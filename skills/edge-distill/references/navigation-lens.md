@@ -22,8 +22,8 @@ Convert empirical navigation and guardrail telemetry into crisp Context Pointers
 3. **Strict 3-Way Routing:**
    - **Mechanical Check (`## Guardrail Gaps` -> `UNWIRED_GUARDRAIL` / `MISSING_GUARDRAIL`):** Route to Channel B `frontier-axi` (or `tasks-axi` on Captain escalation); NEVER write a prose rule.
    - **Judgment Call (station escape / behavioral rule):** Route to Channel A `.edge/stations/<role>.md` or `agents/<role>.md`.
-   - **Navigation Pointer (`EXPLORATION_BURST` / `REDUNDANT_READ` / `EMPTY_SEARCH_CHAIN`):** Route to Channel A `docs/domains/<domain>.md`, `coding_standards.md`, or `.edge/stations/<role>.md` using format:
+   - **Navigation Pointer (`EXPLORATION_BURST` / `REDUNDANT_READ` / `EMPTY_SEARCH_CHAIN`):** Route to Channel A `docs/<domain>/DOMAIN.md`, `coding_standards.md`, or `.edge/stations/<role>.md` using format:
      `- When <trigger/condition> -> read <exact_path> (<1-line scope>).`
 
 ## Deliverable
-Return compact Context Pointers targeting `docs/domains/<domain>.md` or `.edge/stations/`, plus `frontier-axi` / `tasks-axi` structural tickets for mechanical gaps cited from `<untrusted_telemetry_digest>`.
+Return compact Context Pointers targeting `docs/<domain>/DOMAIN.md` or `.edge/stations/`, plus `frontier-axi` / `tasks-axi` structural tickets for mechanical gaps cited from `<untrusted_telemetry_digest>`.
