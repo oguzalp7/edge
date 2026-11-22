@@ -3,6 +3,9 @@
 Scanner and Gated Auditor for edge-drift:
 Detects architectural and invariant drift between canonical domain contracts
 and live code implementation via git diff gating and read-only LLM audit.
+@intent Audit domain contracts, resolve CONTEXT.md globs, and validate code/doc ontology
+@concepts zero-token-drift-gate, domain-deed, atomic-state-store
+@invariants [INV-DRIFT-ZERO-TOKEN], [INV-DRIFT-NO-FAKE-CLEAN], [INV-DRIFT-ARCHIVE-SAFE]
 """
 
 import os
@@ -51,11 +54,46 @@ _ONTOLOGY_PRUNE_DIRS = {
     "__pycache__",
     "tests",
 }
+_TEST_INDEX_PRUNE_DIRS = {
+    ".git",
+    "node_modules",
+    ".edge",
+    ".next",
+    "dist",
+    "build",
+    "__pycache__",
+}
 _ONTOLOGY_CODE_SUFFIXES = {".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"}
 _CODING_COOKIE_RE = re.compile(r"^#.*coding[:=]")
 _HEADER_TAG_RE = re.compile(r"^\s*(?:#|//|\*)?\s*(@[a-z_]+)\b(.*)$")
 _INV_TOKEN_RE = re.compile(r"\[?((?:INV|PAT)-[A-Z0-9]+(?:-[A-Z0-9]+)+)\]?")
 _DIRECTIVE_LINES = {'"use client";', "'use client';", '"use strict";', "'use strict';", '"use client"', "'use client'", '"use strict"', "'use strict'"}
+
+_ALLOWED_FENCE_LANGS = {"mermaid", "pseudo", "pseudocode"}
+_ENFORCED_BY_LEAK_RE = re.compile(r"(?i)^\s*[*_]{1,2}enforced\s+by\b")
+_CODE_EXT_RE = re.compile(
+    r"(?<![\w-])(?:[\w*-]+\.)+(?:py|ts|tsx|js|jsx|mjs|cjs|sql|sh|json|yaml|yml)\b"
+)
+_CODE_PATH_RE = re.compile(
+    r"(?:^|[\s`(\[\"'])(?:"
+    r"(?:\.edge|src|tools|tests|app|lib|skills|agents|docs)/(?:[\w.*-]+(?:/[\w.*-]+)*|(?=\s|$|[`.,;:)\]]))"
+    r"|rules/(?:[\w.*-]+(?:/[\w.*-]+)+|[\w.*-]+\.(?:md|py|ts|json|yaml|yml)|(?=\s|$|[`.,;:)\]]))"
+    r")"
+)
+_BACKTICK_SPAN_RE = re.compile(r"`([^`]+)`")
+_BACKTICK_CALL_RE = re.compile(r"\b[a-zA-Z_][a-zA-Z0-9_]*\([^)]*\)")
+_SNAKE_CASE_RE = re.compile(r"[A-Za-z0-9]*[a-z][A-Za-z0-9]*_[A-Za-z0-9_]+|[A-Za-z0-9_]+_[a-z][A-Za-z0-9]*")
+_CAMEL_CASE_RE = re.compile(r"[a-z][a-zA-Z0-9]*[A-Z][a-zA-Z0-9]*")
+_PASCAL_CASE_RE = re.compile(r"(?:[A-Z][a-z0-9]+){2,}")
+_DOTTED_IDENT_RE = re.compile(r"[A-Za-z_]\w*\.[A-Za-z_]\w*")
+_ALLOWED_BACKTICK_PATTERNS = (
+    re.compile(r"v\d+(?:\.\d+)+"),
+    re.compile(r"(?:[A-Z]+\s*)?(?:<=|>=|<|>|==)\s*\d+"),
+    re.compile(r"[A-Z][A-Z0-9_-]*"),
+    re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*"),
+    re.compile(r"[A-Z][a-z0-9]+"),
+    re.compile(r"[a-z]\.[a-z]"),
+)
 
 
 def archive_ephemeral_spec(
@@ -265,11 +303,24 @@ def _write_drift_report(
     os.replace(tmp_report, report_file)
 
 
+def _load_context_domain_globs(
+    norm_repo: Path,
+) -> Tuple[Dict[str, List[str]], List[str], bool]:
+    """Reads CONTEXT.md (if present) and returns (domain_globs, concept_ids, exists)."""
+    context_path = norm_repo / "CONTEXT.md"
+    if not context_path.is_file():
+        return {}, [], False
+    ctx_text = context_path.read_text(encoding="utf-8-sig", errors="replace")
+    domain_globs, concept_ids = parse_context_glossary(ctx_text)
+    return domain_globs, concept_ids, True
+
+
 def _load_domain_contract(
     norm_repo: Path,
     domain_name: str,
     contract_file: Path,
     is_canonical: bool,
+    context_globs: Optional[Dict[str, List[str]]] = None,
 ) -> Union[DomainContract, DriftCheckResult]:
     """Reads and parses a canonical DOMAIN.md or legacy docs/domains/*.md contract."""
     try:
@@ -286,20 +337,22 @@ def _load_domain_contract(
         parsed = parse_canonical_domain_doc(
             content, doc_path=rel_doc_path, fallback_domain=domain_name
         )
+        resolved_paths = (context_globs or {}).get(parsed.domain) or parsed.tracked_paths
         return DomainContract(
             domain=parsed.domain,
             doc_path=rel_doc_path,
-            tracked_paths=parsed.tracked_paths,
+            tracked_paths=resolved_paths,
             body=content,
         )
 
     parsed_domain, tracked_paths, body_text = parse_domain_frontmatter(
         content, fallback_domain=contract_file.stem
     )
+    resolved_paths = (context_globs or {}).get(parsed_domain) or tracked_paths
     return DomainContract(
         domain=parsed_domain,
         doc_path=rel_doc_path,
-        tracked_paths=tracked_paths,
+        tracked_paths=resolved_paths,
         body=body_text,
     )
 
@@ -447,9 +500,12 @@ def check_drift(
         _write_drift_report(norm_repo, head_sha, results)
         return results
 
+    context_globs, _, _ = _load_context_domain_globs(norm_repo)
     state_store = DriftStateStore.load_from_repo(norm_repo)
     for domain_name, contract_file, is_canonical in contract_entries:
-        loaded = _load_domain_contract(norm_repo, domain_name, contract_file, is_canonical)
+        loaded = _load_domain_contract(
+            norm_repo, domain_name, contract_file, is_canonical, context_globs
+        )
         if isinstance(loaded, DriftCheckResult):
             results.append(loaded)
         else:
@@ -476,14 +532,131 @@ def _collect_canonical_domain_files(norm_repo: Path) -> List[Path]:
     return found
 
 
+def _extract_domain_body_lines(dom_text: str) -> List[str]:
+    """Returns DOMAIN.md body lines starting at the first ## heading (or after header metadata)."""
+    lines = dom_text.lstrip("\ufeff").splitlines()
+    for idx, line in enumerate(lines):
+        if line.strip().startswith("## "):
+            return lines[idx:]
+    body: List[str] = []
+    for line in lines:
+        s = line.strip()
+        if s.startswith("# Domain:") or s.startswith(("- **Paths:**", "- **Owner", "- **Concepts:**")):
+            continue
+        body.append(line)
+    return body
+
+
+def _is_allowed_backtick_token(token: str) -> bool:
+    """Allows safe domain concepts, uppercase tokens, flags, commands, and CONTEXT/DOMAIN refs."""
+    if token in {"CONTEXT.md", "DOMAIN.md"} or token.startswith(("--", "/")):
+        return True
+    return any(pat.fullmatch(token) for pat in _ALLOWED_BACKTICK_PATTERNS)
+
+
+def _check_backtick_leak(token: str) -> Optional[str]:
+    """Flags code paths, calls, and code identifiers inside backticks."""
+    if _is_allowed_backtick_token(token):
+        return None
+    if "/" in token and not token.startswith("/"):
+        return f"Code/file path '{token}' not allowed in abstract DOMAIN.md"
+    if _CODE_EXT_RE.search(token):
+        return f"Code file reference '{token}' not allowed in abstract DOMAIN.md"
+    if _BACKTICK_CALL_RE.search(token):
+        return f"Function call '{token}' not allowed in abstract DOMAIN.md"
+    if _SNAKE_CASE_RE.fullmatch(token):
+        return f"snake_case identifier '{token}' not allowed in abstract DOMAIN.md"
+    if _CAMEL_CASE_RE.fullmatch(token):
+        return f"camelCase identifier '{token}' not allowed in abstract DOMAIN.md"
+    if _PASCAL_CASE_RE.fullmatch(token):
+        return f"PascalCase identifier '{token}' not allowed in abstract DOMAIN.md"
+    if _DOTTED_IDENT_RE.search(token):
+        return f"Dotted code identifier '{token}' not allowed in abstract DOMAIN.md"
+    return None
+
+
+def _check_path_or_ext_leak(line: str) -> Optional[str]:
+    """Checks for code extensions or repo paths anywhere in a DOMAIN.md body line."""
+    cleaned = line.replace("CONTEXT.md", "").replace("DOMAIN.md", "")
+    if _CODE_EXT_RE.search(cleaned):
+        return f"Code file extension in DOMAIN.md: '{line.strip()}'"
+    if _CODE_PATH_RE.search(line):
+        return f"Repository path in DOMAIN.md: '{line.strip()}'"
+    return None
+
+
+def _check_prose_line_leaks(line: str, doc_path: str) -> List[OntologyIssue]:
+    """Validates one non-fenced DOMAIN.md body line for code/enforcer/identifier leaks."""
+    issues: List[OntologyIssue] = []
+    if _ENFORCED_BY_LEAK_RE.match(line):
+        issues.append(
+            OntologyIssue(
+                "ERROR",
+                "CODE_LEAK_IN_DOMAIN_DOC",
+                doc_path,
+                "Legacy '*Enforced by:*' reference not allowed in v1.1 DOMAIN.md",
+            )
+        )
+    path_err = _check_path_or_ext_leak(line)
+    if path_err:
+        issues.append(OntologyIssue("ERROR", "CODE_LEAK_IN_DOMAIN_DOC", doc_path, path_err))
+    for match in _BACKTICK_SPAN_RE.finditer(line):
+        bt_err = _check_backtick_leak(match.group(1).strip())
+        if bt_err:
+            issues.append(OntologyIssue("ERROR", "CODE_LEAK_IN_DOMAIN_DOC", doc_path, bt_err))
+    return issues
+
+
+def _scan_domain_doc_leaks(dom_text: str, doc_path: str) -> List[OntologyIssue]:
+    """Deterministic CODE_LEAK_IN_DOMAIN_DOC check on a canonical DOMAIN.md body."""
+    issues: List[OntologyIssue] = []
+    in_fence = False
+    for line in _extract_domain_body_lines(dom_text):
+        stripped = line.strip()
+        if stripped.startswith("~~~"):
+            issues.append(
+                OntologyIssue("ERROR", "CODE_LEAK_IN_DOMAIN_DOC", doc_path, "Tilde code fence not allowed in DOMAIN.md")
+            )
+            in_fence = not in_fence
+            continue
+        if stripped.startswith("```"):
+            if not in_fence:
+                lang = stripped[3:].strip().lower()
+                if lang not in _ALLOWED_FENCE_LANGS:
+                    issues.append(
+                        OntologyIssue(
+                            "ERROR",
+                            "CODE_LEAK_IN_DOMAIN_DOC",
+                            doc_path,
+                            f"Disallowed or untyped code fence '```{lang}' in DOMAIN.md",
+                        )
+                    )
+                in_fence = True
+            else:
+                in_fence = False
+            continue
+        if in_fence:
+            path_err = _check_path_or_ext_leak(line)
+            if path_err:
+                issues.append(OntologyIssue("ERROR", "CODE_LEAK_IN_DOMAIN_DOC", doc_path, path_err))
+            continue
+        issues.extend(_check_prose_line_leaks(line, doc_path))
+
+    if in_fence:
+        issues.append(
+            OntologyIssue("ERROR", "CODE_LEAK_IN_DOMAIN_DOC", doc_path, "Unclosed fenced code block in DOMAIN.md")
+        )
+    return issues
+
+
 def _validate_domain_doc_entry(
-    norm_repo: Path,
     doc: CanonicalDomainDoc,
+    dom_text: str,
     valid_concepts: Set[str],
     context_globs: Dict[str, List[str]],
     has_context_file: bool,
 ) -> List[OntologyIssue]:
-    """Validates one CanonicalDomainDoc against CONTEXT.md and enforcer files."""
+    """Validates one CanonicalDomainDoc against CONTEXT.md and code-leak rules."""
     issues: List[OntologyIssue] = []
     if has_context_file or doc.concepts:
         for concept in doc.concepts:
@@ -497,7 +670,7 @@ def _validate_domain_doc_entry(
                     )
                 )
 
-    if doc.domain in context_globs:
+    if doc.domain in context_globs and doc.tracked_paths:
         ctx_paths = [g.strip() for g in context_globs[doc.domain]]
         dom_paths = [g.strip() for g in doc.tracked_paths]
         if ctx_paths != dom_paths:
@@ -510,18 +683,7 @@ def _validate_domain_doc_entry(
                 )
             )
 
-    for enforcer in doc.enforced_by:
-        if any(ch in enforcer for ch in ("*", "?", "{", "[")):
-            continue
-        if not (norm_repo / enforcer).exists():
-            issues.append(
-                OntologyIssue(
-                    severity="WARNING",
-                    code="MISSING_ENFORCER",
-                    file_path=doc.doc_path,
-                    detail=f"Missing enforcer path '{enforcer}'",
-                )
-            )
+    issues.extend(_scan_domain_doc_leaks(dom_text, doc.doc_path))
     return issues
 
 
@@ -591,6 +753,7 @@ def _validate_header_tag(
     rel_path: str,
     valid_concepts: Set[str],
     valid_invariants: Set[str],
+    invariant_index: Optional[Dict[str, List[str]]] = None,
 ) -> List[OntologyIssue]:
     """Validates one anchored @tag line inside a file's leading header."""
     if tag in LEGACY_ERROR_TAGS:
@@ -617,48 +780,74 @@ def _validate_header_tag(
                         f"Unknown invariant '{inv_id}'",
                     )
                 )
+            elif invariant_index is not None:
+                invariant_index.setdefault(inv_id, []).append(rel_path)
     return issues
 
 
-def _walk_tracked_code_files(
+def _walk_code_tree(
+    scan_root: Path,
     norm_repo: Path,
-    tracked_globs: List[str],
+    prune_dirs: Set[str],
+    tracked_globs: Optional[List[str]] = None,
 ) -> List[Tuple[str, Path]]:
-    """Walks repo via os.walk with prune set, returning tracked code files."""
+    """Walks a directory via os.walk with prune set, returning matching code files."""
+    if not scan_root.is_dir():
+        return []
     files: List[Tuple[str, Path]] = []
-    for root, dirs, filenames in os.walk(norm_repo):
-        dirs[:] = sorted(d for d in dirs if d not in _ONTOLOGY_PRUNE_DIRS)
+    for root, dirs, filenames in os.walk(scan_root):
+        dirs[:] = sorted(d for d in dirs if d not in prune_dirs)
         for fname in sorted(filenames):
             fpath = Path(root) / fname
             if fpath.suffix.lower() not in _ONTOLOGY_CODE_SUFFIXES:
                 continue
             rel = fpath.relative_to(norm_repo).as_posix()
-            if tracked_globs and not matches_tracked_paths([rel], tracked_globs):
+            if tracked_globs is not None and not matches_tracked_paths([rel], tracked_globs):
                 continue
             files.append((rel, fpath))
     return files
 
 
+def _scan_files_for_headers(
+    file_entries: List[Tuple[str, Path]],
+    valid_concepts: Set[str],
+    valid_invariants: Set[str],
+    invariant_index: Dict[str, List[str]],
+    invariants_only: bool = False,
+) -> List[OntologyIssue]:
+    """Scans top-30L headers across files for ontology tags and invariant indexing."""
+    issues: List[OntologyIssue] = []
+    for rel_path, fpath in file_entries:
+        text = fpath.read_text(encoding="utf-8-sig", errors="replace")
+        for hdr_line in _extract_header_lines(text, max_lines=30):
+            m = _HEADER_TAG_RE.match(hdr_line)
+            if not m:
+                continue
+            tag = m.group(1)
+            if invariants_only and tag != "@invariants":
+                continue
+            issues.extend(
+                _validate_header_tag(
+                    tag, m.group(2), rel_path, valid_concepts, valid_invariants, invariant_index
+                )
+            )
+    return issues
+
+
 def validate_ontology(repo_path: Union[Path, str]) -> OntologyReport:
     """
     Deterministic zero-LLM validator for CONTEXT.md, docs/*/DOMAIN.md,
-    and 1-3L code header tags (@intent, @concepts, @invariants, legacy tags).
+    and 1-3L code/test header tags (@intent, @concepts, @invariants, legacy tags).
     Skips cleanly when neither CONTEXT.md nor docs/*/DOMAIN.md exists.
     """
     norm_repo = normalize_target_path(repo_path)
-    context_path = norm_repo / "CONTEXT.md"
     canonical_files = _collect_canonical_domain_files(norm_repo)
+    context_globs, context_concepts, has_context = _load_context_domain_globs(norm_repo)
 
-    if not context_path.is_file() and not canonical_files:
+    if not has_context and not canonical_files:
         return OntologyReport(skipped=True)
 
-    context_globs: Dict[str, List[str]] = {}
-    context_concepts: List[str] = []
-    if context_path.is_file():
-        ctx_text = context_path.read_text(encoding="utf-8-sig", errors="replace")
-        context_globs, context_concepts = parse_context_glossary(ctx_text)
     valid_concepts = set(context_concepts)
-
     domain_docs: List[CanonicalDomainDoc] = []
     issues: List[OntologyIssue] = []
     valid_invariants: Set[str] = set()
@@ -670,25 +859,31 @@ def validate_ontology(repo_path: Union[Path, str]) -> OntologyReport:
         doc = parse_canonical_domain_doc(dom_text, doc_path=rel_doc, fallback_domain=dom_file.parent.name)
         domain_docs.append(doc)
         valid_invariants.update(doc.invariant_ids)
-        tracked_globs.extend(doc.tracked_paths)
+        tracked_globs.extend(context_globs.get(doc.domain) or doc.tracked_paths)
         issues.extend(
-            _validate_domain_doc_entry(norm_repo, doc, valid_concepts, context_globs, context_path.is_file())
+            _validate_domain_doc_entry(doc, dom_text, valid_concepts, context_globs, has_context)
         )
 
-    for rel_path, fpath in _walk_tracked_code_files(norm_repo, tracked_globs):
-        text = fpath.read_text(encoding="utf-8-sig", errors="replace")
-        for hdr_line in _extract_header_lines(text, max_lines=30):
-            m = _HEADER_TAG_RE.match(hdr_line)
-            if m:
-                issues.extend(
-                    _validate_header_tag(m.group(1), m.group(2), rel_path, valid_concepts, valid_invariants)
-                )
+    invariant_index: Dict[str, List[str]] = {}
+    code_glob_filter = tracked_globs if (tracked_globs or canonical_files) else None
+    code_files = _walk_code_tree(norm_repo, norm_repo, _ONTOLOGY_PRUNE_DIRS, code_glob_filter)
+    issues.extend(
+        _scan_files_for_headers(code_files, valid_concepts, valid_invariants, invariant_index)
+    )
+    test_files = _walk_code_tree(norm_repo / "tests", norm_repo, _TEST_INDEX_PRUNE_DIRS)
+    issues.extend(
+        _scan_files_for_headers(
+            test_files, valid_concepts, valid_invariants, invariant_index, invariants_only=True
+        )
+    )
 
+    sorted_index = {k: sorted(set(v)) for k, v in sorted(invariant_index.items())}
     return OntologyReport(
         skipped=False,
         context_concepts=context_concepts,
         domain_docs=domain_docs,
         issues=issues,
+        invariant_index=sorted_index,
     )
 
 

@@ -23,23 +23,19 @@ Every document MUST belong to exactly one Diátaxis quadrant; never mix modes in
 
 ---
 
-## 3. Physical Ontology (`CONTEXT.md` + `docs/<domain>/DOMAIN.md`)
+## 3. 3-Layer Dependency Inversion (`DOMAIN.md` $\rightarrow$ `CONTEXT.md` $\leftarrow$ Code/Tests)
 
-1. **`CONTEXT.md` (Repo Root — Reference):**
-   - Contains `## Domain Map` (domain-to-glob index) and `## Closed Concept Glossary` (canonical kebab-case concept IDs mapped to exact code symbols/files).
-   - `DOMAIN.md` `Paths:` is canonical; any mismatch with `CONTEXT.md` emits a `GLOB_MISMATCH` warning.
-2. **`docs/<domain>/DOMAIN.md` (Canonical Domain Deed / Tapu — Reference):**
-   - Required header & metadata:
-     - `# Domain: <name>` (`domains` is reserved/rejected so `docs/domains/DOMAIN.md` never collides)
-     - `- **Paths:** <comma-separated tracked globs>`
-     - `- **Owner / DRI:** <handle or team>`
-     - `- **Concepts:** <comma-separated closed IDs from CONTEXT.md>`
-   - Bullet-defined invariants and patterns:
-     - `- **[INV-<DOM>-<ID>]** <Single-line rule>` followed by `  *Enforced by:* <repo-relative file/test paths>`
-     - `- **[PAT-<DOM>-<ID>]** <Adopted pattern>`
-   - Legacy `docs/domains/<domain>.md` remains readable for backward compatibility; canonical `docs/<domain>/DOMAIN.md` takes precedence.
-3. **Filetree = Domain by Convention:**
-   - Directory globs in `DOMAIN.md` assign ownership automatically. Files omit `@domain` unless acting as a cross-cutting override.
+1. **`docs/<domain>/DOMAIN.md` (100% Code-Free Abstract Behavioral Law — Reference):**
+   - Header metadata uses ONLY `# Domain: <name>` (`domains` rejected), `- **Owner / DRI:**`, and `- **Concepts:** <closed IDs from CONTEXT.md>`. Omit `- **Paths:**` and `*Enforced by:*`.
+   - Body defines `## Living Invariants` (`- **[INV-<DOM>-<ID>]**`) and `## Adopted Patterns` (`- **[PAT-<DOM>-<ID>]**`), plus optional 5–10 line `mermaid` or `pseudo` / `pseudocode` blocks where flow/precedence benefits.
+   - **`CODE_LEAK_IN_DOMAIN_DOC` (`ERROR`):** Deterministic ontology check forbids file paths, code extensions, `*Enforced by:*`, executable/bare/tilde/unclosed fences, function calls, and backticked code identifiers (`snake_case`, `camelCase`, `PascalCase`, dotted members) inside `DOMAIN.md`.
+   - Legacy `docs/domains/<domain>.md` remains readable for backward compatibility.
+2. **`CONTEXT.md` (Single Code Bridge — Repo Root Reference):**
+   - `## Domain Map` is the canonical SSOT for `Domain -> Path Globs` (`DOMAIN.md` `Paths:` is used only as fallback if `CONTEXT.md` lacks an entry).
+   - `## Closed Concept Glossary` is the sole bridge mapping kebab-case concept IDs to exact code symbols and files.
+3. **Code & Test Files (Bottom-Up Anchors via `invariant_index`):**
+   - Directory globs in `CONTEXT.md` assign domain ownership automatically (files omit `@domain` unless overriding).
+   - Code and test headers point UP via `@intent`, `@concepts`, and `@invariants [INV-*]`; `validate_ontology()` builds `OntologyReport.invariant_index` across tracked code and `tests/**` (without running `LEGACY_TAG` checks on `tests/**`).
 
 ---
 

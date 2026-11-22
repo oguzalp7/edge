@@ -43,6 +43,8 @@ class TestContextSystemContracts(unittest.TestCase):
         self.assertIn("DOMAIN.md", rule_text)
         for tag in ("@intent", "@concepts", "@invariants"):
             self.assertIn(tag, rule_text)
+        self.assertIn("dependency inversion", rule_lower)
+        self.assertIn("CODE_LEAK_IN_DOMAIN_DOC", rule_text)
 
         agents_path = self.repo_root / "rules" / "AGENTS.md"
         self.assertTrue(agents_path.is_file(), f"Missing {agents_path}")
@@ -52,17 +54,25 @@ class TestContextSystemContracts(unittest.TestCase):
         self.assertIn("grill-with-docs", agents_text)
 
     def test_ac01_ac10_self_ontology_docs_and_validation(self):
-        from tools.drift.models import matches_tracked_paths, parse_canonical_domain_doc
+        from tools.drift.models import (
+            matches_tracked_paths,
+            parse_canonical_domain_doc,
+            parse_context_glossary,
+        )
         from tools.drift.scanner import validate_ontology
         from tools.drift.cli import run_drift
 
         context_path = self.repo_root / "CONTEXT.md"
         self.assertTrue(context_path.is_file(), f"Missing {context_path}")
-        context_text = context_path.read_text(encoding="utf-8")
+        context_text = context_path.read_text(encoding="utf-8-sig")
+        self.assertIn("## Domain Map", context_text)
         self.assertIn("## Closed Concept Glossary", context_text)
+        context_globs, context_concepts = parse_context_glossary(context_text)
+        self.assertTrue(context_concepts)
 
-        docs_by_domain = {}
         for domain in CANONICAL_DOMAINS:
+            self.assertIn(domain, context_globs, f"CONTEXT.md missing Domain Map globs for {domain}")
+            self.assertTrue(context_globs[domain], f"Empty globs in CONTEXT.md for {domain}")
             dom_path = self.repo_root / "docs" / domain / "DOMAIN.md"
             self.assertTrue(dom_path.is_file(), f"Missing canonical deed {dom_path}")
             parsed = parse_canonical_domain_doc(
@@ -71,23 +81,25 @@ class TestContextSystemContracts(unittest.TestCase):
                 fallback_domain=domain,
             )
             self.assertEqual(parsed.domain, domain)
-            self.assertTrue(parsed.tracked_paths, f"{dom_path} missing Paths:")
+            self.assertEqual(parsed.tracked_paths, [], f"{dom_path} must NOT declare - **Paths:** in v1.1")
+            self.assertEqual(parsed.enforced_by, [], f"{dom_path} must NOT declare *Enforced by:* in v1.1")
+            self.assertTrue(parsed.owner, f"{dom_path} missing Owner / DRI:")
+            self.assertTrue(parsed.concepts, f"{dom_path} missing Concepts:")
             self.assertGreaterEqual(len(parsed.invariant_ids), 2, f"{dom_path} needs >=2 [INV-*]")
             self.assertGreaterEqual(len(parsed.pattern_ids), 1, f"{dom_path} needs >=1 [PAT-*]")
-            docs_by_domain[domain] = parsed
 
-        # §4 ownership invariants: new skills owned by orchestration; cli/fsm exclusive to brigade
+        # §4 ownership invariants resolved via CONTEXT.md Domain Map SSOT
         self.assertEqual(
             matches_tracked_paths(
                 ["skills/edge-technical-writing/SKILL.md", "skills/edge-gnhf/SKILL.md"],
-                docs_by_domain["orchestration"].tracked_paths,
+                context_globs["orchestration"],
             ),
             ["skills/edge-technical-writing/SKILL.md", "skills/edge-gnhf/SKILL.md"],
         )
         self.assertEqual(
             matches_tracked_paths(
                 ["tools/brigade/cli.py", "tools/brigade/fsm.py"],
-                docs_by_domain["delivery"].tracked_paths,
+                context_globs["delivery"],
             ),
             [],
         )
@@ -95,8 +107,18 @@ class TestContextSystemContracts(unittest.TestCase):
         report = validate_ontology(self.repo_root)
         self.assertFalse(report.skipped, "Repo ontology validation must not be skipped")
         self.assertFalse(report.has_errors, f"Repo ontology validation failed: {report.issues}")
+        self.assertEqual(report.issues, [], f"Expected 0 errors and 0 warnings on repo: {report.issues}")
         self.assertEqual(len(report.domain_docs), 6)
         self.assertGreater(len(report.context_concepts), 0)
+        self.assertTrue(getattr(report, "invariant_index", None), "Repo invariant_index must be non-empty")
+
+        indexed_files = {p for paths in report.invariant_index.values() for p in paths}
+        for anchor_file in (
+            "tools/drift/scanner.py",
+            "tools/brigade/ship_prep.py",
+            "tools/brigade/navigation.py",
+        ):
+            self.assertIn(anchor_file, indexed_files, f"Expected live @invariants anchor in {anchor_file}")
 
         self.assertEqual(run_drift(["check", str(self.repo_root), "--ontology-only"]), 0)
 
@@ -125,6 +147,8 @@ class TestContextSystemContracts(unittest.TestCase):
             "self-verifying" in low or ("verify" in low and "count" in low),
             "Must cover self-verifying counts",
         )
+        self.assertIn("dependency inversion", low)
+        self.assertIn("CODE_LEAK_IN_DOMAIN_DOC", text)
 
     def test_ac03_orchestrator_phase_0_intake(self):
         orch_path = self.repo_root / "skills" / "edge-orchestrator" / "SKILL.md"

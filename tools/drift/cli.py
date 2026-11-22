@@ -20,6 +20,7 @@ from tools.drift.models import (
     DriftStateStore,
     OntologyReport,
     parse_canonical_domain_doc,
+    parse_context_glossary,
     parse_domain_frontmatter,
 )
 from tools.drift.scanner import (
@@ -120,19 +121,34 @@ def _resolve_mark_clean_targets(
     return None
 
 
+def _load_cli_context_globs(norm_repo: Path) -> dict:
+    context_path = norm_repo / "CONTEXT.md"
+    if not context_path.is_file():
+        return {}
+    try:
+        globs, _ = parse_context_glossary(context_path.read_text(encoding="utf-8-sig", errors="replace"))
+        return globs
+    except Exception:
+        return {}
+
+
 def _parse_contract_for_mark_clean(
     norm_repo: Path,
     domain_name: str,
     doc_file: Path,
     is_canonical: bool,
+    context_globs: Optional[dict] = None,
 ) -> tuple:
     content = doc_file.read_text(encoding="utf-8-sig")
     rel_doc_path = doc_file.relative_to(norm_repo).as_posix()
+    globs_map = context_globs if context_globs is not None else {}
     if is_canonical:
         parsed = parse_canonical_domain_doc(content, doc_path=rel_doc_path, fallback_domain=domain_name)
-        return parsed.domain, parsed.tracked_paths, rel_doc_path
+        resolved = globs_map.get(parsed.domain) or parsed.tracked_paths
+        return parsed.domain, resolved, rel_doc_path
     parsed_domain, tracked_paths, _ = parse_domain_frontmatter(content, fallback_domain=domain_name)
-    return parsed_domain, tracked_paths, rel_doc_path
+    resolved = globs_map.get(parsed_domain) or tracked_paths
+    return parsed_domain, resolved, rel_doc_path
 
 
 def _cmd_mark_clean(norm_repo: Path, domain_arg: str) -> int:
@@ -145,11 +161,12 @@ def _cmd_mark_clean(norm_repo: Path, domain_arg: str) -> int:
     if targets is None:
         return 1
 
+    context_globs = _load_cli_context_globs(norm_repo)
     state_store = DriftStateStore.load_from_repo(norm_repo)
     for domain_name, doc_file, is_canonical in targets:
         try:
             parsed_domain, tracked_paths, rel_doc_path = _parse_contract_for_mark_clean(
-                norm_repo, domain_name, doc_file, is_canonical
+                norm_repo, domain_name, doc_file, is_canonical, context_globs
             )
         except Exception as e:
             print(f"❌ Error reading contract '{doc_file}': {e}")

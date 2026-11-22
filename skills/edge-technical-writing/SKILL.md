@@ -20,11 +20,11 @@ Assign every document to **one** quadrant before writing; never mix quadrants in
 
 ---
 
-## 2. Single-Term & Real-Symbol Discipline
+## 2. Dependency Inversion, Single-Term & Real-Symbol Discipline
 
-- **Closed Glossary Lock:** Use only canonical kebab-case concept IDs registered in `CONTEXT.md` (`## Closed Concept Glossary`). Never invent synonyms for existing terms.
-- **Real Symbols Only:** Cite exact file paths, class/function names, and CLI flags observed in the codebase. Never cite planned or remembered symbols.
-- **Zero Grammar Bloat:** Focus on structural clarity, short scannable lines, and verified facts—not English-only prose style rules.
+- **3-Layer Dependency Inversion:** Keep `docs/<domain>/DOMAIN.md` 100% code-free (`Owner / DRI:` + `Concepts:` only, zero paths/extensions/`*Enforced by:*`, optional concise `mermaid` or `pseudo`/`pseudocode` blocks without paths); keep all glob and symbol mapping in `CONTEXT.md`; point code/tests UP via `@intent` / `@concepts` / `@invariants` (indexed into `invariant_index`).
+- **Closed Glossary Lock & Zero Code Leaks:** Use only canonical kebab-case concept IDs from `CONTEXT.md`. Never put executable fences, function calls, or `snake_case`/`camelCase`/`PascalCase`/dotted identifiers inside `DOMAIN.md` (`CODE_LEAK_IN_DOMAIN_DOC`).
+- **Real Symbols Only (in `CONTEXT.md`, PRs & How-Tos):** Cite exact verified paths, symbols, and CLI flags—never planned or guessed names, and zero English-only grammar bloat.
 
 ---
 
@@ -48,5 +48,5 @@ Keep briefings under 8 lines so a human Commander or Reviewer grasps intent, ris
 
 Before finalizing any document or briefing:
 1. Run `rg`, `wc -l`, or `python3 tools/drift/cli.py check . --ontology-only` to verify every file path, line count, and test count cited.
-2. Confirm `DOMAIN.md` `Paths:` match `CONTEXT.md` `## Domain Map` identically (`0` `GLOB_MISMATCH` warnings).
-3. Confirm every `*Enforced by:*` file exists on disk and every `@concepts` / `@invariants` tag resolves cleanly.
+2. Confirm `CONTEXT.md` `## Domain Map` owns domain globs (`0` `GLOB_MISMATCH` warnings) and `DOMAIN.md` triggers `0` `CODE_LEAK_IN_DOMAIN_DOC` errors.
+3. Confirm `@concepts` and `@invariants` header tags in code/tests populate `invariant_index` cleanly without unknown references.

@@ -2,6 +2,9 @@
 Isolated Navigation & Domain Context Resolver for Edge Brigade.
 Slices repository navigation docs (specs/INDEX.md, CONTEXT.md, docs/domains/*.md)
 and git co-change history into a bounded <=15-line context block with [STALE] link checking.
+@intent Slice repository navigation docs, CONTEXT.md Domain Map globs, and co-changes into <=15 lines
+@concepts bounded-navigation, domain-deed
+@invariants [INV-BRIGADE-BOUNDED-NAV]
 """
 
 import re
@@ -25,6 +28,7 @@ try:
     from tools.drift.models import (
         matches_tracked_paths,
         parse_canonical_domain_doc,
+        parse_context_glossary,
         parse_domain_frontmatter,
     )
 except ImportError:  # pragma: no cover - lightweight stdlib fallback
@@ -38,6 +42,9 @@ except ImportError:  # pragma: no cover - lightweight stdlib fallback
 
     def parse_canonical_domain_doc(markdown_text: str, doc_path: str, fallback_domain: str = "") -> object:
         return None
+
+    def parse_context_glossary(markdown_text: str) -> Tuple[Dict[str, List[str]], List[str]]:
+        return {}, []
 
     def matches_tracked_paths(changed_files: List[str], tracked_paths: List[str]) -> List[str]:
         return []
@@ -368,12 +375,24 @@ def _parse_deed_for_nav(
     return parse_domain_frontmatter(text, fallback_domain=deed_file.stem)
 
 
+def _load_nav_context_globs(repo_root: Path) -> Dict[str, List[str]]:
+    context_file = repo_root / "CONTEXT.md"
+    if not context_file.is_file():
+        return {}
+    try:
+        globs, _ = parse_context_glossary(context_file.read_text(encoding="utf-8-sig", errors="replace"))
+        return globs
+    except Exception:
+        return {}
+
+
 def _extract_domain_deed_rows(
     repo_root: Path,
     rel_paths: List[str],
     dom_clean: str,
     limit: int = 3,
 ) -> List[str]:
+    context_globs = _load_nav_context_globs(repo_root)
     collected: List[str] = []
     for deed_file, is_canonical in _iter_nav_domain_deeds(repo_root):
         if len(collected) >= limit:
@@ -383,7 +402,8 @@ def _extract_domain_deed_rows(
         except Exception:
             continue
         deed_domain, tracked_paths, body = _parse_deed_for_nav(deed_file, is_canonical, text, repo_root)
-        if _deed_matches(deed_file, deed_domain, tracked_paths, rel_paths, dom_clean):
+        effective_paths = context_globs.get(deed_domain) or tracked_paths
+        if _deed_matches(deed_file, deed_domain, effective_paths, rel_paths, dom_clean):
             remaining = limit - len(collected)
             collected.extend(_extract_deed_body_lines(body, deed_file.parent, repo_root, remaining))
     return collected[:limit]

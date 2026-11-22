@@ -17,7 +17,7 @@ In fast-moving agentic workflows, specifications tend to scatter and rot:
 1. **İskele (Ephemeral Task/Slice Specs - `.edge/specs/*.md`):**  
    Temporary construction scaffolding written by `SPEC_WRITER` to execute a single vertical slice. Once tests are green and the code is merged, keeping task specs active causes context noise, hallucinations, and confusion. They must be safely moved to `.edge/archive/specs/`.
 2. **Tapu (Canonical Domain Deeds - `docs/<domain>/DOMAIN.md`):**  
-   Permanent, authoritative architectural deeds ("Tapu") tracking high-level domain invariants (`[INV-*]`), adopted patterns (`[PAT-*]`), closed concepts (`CONTEXT.md`), and `Paths:`. Legacy `docs/domains/<domain>.md` remains supported for backward compatibility (`docs/domains/DOMAIN.md` is rejected as a collision).
+   Pure abstract, 100% code-free behavioral deeds ("Tapu") declaring `- **Owner / DRI:**`, `- **Concepts:**`, living invariants (`[INV-*]`), adopted patterns (`[PAT-*]`), and optional `mermaid`/`pseudo` diagrams (guarded by `CODE_LEAK_IN_DOMAIN_DOC`). Domain-to-glob ownership lives canonically in `CONTEXT.md` `## Domain Map` (falling back to `DOMAIN.md` `Paths:` or legacy `docs/domains/<domain>.md` only when absent; `docs/domains/DOMAIN.md` is rejected as a collision).
 
 ```
  [ Vertical Slice Complete ]
@@ -29,9 +29,9 @@ In fast-moving agentic workflows, specifications tend to scatter and rot:
 
 ---
 
-## 📋 Canonical `DOMAIN.md` & Legacy YAML Frontmatter Standard
+## 📋 Canonical `DOMAIN.md`, `CONTEXT.md` Bridge & Legacy YAML Standard
 
-Canonical domain deeds live at `docs/<domain>/DOMAIN.md` and use structured Markdown metadata (`# Domain: <name>`, `- **Paths:**`, `- **Owner / DRI:**`, `- **Concepts:**`, bullet-defined `**[INV-*]**` + `*Enforced by:*`, and `**[PAT-*]**`). Legacy deeds under `docs/domains/<domain>.md` use leading YAML frontmatter defining `domain` and `tracked_paths`:
+Canonical domain deeds live at `docs/<domain>/DOMAIN.md` with pure abstract metadata (`# Domain: <name>`, `- **Owner / DRI:**`, `- **Concepts:**`, bullet-defined `**[INV-*]**` and `**[PAT-*]**`), while `CONTEXT.md` (`## Domain Map` + `## Closed Concept Glossary`) acts as the single code bridge and code/test `@invariants` headers populate `invariant_index`. Legacy deeds under `docs/domains/<domain>.md` remain supported using leading YAML frontmatter defining `domain` and `tracked_paths`:
 
 ### Format 1: Block List Syntax
 ```yaml
