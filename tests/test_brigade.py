@@ -7727,6 +7727,56 @@ class TestBrigadeVerificationTimeout(unittest.TestCase):
             self.assertEqual(recorded_timeouts, [300, 300])
 
 
+
+class TestShipPrepContextTermsV11(unittest.TestCase):
+    def test_read_context_terms_uses_closed_concept_glossary_without_glob_leak_and_keeps_legacy_fallback(self):
+        import tools.brigade.ship_prep as ship_prep
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir)
+            (repo / "CONTEXT.md").write_text(
+                "# Edge Plugin Context\n\n"
+                "## Domain Map\n\n"
+                "| Domain | Paths | Owner |\n"
+                "| :--- | :--- | :--- |\n"
+                "| `drift` | `tools/drift/**`, `skills/edge-drift/**` | @edge-drift |\n"
+                "| `delivery` | `tools/brigade/ship_prep.py`, `skills/edge-ship/**` | @edge-delivery |\n\n"
+                "## Closed Concept Glossary\n\n"
+                "| Concept | Code Symbol / File | Meaning |\n"
+                "| :--- | :--- | :--- |\n"
+                "| `zero-token-drift-gate` | `check_drift`, `validate_ontology` (`tools/drift/scanner.py`) | SHA and diff gate |\n"
+                "| `domain-deed` | `CanonicalDomainDoc` (`tools/drift/models.py`) | Abstract domain law |\n"
+                "| `two-tier-delivery` | `prepare_ship_payload` (`tools/brigade/ship_prep.py`) | Split PR delivery |\n",
+                encoding="utf-8-sig",
+            )
+
+            # Match against symbol or file path in full glossary row; never leak ** globs
+            by_file = ship_prep._read_context_terms(repo, ["tools/drift/scanner.py"])
+            self.assertEqual(by_file, ["zero-token-drift-gate"])
+
+            by_symbol = ship_prep._read_context_terms(repo, ["prepare_ship_payload"])
+            self.assertEqual(by_symbol, ["two-tier-delivery"])
+
+            # Nothing matches -> return [] (do not dump unrelated terms)
+            self.assertEqual(ship_prep._read_context_terms(repo, ["totally_unrelated_token"]), [])
+
+            # Empty glossary section with ## Closed Concept Glossary heading must NOT fall back to **bold** regex
+            (repo / "CONTEXT.md").write_text(
+                "# Context\n\n"
+                "## Domain Map\n"
+                "| `drift` | `tools/drift/**`, `skills/edge-drift/**` |\n\n"
+                "## Closed Concept Glossary\n\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(ship_prep._read_context_terms(repo, ["drift"]), [])
+
+            # Legacy CONTEXT.md without ## Closed Concept Glossary heading preserves **bold** fallback
+            (repo / "CONTEXT.md").write_text(
+                "# Context\n- **Booking**: Customer reservation.\n- **Invoice**: Billing receipt.\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(ship_prep._read_context_terms(repo, ["booking"]), ["Booking"])
+
 if __name__ == "__main__":
     unittest.main()
 

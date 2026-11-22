@@ -1,19 +1,19 @@
 # Domain: drift
 
-- **Paths:** `tools/drift/**`, `skills/edge-drift/**`
 - **Owner / DRI:** @edge-drift
 - **Concepts:** `zero-token-drift-gate`, `domain-deed`, `atomic-state-store`
 
-## Core Invariants
-- **[INV-DRIFT-ZERO-TOKEN]** When git diff shows zero changed files matching a domain's `Paths:`, `check_drift` never invokes `agy` and advances `last_checked_sha` to `HEAD`.
-  *Enforced by:* `tests/test_drift.py`, `tools/drift/scanner.py`
-- **[INV-DRIFT-NO-FAKE-CLEAN]** Empty git `HEAD` SHA returns `ERROR` and never overwrites `DriftStateStore` as `CLEAN`.
-  *Enforced by:* `tests/test_drift.py`, `tools/drift/scanner.py`, `tools/drift/cli.py`
-- **[INV-DRIFT-ARCHIVE-SAFE]** `archive_ephemeral_spec` moves completed slice specs into `.edge/archive/specs/` without overwriting existing archived specs on timestamp collision.
-  *Enforced by:* `tests/test_drift.py`, `tools/drift/scanner.py`
+## Living Invariants
+- **[INV-DRIFT-ZERO-TOKEN]** When changed files are disjoint from a domain's tracked globs in `CONTEXT.md`, drift checks skip model invocation and advance the baseline revision.
+- **[INV-DRIFT-NO-FAKE-CLEAN]** Empty revision identifiers emit `ERROR` and never overwrite drift state as `CLEAN`.
+- **[INV-DRIFT-ARCHIVE-SAFE]** Ephemeral slice specs archive safely without overwriting prior archived entries on name collisions.
 
 ## Adopted Patterns
-- **[PAT-DRIFT-DIFF-GATE]** Deterministic `validate_ontology` and `git diff --name-only` gates run before any read-only `agy` audit, skipping ontology checks cleanly when `CONTEXT.md` and `docs/*/DOMAIN.md` are absent.
-  *Enforced by:* `tests/test_drift.py`, `tests/test_context_system.py`, `tools/drift/scanner.py`
-- **[PAT-DRIFT-TAPU-DEED]** Canonical `docs/<domain>/DOMAIN.md` deeds take precedence over legacy `docs/domains/*.md`, rejecting `docs/domains/DOMAIN.md` as a collision.
-  *Enforced by:* `tests/test_drift.py`, `tools/drift/models.py`
+- **[PAT-DRIFT-DIFF-GATE]** Deterministic ontology validation and revision-diff gating execute before any read-only model audit, skipping cleanly when no ontology exists.
+- **[PAT-DRIFT-TAPU-DEED]** Pure abstract domain deeds defer path ownership and code mapping to `CONTEXT.md`, rejecting code leaks via `CODE_LEAK_IN_DOMAIN_DOC`.
+
+```pseudo
+IF ontology validation has ERROR THEN fail immediately
+IF revision unchanged OR 0 tracked files changed THEN advance baseline -> CLEAN
+ELSE run read-only domain audit -> CLEAN or DRIFT_DETECTED
+```

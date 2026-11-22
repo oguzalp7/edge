@@ -659,5 +659,62 @@ class TestCanonicalDomainAndScopedGlossaryNavigation(unittest.TestCase):
         self.assertNotIn("BILLING_MAP_SENTINEL", out)
         self.assertNotIn("billing-invoice", out)
 
+    def test_canonical_domain_globs_resolved_from_context_md_when_domain_md_omits_paths(self):
+        from tools.brigade.navigation import build_navigation_context
+
+        (self.repo_dir / "src" / "lib" / "bookings").mkdir(parents=True)
+        (self.repo_dir / "src" / "lib" / "bookings" / "handler.ts").write_text(
+            "export const handle = true;\n", encoding="utf-8"
+        )
+        (self.repo_dir / "src" / "lib" / "orders").mkdir(parents=True)
+        (self.repo_dir / "src" / "lib" / "orders" / "order.ts").write_text(
+            "export const order = true;\n", encoding="utf-8"
+        )
+
+        # CONTEXT.md defines bookings globs; orders is absent so falls back to orders/DOMAIN.md Paths:
+        (self.repo_dir / "CONTEXT.md").write_text(
+            "# Project Context\n\n"
+            "## Domain Map\n"
+            "| Domain | Paths | Owner |\n"
+            "| :--- | :--- | :--- |\n"
+            "| `bookings` | `src/lib/bookings/**` | @bookings |\n\n"
+            "## Closed Concept Glossary\n"
+            "- `booking-slot`: Reservation slot (`src/lib/bookings/handler.ts`)\n",
+            encoding="utf-8",
+        )
+        (self.repo_dir / "docs" / "bookings").mkdir(parents=True)
+        (self.repo_dir / "docs" / "bookings" / "DOMAIN.md").write_text(
+            "# Domain: bookings\n\n"
+            "- **Owner / DRI:** @bookings\n"
+            "- **Concepts:** `booking-slot`\n\n"
+            "## Living Invariants\n"
+            "- **[INV-BOOK-CTX]** Hold booking slot across retries.\n",
+            encoding="utf-8",
+        )
+        (self.repo_dir / "docs" / "orders").mkdir(parents=True)
+        (self.repo_dir / "docs" / "orders" / "DOMAIN.md").write_text(
+            "# Domain: orders\n\n"
+            "- **Paths:** `src/lib/orders/**`\n"
+            "- **Owner / DRI:** @orders\n\n"
+            "## Living Invariants\n"
+            "- **[INV-ORD-FALLBACK]** Validate order currency.\n",
+            encoding="utf-8",
+        )
+
+        # Passing domain="" ensures matching relies strictly on CONTEXT.md path globs
+        out_ctx = build_navigation_context(
+            self.repo_dir,
+            target_paths=["src/lib/bookings/handler.ts"],
+            domain="",
+        )
+        self.assertIn("INV-BOOK-CTX", out_ctx)
+
+        out_fallback = build_navigation_context(
+            self.repo_dir,
+            target_paths=["src/lib/orders/order.ts"],
+            domain="",
+        )
+        self.assertIn("INV-ORD-FALLBACK", out_fallback)
+
 if __name__ == "__main__":
     unittest.main()

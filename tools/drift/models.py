@@ -371,7 +371,7 @@ class CanonicalDomainDoc:
 class OntologyIssue:
     """Single ontology validation finding (ERROR or WARNING)."""
     severity: str       # "ERROR" | "WARNING"
-    code: str           # "UNKNOWN_CONCEPT" | "UNKNOWN_INVARIANT" | "LEGACY_TAG" | "MISSING_ENFORCER" | "GLOB_MISMATCH"
+    code: str           # "UNKNOWN_CONCEPT" | "UNKNOWN_INVARIANT" | "LEGACY_TAG" | "GLOB_MISMATCH" | "CODE_LEAK_IN_DOMAIN_DOC"
     file_path: str
     detail: str
 
@@ -383,6 +383,7 @@ class OntologyReport:
     context_concepts: List[str] = field(default_factory=list)
     domain_docs: List[CanonicalDomainDoc] = field(default_factory=list)
     issues: List[OntologyIssue] = field(default_factory=list)
+    invariant_index: Dict[str, List[str]] = field(default_factory=dict)
 
     @property
     def has_errors(self) -> bool:

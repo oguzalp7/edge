@@ -4,6 +4,9 @@ Deterministically discovers changed specs between <base>..HEAD, runs scoped
 ProofVerifier validation, constructs per-spec SpecShipPlan payloads (lean
 2-section PR bodies with ## Summary and ## Evidence), and optionally creates
 isolated ship/<spec-slug> branches via --split-branches.
+@intent Synthesize two-tier ship branches, PR summaries, and door-brake validations
+@concepts two-tier-delivery, refactor-receipt-binding, one-way-door-brake
+@invariants [INV-DELIVERY-DEV-FIRST], [INV-DELIVERY-LEAN-PR]
 """
 
 from dataclasses import dataclass, asdict, field
@@ -636,7 +639,52 @@ def _filter_matching_terms(terms: List[str], search_tokens: List[str]) -> List[s
     return (matched or terms)[:12]
 
 
+def _extract_closed_glossary_entries(lines: List[str]) -> Optional[List[Tuple[str, str]]]:
+    """
+    If ## Closed Concept Glossary heading exists, returns [(concept_id, full_row_text)].
+    Returns None when the heading is absent so callers can fall back to legacy **bold** parsing.
+    """
+    start_idx = next(
+        (i for i, ln in enumerate(lines) if ln.strip().lower() == "## closed concept glossary"),
+        None,
+    )
+    if start_idx is None:
+        return None
+
+    entries: List[Tuple[str, str]] = []
+    for raw in lines[start_idx + 1 :]:
+        s = raw.strip()
+        if s.startswith("## "):
+            break
+        if not s or _TABLE_SEP_RE.match(s):
+            continue
+        if s.startswith(("- ", "* ")):
+            m = re.match(r"^[-*]\s+`?([a-z0-9][a-z0-9_-]*)`?\s*:", s)
+            if m:
+                entries.append((m.group(1), s))
+        elif s.startswith("|"):
+            cells = [c.strip() for c in s.strip("|").split("|")]
+            cid = cells[0].strip("`").strip() if cells else ""
+            if cid and cid.lower() != "concept":
+                entries.append((cid, s))
+    return entries
+
+
 def _read_context_terms(repo: Path, search_tokens: List[str]) -> List[str]:
+    context_file = repo / "CONTEXT.md"
+    if context_file.is_file():
+        lines = context_file.read_text(encoding="utf-8-sig", errors="ignore").splitlines()
+        glossary_entries = _extract_closed_glossary_entries(lines)
+        if glossary_entries is not None:
+            if not search_tokens:
+                return [cid for cid, _ in glossary_entries][:12]
+            lowered_tokens = [tok.lower() for tok in search_tokens]
+            return [
+                cid
+                for cid, row in glossary_entries
+                if any(tok in row.lower() for tok in lowered_tokens)
+            ][:12]
+
     terms: List[str] = []
     for fname in ("CONTEXT.md", "GLOSSARY.md"):
         _collect_bold_terms_from_file(repo / fname, terms)

@@ -868,7 +868,6 @@ class TestOntologyValidation(unittest.TestCase):
 
 ## Core Invariants
 - **[INV-BOOK-ATOMIC]** Hold slot inside transaction.
-  *Enforced by:* `tests/test_bookings.py::test_ok`
 """,
             encoding="utf-8",
         )
@@ -996,7 +995,7 @@ class TestOntologyValidation(unittest.TestCase):
         self.assertTrue(any(i.code == "UNKNOWN_CONCEPT" and i.severity == "ERROR" and "bogus-ts-concept" in i.detail for i in ts_issues))
         self.assertTrue(any(i.code == "LEGACY_TAG" and i.severity == "WARNING" and "@module" in i.detail for i in ts_issues))
 
-    def test_validate_ontology_bom_domain_unknown_concept_missing_enforcer_and_glob_mismatch(self):
+    def test_validate_ontology_bom_domain_unknown_concept_code_leak_and_glob_mismatch(self):
         from tools.drift.scanner import validate_ontology
 
         (self.repo / "CONTEXT.md").write_text(
@@ -1021,7 +1020,7 @@ class TestOntologyValidation(unittest.TestCase):
 - **Owner / DRI:** @team
 - **Concepts:** `known-concept`, `ghost-domain-concept`
 
-## Core Invariants
+## Living Invariants
 - **[INV-BOOK-1]** Rule.
   *Enforced by:* `tests/does_not_exist.py::TestMissing`
 """,
@@ -1033,10 +1032,11 @@ class TestOntologyValidation(unittest.TestCase):
         self.assertTrue(report.has_errors)
         codes = {(i.code, i.severity) for i in report.issues}
         self.assertIn(("GLOB_MISMATCH", "WARNING"), codes)
-        self.assertIn(("MISSING_ENFORCER", "WARNING"), codes)
+        self.assertIn(("CODE_LEAK_IN_DOMAIN_DOC", "ERROR"), codes)
         self.assertIn(("UNKNOWN_CONCEPT", "ERROR"), codes)
+        self.assertNotIn("MISSING_ENFORCER", {i.code for i in report.issues})
 
-        # Warnings alone without unknown concept must not set has_errors
+        # Warning-only GLOB_MISMATCH when DOMAIN.md declares differing Paths: without code leaks
         domain_file.write_text(
             """# Domain: bookings
 
@@ -1044,18 +1044,35 @@ class TestOntologyValidation(unittest.TestCase):
 - **Owner / DRI:** @team
 - **Concepts:** `known-concept`
 
-## Core Invariants
-- **[INV-BOOK-1]** Rule.
-  *Enforced by:* `tests/does_not_exist.py::TestMissing`
+## Living Invariants
+- **[INV-BOOK-1]** Hold slot inside a single reservation window.
 """,
             encoding="utf-8-sig",
         )
         warn_only_report = validate_ontology(self.repo)
         self.assertFalse(warn_only_report.skipped)
         self.assertFalse(warn_only_report.has_errors)
-        warn_codes = {(i.code, i.severity) for i in warn_only_report.issues}
-        self.assertIn(("GLOB_MISMATCH", "WARNING"), warn_codes)
-        self.assertIn(("MISSING_ENFORCER", "WARNING"), warn_codes)
+        self.assertEqual(
+            {(i.code, i.severity) for i in warn_only_report.issues},
+            {("GLOB_MISMATCH", "WARNING")},
+        )
+
+        # Canonical v1.1 DOMAIN.md omits Paths: -> GLOB_MISMATCH must NOT fire
+        domain_file.write_text(
+            """# Domain: bookings
+
+- **Owner / DRI:** @team
+- **Concepts:** `known-concept`
+
+## Living Invariants
+- **[INV-BOOK-1]** Hold slot inside a single reservation window.
+""",
+            encoding="utf-8-sig",
+        )
+        clean_v11_report = validate_ontology(self.repo)
+        self.assertFalse(clean_v11_report.skipped)
+        self.assertFalse(clean_v11_report.has_errors)
+        self.assertEqual(clean_v11_report.issues, [])
 
 
 class TestDriftCliOntologyAndCanonical(unittest.TestCase):
@@ -1085,7 +1102,7 @@ class TestDriftCliOntologyAndCanonical(unittest.TestCase):
         )
         (self.repo / "docs" / "bookings").mkdir(parents=True, exist_ok=True)
         (self.repo / "docs" / "bookings" / "DOMAIN.md").write_text(
-            "# Domain: bookings\n- **Paths:** `src/bookings/**`\n- **Concepts:** `known-concept`\n",
+            "# Domain: bookings\n- **Owner / DRI:** @team\n- **Concepts:** `known-concept`\n",
             encoding="utf-8",
         )
         (self.repo / "src" / "bookings").mkdir(parents=True, exist_ok=True)
@@ -1183,6 +1200,323 @@ class TestDriftCliOntologyAndCanonical(unittest.TestCase):
         self.assertEqual(run_drift(["check", str(self.repo), "--mark-clean", "all"]), 1)
         store = DriftStateStore.load_from_repo(self.repo)
         self.assertEqual(store.get_record("bookings").last_checked_sha, "sha_head_all")
+
+
+class TestDependencyInversionV11(unittest.TestCase):
+    """RED contracts for Context System v1.1: CONTEXT.md Domain Map SSOT, CODE_LEAK_IN_DOMAIN_DOC, and invariant_index."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.repo = Path(self.temp_dir.name)
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    @patch("tools.drift.cli.get_head_sha")
+    @patch("tools.drift.scanner.run_command")
+    def test_context_domain_map_resolves_globs_in_check_drift_and_cli_mark_clean_without_domain_paths(
+        self, mock_run_command, mock_cli_head_sha
+    ):
+        (self.repo / "CONTEXT.md").write_text(
+            """# Context
+
+## Domain Map
+| Domain | Paths | Owner |
+| :--- | :--- | :--- |
+| `bookings` | `src/bookings/**` | @bookings |
+| `override` | `src/new_override/**` | @override |
+
+## Closed Concept Glossary
+- `known-concept`: Known concept (`src/bookings/svc.py`)
+""",
+            encoding="utf-8",
+        )
+        # Canonical DOMAIN.md with ZERO - **Paths:** lines
+        (self.repo / "docs" / "bookings").mkdir(parents=True, exist_ok=True)
+        (self.repo / "docs" / "bookings" / "DOMAIN.md").write_text(
+            """# Domain: bookings
+
+- **Owner / DRI:** @bookings
+- **Concepts:** `known-concept`
+
+## Living Invariants
+- **[INV-BOOK-1]** Hold slot inside reservation boundary.
+""",
+            encoding="utf-8",
+        )
+        # Canonical DOMAIN.md where CONTEXT.md must override stale DOMAIN.md Paths:
+        (self.repo / "docs" / "override").mkdir(parents=True, exist_ok=True)
+        (self.repo / "docs" / "override" / "DOMAIN.md").write_text(
+            """# Domain: override
+
+- **Paths:** `src/old_override/**`
+- **Owner / DRI:** @override
+- **Concepts:** `known-concept`
+""",
+            encoding="utf-8",
+        )
+        # Fallback domain absent from CONTEXT.md Domain Map -> uses DOMAIN.md Paths:
+        (self.repo / "docs" / "legacy").mkdir(parents=True, exist_ok=True)
+        (self.repo / "docs" / "legacy" / "DOMAIN.md").write_text(
+            """# Domain: legacy
+
+- **Paths:** `src/legacy/**`
+- **Owner / DRI:** @legacy
+- **Concepts:** `known-concept`
+""",
+            encoding="utf-8",
+        )
+
+        # 1. cli.py --mark-clean resolves CONTEXT.md globs first, then falls back to DOMAIN.md Paths:
+        mock_cli_head_sha.return_value = "sha_v11_1"
+        self.assertEqual(run_drift(["check", str(self.repo), "--mark-clean", "bookings"]), 0)
+        self.assertEqual(run_drift(["check", str(self.repo), "--mark-clean", "all"]), 0)
+        store = DriftStateStore.load_from_repo(self.repo)
+        self.assertEqual(store.get_record("bookings").tracked_paths, ["src/bookings/**"])
+        self.assertEqual(store.get_record("override").tracked_paths, ["src/new_override/**"])
+        self.assertEqual(store.get_record("legacy").tracked_paths, ["src/legacy/**"])
+
+        # 2. check_drift() uses CONTEXT.md globs: change in src/old_override/other.py is disjoint for override
+        agy_domains = []
+
+        def mock_cmd(cmd, cwd=None, timeout=None):
+            if cmd == ["git", "rev-parse", "HEAD"]:
+                return (0, "sha_v11_2", "")
+            if cmd == ["git", "diff", "--name-only", "sha_v11_1..HEAD"]:
+                return (0, "src/bookings/svc.py\nsrc/old_override/ignored.py", "")
+            if isinstance(cmd, list) and cmd[0] == "agy":
+                prompt = cmd[-1]
+                for dom in ("bookings", "override", "legacy"):
+                    if f"'{dom}'" in prompt:
+                        agy_domains.append(dom)
+                return (0, "NO_DRIFT", "")
+            return (1, "", "Unknown")
+
+        mock_run_command.side_effect = mock_cmd
+        results = check_drift(self.repo)
+        by_dom = {r.domain: r for r in results}
+        self.assertEqual(by_dom["bookings"].status, "CLEAN")
+        self.assertTrue(by_dom["bookings"].llm_invoked)
+        self.assertEqual(by_dom["override"].status, "CLEAN")
+        self.assertFalse(by_dom["override"].llm_invoked)
+        self.assertEqual(by_dom["legacy"].status, "CLEAN")
+        self.assertFalse(by_dom["legacy"].llm_invoked)
+        self.assertEqual(agy_domains, ["bookings"])
+
+    def test_validate_ontology_scopes_code_walk_via_context_domain_map_without_domain_paths(self):
+        from tools.drift.scanner import validate_ontology
+
+        (self.repo / "CONTEXT.md").write_text(
+            """# Context
+
+## Domain Map
+| Domain | Paths |
+| :--- | :--- |
+| `bookings` | `src/bookings/**` |
+
+## Closed Concept Glossary
+- `valid-concept`: Valid concept
+""",
+            encoding="utf-8",
+        )
+        (self.repo / "docs" / "bookings").mkdir(parents=True, exist_ok=True)
+        (self.repo / "docs" / "bookings" / "DOMAIN.md").write_text(
+            """# Domain: bookings
+
+- **Owner / DRI:** @team
+- **Concepts:** `valid-concept`
+
+## Living Invariants
+- **[INV-BOOK-1]** Reservations cannot overlap.
+""",
+            encoding="utf-8",
+        )
+        (self.repo / "src" / "bookings").mkdir(parents=True, exist_ok=True)
+        (self.repo / "src" / "bookings" / "bad.py").write_text(
+            '"""\n@concepts bogus-concept\n"""\n',
+            encoding="utf-8",
+        )
+        # Untracked path outside CONTEXT.md Domain Map must NOT be walked as if tracked_globs=[]
+        (self.repo / "src" / "untracked").mkdir(parents=True, exist_ok=True)
+        (self.repo / "src" / "untracked" / "other.py").write_text(
+            '"""\n@inputs legacy_untracked\n@concepts bogus-untracked\n"""\n',
+            encoding="utf-8",
+        )
+
+        report = validate_ontology(self.repo)
+        self.assertFalse(report.skipped)
+        self.assertTrue(report.has_errors)
+        issue_files = {i.file_path.replace("\\", "/") for i in report.issues}
+        self.assertIn("src/bookings/bad.py", issue_files)
+        self.assertNotIn("src/untracked/other.py", issue_files)
+        self.assertNotIn("GLOB_MISMATCH", {i.code for i in report.issues})
+
+    def test_code_leak_in_domain_doc_flags_leaks_and_allows_abstract_mermaid_and_concepts(self):
+        from tools.drift.scanner import validate_ontology
+
+        (self.repo / "CONTEXT.md").write_text(
+            """# Context
+
+## Domain Map
+| Domain | Paths |
+| :--- | :--- |
+| `drift` | `src/drift/**` |
+
+## Closed Concept Glossary
+- `zero-token-drift-gate`: Deterministic diff gate
+""",
+            encoding="utf-8",
+        )
+        drift_dir = self.repo / "docs" / "drift"
+        drift_dir.mkdir(parents=True, exist_ok=True)
+        domain_file = drift_dir / "DOMAIN.md"
+
+        # 1. Clean abstract DOMAIN.md with Mermaid, pseudo, pseudocode, prose traps, concepts, UPPER tokens, and constraints
+        domain_file.write_text(
+            """# Domain: drift
+
+- **Owner / DRI:** @edge-drift
+- **Concepts:** `zero-token-drift-gate`
+
+## Living Invariants
+- **[INV-DRIFT-ZERO-TOKEN]** Enforce invariant(s) and pattern(s) from `CONTEXT.md` (`v1.1`, e.g. business rules/policies and read/write isolation).
+- **[INV-DRIFT-NO-FAKE-CLEAN]** Reject empty revisions; keep `CODER`, `RED_TEST`, and `PASS` deterministic with `CC <= 10`, `<= 60`, `Treehouse`, `--ontology-only`, and `/edge-drift`.
+
+## Flow
+
+```mermaid
+flowchart LR
+  RED_TEST --> SURGERY --> PASS
+```
+
+```pseudo
+IF tracked files unchanged THEN return CLEAN
+ELSE audit domain contract
+```
+
+```PSEUDOCODE
+FOR EACH domain IN scope:
+  CHECK invariant state
+```
+""",
+            encoding="utf-8",
+        )
+        clean_report = validate_ontology(self.repo)
+        self.assertFalse(clean_report.skipped)
+        self.assertFalse(clean_report.has_errors, f"Unexpected leaks in clean doc: {clean_report.issues}")
+        self.assertEqual(clean_report.issues, [])
+
+        # 2. Every CODE_LEAK_IN_DOMAIN_DOC pattern must emit ERROR
+        leak_cases = [
+            ("python_fence", "```python\nx = 1\n```"),
+            ("ts_fence", "```ts\nconst x = 1;\n```"),
+            ("bare_fence", "```\nraw block\n```"),
+            ("tilde_fence", "~~~\ntilde block\n~~~"),
+            ("unclosed_fence", "```mermaid\ngraph TD\nA --> B"),
+            ("py_ext_in_prose", "Do not inspect scanner.py directly."),
+            ("json_ext_in_prose", "Config lives in hooks.json."),
+            ("dot_edge_json", "Never write `.edge/brigade.json` directly."),
+            ("path_in_mermaid", "```mermaid\nflowchart LR\n  A[tools/drift/scanner.py] --> B[DONE]\n```"),
+            ("docs_dir_path", "Look under docs/ for details."),
+            ("enforced_by_line", "  *Enforced by:* `tests/test_drift.py`"),
+            ("enforced_by_bold", "**Enforced by:** domain rules"),
+            ("func_call_backtick", "Runs `validate_ontology()` on changes."),
+            ("snake_case_backtick", "Stores `last_checked_sha` atomically."),
+            ("camel_case_backtick", "Calls `checkDrift` before merge."),
+            ("pascal_case_backtick", "Uses `DriftStateStore` persistence."),
+            ("dotted_member_backtick", "Uses `os.replace` for atomic writes."),
+        ]
+
+        header = (
+            "# Domain: drift\n\n"
+            "- **Owner / DRI:** @edge-drift\n"
+            "- **Concepts:** `zero-token-drift-gate`\n\n"
+            "## Living Invariants\n"
+            "- **[INV-DRIFT-ZERO-TOKEN]** Base rule.\n\n"
+        )
+        for case_name, body_snippet in leak_cases:
+            with self.subTest(case=case_name):
+                domain_file.write_text(header + body_snippet + "\n", encoding="utf-8")
+                rep = validate_ontology(self.repo)
+                leak_errors = [
+                    i
+                    for i in rep.issues
+                    if i.code == "CODE_LEAK_IN_DOMAIN_DOC" and i.severity == "ERROR"
+                ]
+                self.assertTrue(
+                    leak_errors,
+                    f"Expected CODE_LEAK_IN_DOMAIN_DOC ERROR for case '{case_name}', got: {rep.issues}",
+                )
+
+    def test_invariant_index_reverse_indexes_code_and_tests_without_legacy_tag_checks_on_tests(self):
+        from tools.drift.scanner import validate_ontology
+
+        (self.repo / "CONTEXT.md").write_text(
+            """# Context
+
+## Domain Map
+| Domain | Paths |
+| :--- | :--- |
+| `bookings` | `src/bookings/**` |
+
+## Closed Concept Glossary
+- `booking-slot`: Reservation slot
+""",
+            encoding="utf-8",
+        )
+        (self.repo / "docs" / "bookings").mkdir(parents=True, exist_ok=True)
+        (self.repo / "docs" / "bookings" / "DOMAIN.md").write_text(
+            """# Domain: bookings
+
+- **Owner / DRI:** @bookings
+- **Concepts:** `booking-slot`
+
+## Living Invariants
+- **[INV-BOOK-ATOMIC]** Hold slot inside single transaction.
+- **[INV-BOOK-CANCEL]** Record cancellation audit reason.
+""",
+            encoding="utf-8",
+        )
+        (self.repo / "src" / "bookings").mkdir(parents=True, exist_ok=True)
+        (self.repo / "src" / "bookings" / "service.py").write_text(
+            '"""\n@intent Booking service\n@concepts booking-slot\n@invariants [INV-BOOK-ATOMIC]\n"""\n',
+            encoding="utf-8",
+        )
+        (self.repo / "tests").mkdir(parents=True, exist_ok=True)
+        (self.repo / "tests" / "test_bookings_contract.py").write_text(
+            '"""\n@inputs ignored_legacy_in_tests\n@invariants [INV-BOOK-ATOMIC], [INV-BOOK-CANCEL]\n"""\n',
+            encoding="utf-8",
+        )
+        (self.repo / "tests" / "test_bad_inv.py").write_text(
+            '"""\n@invariants [INV-UNKNOWN-99]\n"""\n',
+            encoding="utf-8",
+        )
+
+        report = validate_ontology(self.repo)
+        self.assertFalse(report.skipped)
+        self.assertTrue(hasattr(report, "invariant_index"), "OntologyReport must expose invariant_index")
+        self.assertEqual(
+            report.invariant_index.get("INV-BOOK-ATOMIC"),
+            ["src/bookings/service.py", "tests/test_bookings_contract.py"],
+        )
+        self.assertEqual(
+            report.invariant_index.get("INV-BOOK-CANCEL"),
+            ["tests/test_bookings_contract.py"],
+        )
+
+        # @inputs inside tests/ must NOT trigger LEGACY_TAG; unknown @invariants in tests/ MUST trigger UNKNOWN_INVARIANT
+        contract_issues = [
+            i for i in report.issues if i.file_path.replace("\\", "/") == "tests/test_bookings_contract.py"
+        ]
+        self.assertEqual(contract_issues, [], f"Unexpected issues on test file with @inputs: {contract_issues}")
+
+        bad_test_issues = [
+            i for i in report.issues if i.file_path.replace("\\", "/") == "tests/test_bad_inv.py"
+        ]
+        self.assertTrue(
+            any(i.code == "UNKNOWN_INVARIANT" and i.severity == "ERROR" and "INV-UNKNOWN-99" in i.detail for i in bad_test_issues),
+            f"Expected UNKNOWN_INVARIANT ERROR on tests/test_bad_inv.py, got: {bad_test_issues}",
+        )
 
 if __name__ == "__main__":
     unittest.main()
