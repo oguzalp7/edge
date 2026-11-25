@@ -335,8 +335,11 @@ def cmd_prepare_ship(args: argparse.Namespace) -> int:
     require_smoke = bool(getattr(args, "require_smoke", False))
     allow_override = bool(getattr(args, "allow_topology_override", False))
     stage_branches = _parse_param_pairs(getattr(args, "stage_branch", None)) or None
+    issue_nums = getattr(args, "issue", None)
+    parent_issue = getattr(args, "parent_issue", None)
+    offline = bool(getattr(args, "offline", False))
 
-    ok, result, err = prepare_ship_payload(
+    prep_kwargs: Dict[str, Any] = dict(
         repo_path=repo_path,
         base_branch=base_branch,
         strict_proofs=strict_proofs,
@@ -348,6 +351,13 @@ def cmd_prepare_ship(args: argparse.Namespace) -> int:
         allow_topology_override=allow_override,
         stage_branches=stage_branches,
     )
+    if issue_nums is not None:
+        prep_kwargs["issue_numbers"] = issue_nums
+    if parent_issue is not None:
+        prep_kwargs["parent_issue"] = parent_issue
+    if offline:
+        prep_kwargs["offline"] = True
+    ok, result, err = prepare_ship_payload(**prep_kwargs)
     rendered = format_ship_output(result, fmt=fmt)
 
     if not ok:
@@ -1461,6 +1471,9 @@ def main() -> int:
     p_ship.add_argument("--require-smoke", action="store_true", help="Require passing .edge/qa/smoke-routes.json when targeting staging")
     p_ship.add_argument("--allow-topology-override", action="store_true", help="Allow manual bypass of stage branch topology guard")
     p_ship.add_argument("--stage-branch", action="append", default=[], help="Override stage branch mapping (e.g. integration=main, staging=qa-stage)")
+    p_ship.add_argument("--issue", type=int, action="append", default=None, help="Tracker issue number(s) to include and link")
+    p_ship.add_argument("--parent-issue", type=int, default=None, help="Parent Frontier/Spec issue number")
+    p_ship.add_argument("--offline", action="store_true", help="Use local tracker backend")
 
     # smoke-routes
     p_smoke = subparsers.add_parser("smoke-routes", help="Discover and headless-smoke-scan all project routes")

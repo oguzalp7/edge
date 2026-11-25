@@ -698,16 +698,39 @@ def _is_critique_spec(path_str: str) -> bool:
     return "critique" in Path(low).name
 
 
+def _spec_slug_from_rel(spec_rel: str) -> str:
+    norm = _norm_rel_path(spec_rel)
+    stem = Path(norm).stem
+    if norm.startswith(".edge/cache/issues/") and stem.isdigit():
+        return f"issue-{stem}"
+    return _clean_slug(stem)
+
+
+def _resolve_spec_file_path(repo: Path, spec_rel: str) -> Path:
+    direct = repo / spec_rel
+    if direct.is_file():
+        return direct
+    if _norm_rel_path(spec_rel).startswith(".edge/cache/issues/"):
+        primary_cand = resolve_target_repo_root(repo) / spec_rel
+        if primary_cand.is_file():
+            return primary_cand
+    return direct
+
+
 def _is_valid_spec_candidate(path_str: str) -> bool:
     norm = _norm_rel_path(path_str)
     low = norm.lower()
     if not low.endswith(".md") or _is_critique_spec(low) or low.endswith("index.md"):
         return False
-    return norm.startswith((".edge/specs/", ".edge/archive/specs/", "specs/"))
+    return norm.startswith((".edge/specs/", ".edge/archive/specs/", ".edge/cache/issues/", "specs/"))
 
 
 def _resolve_spec_on_disk(repo: Path, raw_path: str) -> Optional[str]:
     norm = _norm_rel_path(raw_path)
+    if norm.startswith(".edge/cache/issues/"):
+        if (repo / norm).is_file() or (resolve_target_repo_root(repo) / norm).is_file():
+            return norm
+        return None
     name = Path(norm).name
     arch = repo / ".edge" / "archive" / "specs" / name
     if arch.is_file():
@@ -878,8 +901,8 @@ def _resolve_explicit_spec_ticket(
     proof_tickets: Dict[str, str],
     history_receipts: Dict[str, Dict[str, Any]],
 ) -> Optional[str]:
-    spec_file = repo / spec_rel
-    spec_slug = _clean_slug(spec_file.stem)
+    spec_file = _resolve_spec_file_path(repo, spec_rel)
+    spec_slug = _spec_slug_from_rel(spec_rel)
     if spec_slug in proof_tickets:
         return proof_tickets[spec_slug]
     for tid, rec in history_receipts.items():
@@ -916,7 +939,7 @@ def _resolve_spec_ticket_ids(
         commit_tickets = _commit_ticket_file_index(repo, eff_base)
         bound_tids = set(resolved.values())
         for spec_rel in unresolved:
-            tid = _match_commit_ticket_for_spec(repo / spec_rel, commit_tickets, bound_tids, repo)
+            tid = _match_commit_ticket_for_spec(_resolve_spec_file_path(repo, spec_rel), commit_tickets, bound_tids, repo)
             if tid:
                 resolved[spec_rel] = tid
     return resolved
@@ -1044,7 +1067,7 @@ def _deduplicate_spec_candidates(repo: Path, candidates: List[str]) -> List[str]
         resolved = _resolve_spec_on_disk(repo, raw)
         if not resolved:
             continue
-        slug = _clean_slug(Path(resolved).stem)
+        slug = _spec_slug_from_rel(resolved)
         if slug not in by_slug or resolved.startswith(".edge/archive/specs/"):
             by_slug[slug] = resolved
     return list(by_slug.values())
@@ -2293,6 +2316,7 @@ def _format_markdown_sections(
     refactor_receipts: Optional[List[Dict[str, Any]]] = None,
     door_type: str = "",
     blast_radius: Optional[Dict[str, Any]] = None,
+    pr_issue_links: str = "",
 ) -> str:
     """Renders lean 2-section PR body (## Summary + ## Evidence only; no ## Merge Danger)."""
     lines = _format_summary_section(
@@ -2320,6 +2344,8 @@ def _format_markdown_sections(
             refactor_receipts=refactor_receipts,
         )
     )
+    if pr_issue_links:
+        lines.extend(["", pr_issue_links])
     return "\n".join(lines)
 
 
@@ -2428,6 +2454,7 @@ def _render_plan_bodies(
     gate_status: str,
     door_type: str = "",
     blast_radius: Optional[Dict[str, Any]] = None,
+    pr_issue_links: str = "",
 ) -> None:
     if plan.realization_audit is None:
         plan.realization_audit = compute_realization_audit(plan, plan.spec_digest, plan_receipt)
@@ -2439,6 +2466,7 @@ def _render_plan_bodies(
         context_terms, [plan.spec_path], plan.verified_proofs, plan.failed_proofs,
         plan_receipt, gate_status, digests, audit=plan.realization_audit,
         refactor_receipts=ref_list, door_type=door_type, blast_radius=blast_radius,
+        pr_issue_links=pr_issue_links,
     )
     ship_cmd = (
         f"git push -u origin {shlex.quote(plan.pr_branch)}\n"
@@ -2461,8 +2489,8 @@ def _build_single_spec_plan(
     gate_status: str,
     ticket_id: Optional[str] = None,
 ) -> SpecShipPlan:
-    spec_file = repo / spec_rel
-    spec_slug = _clean_slug(spec_file.stem)
+    spec_file = _resolve_spec_file_path(repo, spec_rel)
+    spec_slug = _spec_slug_from_rel(spec_rel)
     digest = parse_spec_document(spec_file, rel_path=spec_rel)
     expected = _extract_spec_expected_files(spec_file)
     matched = _match_expected_files(_expand_expected_globs(expected, changed_files), changed_files)
@@ -3086,6 +3114,7 @@ def _render_top_level_bodies(
     security_report: Optional[Dict[str, Any]] = None,
     door_type: str = "",
     blast_radius: Optional[Dict[str, Any]] = None,
+    pr_issue_links: str = "",
 ) -> Tuple[str, str]:
     if sel_slug and len(selected_plans) == 1:
         return selected_plans[0].pr_body, selected_plans[0].show_me_body
@@ -3109,6 +3138,7 @@ def _render_top_level_bodies(
         refactor_receipts=refactor_receipts,
         door_type=door_type,
         blast_radius=blast_radius,
+        pr_issue_links=pr_issue_links,
     )
     ship_cmd = f"gh pr create --base {shlex.quote(base_branch)} --head {shlex.quote(head_branch)}"
     return pr_body, f"{pr_body}\n\n## Ship Command\n```bash\n{ship_cmd}\n```"
@@ -3244,7 +3274,7 @@ def _build_all_spec_plans(
     total = len(specs_linked)
     for spec_rel in specs_linked:
         tid = ticket_map.get(spec_rel)
-        slug = _clean_slug(Path(spec_rel).stem)
+        slug = _spec_slug_from_rel(spec_rel)
         p_rec = _resolve_plan_receipt(tid, slug, spec_rel, examiner_receipt, receipts_by_ticket, total)
         plan_receipts[slug] = p_rec
         plans.append(
@@ -3262,18 +3292,28 @@ def _discover_specs_and_tickets(
     changed_files: List[str],
     index_changes: List[IndexChange],
     receipts_by_ticket: Dict[str, Dict[str, Any]],
+    issue_numbers: Optional[List[int]] = None,
+    parent_issue: Optional[int] = None,
+    offline: bool = False,
 ) -> Tuple[List[str], Dict[str, str], Dict[str, Optional[str]]]:
+    from .ship_tracker import discover_tracker_spec_candidates
+
     disk_specs = _list_disk_spec_candidates(repo)
     ticket_map = _resolve_spec_ticket_ids(repo, eff_base, disk_specs, receipts_by_ticket)
     specs_linked = discover_changed_specs(
         repo, eff_base, changed_files, index_changes, ticket_map=ticket_map, history_receipts=receipts_by_ticket
     )
+    tracker_cands = discover_tracker_spec_candidates(
+        repo, issue_numbers=issue_numbers, parent_issue=parent_issue, offline=offline
+    )
+    if tracker_cands:
+        specs_linked = _deduplicate_spec_candidates(repo, [*specs_linked, *tracker_cands])
     extra_specs = [s for s in specs_linked if s not in ticket_map]
     if extra_specs:
         ticket_map.update(_resolve_spec_ticket_ids(repo, eff_base, extra_specs, receipts_by_ticket))
     ticket_by_slug: Dict[str, Optional[str]] = {}
     for spec_rel in specs_linked:
-        ticket_by_slug[_clean_slug(Path(spec_rel).stem)] = ticket_map.get(spec_rel)
+        ticket_by_slug[_spec_slug_from_rel(spec_rel)] = ticket_map.get(spec_rel)
     return specs_linked, ticket_map, ticket_by_slug
 
 
@@ -3412,13 +3452,14 @@ def _assemble_ship_result(
     gate_status: str,
     smoke_report: Optional[Dict[str, Any]] = None,
     security_report: Optional[Dict[str, Any]] = None,
+    pr_issue_links: str = "",
 ) -> ShipPrepResult:
     spec_digests = [p.spec_digest for p in selected_plans if p.spec_digest]
     pr_body, show_me_body = _render_top_level_bodies(
         sel_slug, selected_plans, head_branch, base_branch, changed_files,
         index_changes, context_terms, specs_linked, verified_proofs, failed_proofs,
         examiner_receipt, gate_status, spec_digests, smoke_report=smoke_report, security_report=security_report,
-        door_type=door_type, blast_radius=blast_radius,
+        door_type=door_type, blast_radius=blast_radius, pr_issue_links=pr_issue_links,
     )
     return ShipPrepResult(
         base_branch=base_branch,
@@ -3450,6 +3491,39 @@ def _compute_search_tokens(blast_radius: Dict[str, Any], index_changes: List[Ind
     return list(dict.fromkeys(tokens))
 
 
+def _render_selected_plans(
+    repo: Path,
+    selected_plans: List[SpecShipPlan],
+    base_branch: str,
+    context_terms: List[str],
+    plan_receipts: Dict[str, Optional[Dict[str, Any]]],
+    gate_status: str,
+    door_type: str,
+    blast_radius: Dict[str, Any],
+    issue_numbers: Optional[List[int]],
+    parent_issue: Optional[int],
+) -> str:
+    from .ship_tracker import format_pr_issue_links, resolve_pr_issue_refs
+
+    for plan in selected_plans:
+        refs, p_issue = resolve_pr_issue_refs(
+            repo, issue_numbers=issue_numbers, parent_issue=parent_issue, spec_rel=plan.spec_path
+        )
+        plan_links = format_pr_issue_links(refs, p_issue)
+        if plan.kind == "refactor":
+            rec_ex = (plan.refactor_receipt or {}).get("seal_4_examiner") or None
+            _render_plan_bodies(
+                plan, base_branch, context_terms, rec_ex, gate_status,
+                door_type=door_type, blast_radius=blast_radius, pr_issue_links=plan_links,
+            )
+        else:
+            p_rec = plan_receipts.get(plan.spec_slug)
+            plan.realization_audit = compute_realization_audit(plan, plan.spec_digest, p_rec)
+            _render_plan_bodies(plan, base_branch, context_terms, p_rec, gate_status, pr_issue_links=plan_links)
+    top_refs, top_parent = resolve_pr_issue_refs(repo, issue_numbers=issue_numbers, parent_issue=parent_issue)
+    return format_pr_issue_links(top_refs, top_parent)
+
+
 def prepare_ship_payload(
     repo_path: Path,
     base_branch: str = "development",
@@ -3461,6 +3535,9 @@ def prepare_ship_payload(
     require_smoke: bool = False,
     allow_topology_override: bool = False,
     stage_branches: Optional[Dict[str, str]] = None,
+    issue_numbers: Optional[List[int]] = None,
+    parent_issue: Optional[int] = None,
+    offline: bool = False,
 ) -> Tuple[bool, ShipPrepResult, str]:
     """Collects per-spec and refactor ship plans, scoped ProofVerifier results, optional evidence publishing, and PR bodies."""
     repo = normalize_target_path(repo_path)
@@ -3507,7 +3584,8 @@ def prepare_ship_payload(
 
     context_terms = _read_context_terms(repo, _compute_search_tokens(blast_radius, index_changes))
     specs_linked, ticket_map, ticket_by_slug = _discover_specs_and_tickets(
-        repo, eff_base, changed_files, index_changes, receipts_by_ticket
+        repo, eff_base, changed_files, index_changes, receipts_by_ticket,
+        issue_numbers=issue_numbers, parent_issue=parent_issue, offline=offline,
     )
 
     selected_slug = _clean_slug(spec_slug) if spec_slug else None
@@ -3546,17 +3624,10 @@ def prepare_ship_payload(
         res_pub_err.verified_proofs = verified_proofs
         return False, res_pub_err, pub_err
 
-    for plan in selected_plans:
-        if plan.kind == "refactor":
-            rec_ex = (plan.refactor_receipt or {}).get("seal_4_examiner") or None
-            _render_plan_bodies(
-                plan, base_branch, context_terms, rec_ex, gate_status,
-                door_type=door_type, blast_radius=blast_radius,
-            )
-        else:
-            p_rec = plan_receipts.get(plan.spec_slug)
-            plan.realization_audit = compute_realization_audit(plan, plan.spec_digest, p_rec)
-            _render_plan_bodies(plan, base_branch, context_terms, p_rec, gate_status)
+    top_links = _render_selected_plans(
+        repo, selected_plans, base_branch, context_terms, plan_receipts, gate_status,
+        door_type, blast_radius, issue_numbers, parent_issue,
+    )
 
     smoke_report, sec_report, gate_err = _run_tier2_gates(
         repo, base_branch, eff_base, changed_files, require_smoke, eff_stages
@@ -3565,6 +3636,7 @@ def prepare_ship_payload(
         base_branch, head_branch, door_type, blast_radius, index_changes, context_terms,
         specs_linked, verified_proofs, failed_proofs, examiner_receipt, changed_files,
         selected_plans, sel_slug, gate_status, smoke_report=smoke_report, security_report=sec_report,
+        pr_issue_links=top_links,
     )
     return _validate_ship_result(
         result,

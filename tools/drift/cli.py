@@ -77,6 +77,8 @@ def _build_drift_parser() -> argparse.ArgumentParser:
     p_consolidate.add_argument("--domain", required=True, help="Canonical domain name")
     p_consolidate.add_argument("--paths", required=True, help="Comma-separated tracked paths or globs")
     p_consolidate.add_argument("--sources", help="Comma-separated paths to ephemeral source specifications")
+    p_consolidate.add_argument("--issue", type=int, action="append", default=None, help="Tracker issue number(s) to include as source specs")
+    p_consolidate.add_argument("--offline", action="store_true", help="Use local tracker backend")
     p_consolidate.add_argument("--archive-sources", action="store_true", help="Archive source specs after consolidation")
     p_consolidate.add_argument("--model", default=DRIFT_MODEL, help=f"Model to use (default: {DRIFT_MODEL})")
     return parser
@@ -235,15 +237,20 @@ def _cmd_check(args: argparse.Namespace) -> int:
 def _cmd_consolidate(args: argparse.Namespace) -> int:
     norm_repo = normalize_target_path(args.repo)
     tracked_paths = [p.strip() for p in args.paths.split(",") if p.strip()]
-    source_paths: Optional[List[Path]] = None
+    from tools.drift.tracker_specs import resolve_issue_source_specs
+
+    source_paths: List[Path] = []
     if args.sources:
-        source_paths = [Path(s.strip()) for s in args.sources.split(",") if s.strip()]
+        source_paths.extend(Path(s.strip()) for s in args.sources.split(",") if s.strip())
+    issue_nums = getattr(args, "issue", None)
+    if issue_nums:
+        source_paths.extend(resolve_issue_source_specs(norm_repo, issue_nums, offline=bool(getattr(args, "offline", False))))
 
     success, _, msg = consolidate_domain(
         repo_path=norm_repo,
         domain=args.domain,
         tracked_paths=tracked_paths,
-        source_specs=source_paths,
+        source_specs=source_paths or None,
         archive_sources=args.archive_sources,
         model=args.model,
     )
@@ -256,13 +263,19 @@ def _cmd_consolidate(args: argparse.Namespace) -> int:
 
 def run_drift(argv: Optional[List[str]] = None) -> int:
     """Runs drift CLI commands."""
+    from tools.tracker.models import TrackerAuthError
+
     args = _build_drift_parser().parse_args(argv)
-    if args.subcommand == "discover":
-        return _cmd_discover(args.repo)
-    if args.subcommand == "check":
-        return _cmd_check(args)
-    if args.subcommand == "consolidate":
-        return _cmd_consolidate(args)
+    try:
+        if args.subcommand == "discover":
+            return _cmd_discover(args.repo)
+        if args.subcommand == "check":
+            return _cmd_check(args)
+        if args.subcommand == "consolidate":
+            return _cmd_consolidate(args)
+    except TrackerAuthError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return exc.exit_code
     return 0
 
 
