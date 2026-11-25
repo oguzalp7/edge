@@ -309,12 +309,14 @@ def cmd_export_tasks(args):
             target_files=[item.file_path],
             metric_targets=targets,
             door_type="two-way",
-            sync_tasks=bool(getattr(args, "sync_tasks", False)),
+            sync_tasks=getattr(args, "sync_tasks", None),
             hold_captain=False,
+            parent_issue=getattr(args, "parent_issue", None),
+            offline=bool(getattr(args, "offline", False)),
         )
         if ok:
             exported_count += 1
-            tid_info = f" (tasks-axi: {tasks_id})" if tasks_id else ""
+            tid_info = f" (#{tasks_id})" if tasks_id else ""
             print(f"✅ Exported {ticket_path}{tid_info}")
 
     print(f"Export complete: {exported_count} ticket(s) created, {skipped_count} duplicate(s) skipped.")
@@ -353,7 +355,11 @@ def main():
     p_export.add_argument("target", nargs="?", default=".", help="Target repository directory")
     p_export.add_argument("--track", choices=["all", "core", "ui"], default="all", help="Track filter")
     p_export.add_argument("--top", type=int, default=10, help="Max open items to export")
-    p_export.add_argument("--sync-tasks", action="store_true", help="Sync exported tickets to tasks-axi")
+    p_export.add_argument("--parent-issue", type=int, default=None, help="Parent tracker issue number to link exported sub-issues")
+    p_export.add_argument("--offline", action="store_true", help="Use local tracker backend")
+    export_sync = p_export.add_mutually_exclusive_group()
+    export_sync.add_argument("--sync-tasks", dest="sync_tasks", action="store_true", default=None, help="Sync exported tickets to tracker (default)")
+    export_sync.add_argument("--no-sync-tasks", dest="sync_tasks", action="store_false", default=None, help="Skip tracker issue creation")
     p_export.set_defaults(func=cmd_export_tasks)
 
     args = parser.parse_args()

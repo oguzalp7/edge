@@ -140,6 +140,9 @@ class Ticket:
     lavish_path: Optional[str] = None         # Path to associated Lavish prototype HTML
     require_qa: Optional[bool] = None         # Explicit override: True=force QA, False=skip QA
     tasks_axi_id: Optional[str] = None        # Optional linked tasks-axi task ID
+    issue_number: Optional[int] = None        # Linked tracker issue number (closed on finish)
+    parent_issue: Optional[int] = None        # Linked parent Frontier/Spec issue (never auto-closed)
+    tracker_offline: bool = False             # Persisted offline tracker preference
     metric_targets: Optional[Dict[str, Any]] = None
     refactor_ticket_path: Optional[str] = None
     before_metrics: Optional[Dict[str, Any]] = None

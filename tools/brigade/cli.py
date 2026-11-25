@@ -817,6 +817,9 @@ def cmd_start_slice(args: argparse.Namespace) -> int:
         spec_path=spec_path,
         lavish_path=lavish_path,
         require_qa=require_qa,
+        issue_number=getattr(args, "issue", None),
+        parent_issue=getattr(args, "parent_issue", None),
+        offline=bool(getattr(args, "offline", False)),
     )
     if not ok:
         print(f"❌ {msg}")
@@ -850,12 +853,20 @@ def cmd_start_slice(args: argparse.Namespace) -> int:
 
 def cmd_critique_spec(args: argparse.Namespace) -> int:
     repo_path = normalize_target_path(args.repo)
+    spec_arg = getattr(args, "spec", None)
+    issue_arg = getattr(args, "issue", None)
+    if not spec_arg and issue_arg is None:
+        print("❌ Either --spec or --issue must be provided.")
+        return 1
     res = run_spec_critique(
         repo_path=repo_path,
-        spec_path=args.spec,
+        spec_path=spec_arg,
         primary_model=getattr(args, "model", PRIMARY_CRITIC_MODEL),
         fallback_model=getattr(args, "fallback_model", FALLBACK_CRITIC_MODEL),
         timeout=getattr(args, "timeout", 180),
+        issue_number=issue_arg,
+        offline=bool(getattr(args, "offline", False)),
+        post_comment=not bool(getattr(args, "no_post_comment", False)),
     )
     print("\n=======================================================")
     print("🐟  EDGE BRIGADE — SPEC CRITIC (GOLDFISH CRITIC)")
@@ -878,10 +889,14 @@ def cmd_finish_slice(args: argparse.Namespace) -> int:
     fsm = BrigadeFSM(repo_path)
     use_pr = bool(getattr(args, "pr", False))
     no_auto = bool(getattr(args, "no_auto_merge", False))
+    offline = bool(getattr(args, "offline", False))
+    fin_kwargs: Dict[str, Any] = {}
     if use_pr or no_auto:
-        ok, msg = fsm.finish_slice(open_pr=use_pr, auto_merge_two_way=not no_auto)
-    else:
-        ok, msg = fsm.finish_slice()
+        fin_kwargs["open_pr"] = use_pr
+        fin_kwargs["auto_merge_two_way"] = not no_auto
+    if offline:
+        fin_kwargs["offline"] = True
+    ok, msg = fsm.finish_slice(**fin_kwargs)
     if not ok:
         print(f"❌ {msg}")
         return 1
@@ -928,8 +943,10 @@ def cmd_create_refactor_ticket(args: argparse.Namespace) -> int:
         target_files=files,
         metric_targets=targets,
         door_type=door_type,
-        sync_tasks=bool(getattr(args, "sync_tasks", False)),
+        sync_tasks=getattr(args, "sync_tasks", None),
         hold_captain=bool(getattr(args, "hold_captain", False)),
+        parent_issue=getattr(args, "parent_issue", None),
+        offline=bool(getattr(args, "offline", False)),
     )
     if not ok:
         print(f"❌ Failed to create refactor ticket at {ticket_path}")
@@ -971,7 +988,8 @@ def cmd_seal_refactor(args: argparse.Namespace) -> int:
 def cmd_confirm_merge(args: argparse.Namespace) -> int:
     repo_path = normalize_target_path(args.repo)
     fsm = BrigadeFSM(repo_path)
-    ok, msg = fsm.confirm_merge()
+    offline = bool(getattr(args, "offline", False))
+    ok, msg = fsm.confirm_merge(offline=offline) if offline else fsm.confirm_merge()
     if not ok:
         print(f"❌ {msg}")
         return 1
@@ -1058,14 +1076,21 @@ def cmd_distill(args: argparse.Namespace) -> int:
 
 def cmd_qa_inspect(args: argparse.Namespace) -> int:
     from tools.brigade.qa_fiber import inspect_fiber
+    from tools.tracker.models import TrackerAuthError
+
     repo_path = normalize_target_path(getattr(args, "repo", "."))
-    res = inspect_fiber(
-        query=args.query,
-        repo_path_str=repo_path,
-        log_frontier=args.frontier or bool(getattr(args, "issue", None)),
-        issue=getattr(args, "issue", "") or "",
-        category=getattr(args, "category", None)
-    )
+    try:
+        res = inspect_fiber(
+            query=args.query,
+            repo_path_str=repo_path,
+            log_frontier=args.frontier or bool(getattr(args, "issue", None)),
+            issue=getattr(args, "issue", "") or "",
+            category=getattr(args, "category", None),
+            offline=bool(getattr(args, "offline", False)),
+        )
+    except TrackerAuthError as exc:
+        print(f"Error: {exc}")
+        return exc.exit_code
     if getattr(args, "json", False):
         print(json.dumps(res, indent=2, ensure_ascii=False))
         return 0 if res.get("success") else 1
@@ -1091,12 +1116,14 @@ def cmd_qa_inspect(args: argparse.Namespace) -> int:
     if res.get("frontier"):
         f_res = res["frontier"]
         if f_res.get("success"):
-            print(f"\n📋 Staged to frontier-axi:")
+            print(f"\n📋 Staged to tracker frontier:")
             print(f"   ID:    {f_res.get('id')}")
             print(f"   Title: {f_res.get('title')}")
             print(f"   Via:   {f_res.get('method')}")
         else:
             print(f"\n⚠️ Frontier Staging Failed: {f_res.get('error')}")
+            return 1
+    return 0
 
 def cmd_prototype(args: argparse.Namespace) -> int:
     repo_path = normalize_target_path(args.repo)
@@ -1316,6 +1343,9 @@ def main() -> int:
     qa_group = p_start.add_mutually_exclusive_group()
     qa_group.add_argument("--qa", dest="require_qa", action="store_true", default=None, help="Explicitly mandate QA stage")
     qa_group.add_argument("--no-qa", dest="require_qa", action="store_false", default=None, help="Explicitly bypass QA stage")
+    p_start.add_argument("--issue", type=int, default=None, help="Linked child/ticket tracker issue number")
+    p_start.add_argument("--parent-issue", type=int, default=None, help="Linked parent Frontier/Spec tracker issue number")
+    p_start.add_argument("--offline", action="store_true", help="Use local tracker backend")
 
     # prompt
     p_prompt = subparsers.add_parser("prompt", help="Compose and print 2-layer prompt for a station")
@@ -1326,7 +1356,10 @@ def main() -> int:
     # critique-spec
     p_crit = subparsers.add_parser("critique-spec", help="Run advisory cross-provider Goldfish Spec Critic (Opus 5.5 -> Flash 3.8 fallback)")
     p_crit.add_argument("repo", help="Path to target repository")
-    p_crit.add_argument("--spec", required=True, help="Path to specification document")
+    p_crit.add_argument("--spec", default=None, help="Path to specification document")
+    p_crit.add_argument("--issue", type=int, default=None, help="Tracker issue number to critique")
+    p_crit.add_argument("--offline", action="store_true", help="Use local tracker backend")
+    p_crit.add_argument("--no-post-comment", action="store_true", help="Skip posting critique comment on issue")
     p_crit.add_argument("--model", default=PRIMARY_CRITIC_MODEL, help=f"Primary critic model (default: {PRIMARY_CRITIC_MODEL})")
     p_crit.add_argument("--fallback-model", default=FALLBACK_CRITIC_MODEL, help=f"Fallback critic model (default: {FALLBACK_CRITIC_MODEL})")
     p_crit.add_argument("--timeout", type=int, default=180, help="Critique timeout in seconds (default: 180)")
@@ -1336,6 +1369,7 @@ def main() -> int:
     p_fin.add_argument("repo", help="Path to target repository")
     p_fin.add_argument("--pr", action="store_true", help="Open a Spec-Anchored GitHub PR (auto-merges Two-Way Doors; holds One-Way Doors for human review)")
     p_fin.add_argument("--no-auto-merge", action="store_true", help="Do not auto-merge Two-Way Door PRs when --pr is used")
+    p_fin.add_argument("--offline", action="store_true", help="Use local tracker backend")
 
     # create-refactor-ticket
     p_crt = subparsers.add_parser("create-refactor-ticket", help="Create dual-layer refactor ticket and optional tasks-axi entry")
@@ -1346,8 +1380,12 @@ def main() -> int:
     p_crt.add_argument("--files", default="", help="Comma-separated target files")
     p_crt.add_argument("--targets", default="", help="Comma-separated metric targets (e.g. max_cc=8,db_leaks=0)")
     p_crt.add_argument("--door", default="two-way", choices=["two-way", "one-way"], help="Door classification")
-    p_crt.add_argument("--sync-tasks", action="store_true", help="Sync ticket to tasks-axi")
-    p_crt.add_argument("--hold-captain", action="store_true", help="Pass --hold captain to tasks-axi")
+    crt_sync = p_crt.add_mutually_exclusive_group()
+    crt_sync.add_argument("--sync-tasks", dest="sync_tasks", action="store_true", default=None, help="Sync ticket to tracker (default)")
+    crt_sync.add_argument("--no-sync-tasks", dest="sync_tasks", action="store_false", default=None, help="Skip tracker issue creation")
+    p_crt.add_argument("--hold-captain", action="store_true", help="Add hold:captain label on tracker issue")
+    p_crt.add_argument("--parent-issue", type=int, default=None, help="Parent tracker issue number")
+    p_crt.add_argument("--offline", action="store_true", help="Use local tracker backend")
 
     # seal-refactor
     p_sref = subparsers.add_parser("seal-refactor", help="Synthesize 4-seal machine-generated RefactorReceipt")
@@ -1356,8 +1394,9 @@ def main() -> int:
     p_sref.add_argument("--base", default=None, help="Base branch to diff against")
 
     # confirm-merge
-    p_cm = subparsers.add_parser("confirm-merge", help="Confirm queued PR merge, complete linked tasks-axi, and reset FSM to IDLE")
+    p_cm = subparsers.add_parser("confirm-merge", help="Confirm queued PR merge, complete linked tracker issue, and reset FSM to IDLE")
     p_cm.add_argument("repo", help="Path to target repository")
+    p_cm.add_argument("--offline", action="store_true", help="Use local tracker backend")
 
     # pause
     p_pause = subparsers.add_parser("pause", help="Safely pause brigade execution and create durable checkpoint")
@@ -1384,6 +1423,7 @@ def main() -> int:
     p_qa.add_argument("--category", choices=["contrast", "overflow", "layout", "visual-regression", "misalignment"], help="Anomaly category")
     p_qa.add_argument("--frontier", action="store_true", help="Stage finding into frontier-axi")
     p_qa.add_argument("--json", action="store_true", help="Output machine-readable JSON")
+    p_qa.add_argument("--offline", action="store_true", help="Use local tracker backend")
 
     # prototype
     p_proto = subparsers.add_parser("prototype", help="Lavish-axi interactive UI prototype bridge (serve, poll, stop, status)")
@@ -1485,9 +1525,15 @@ def main() -> int:
         "security-audit": cmd_security_audit,
     }
 
+    from tools.tracker.models import TrackerAuthError
+
     func = commands.get(args.command)
     if func:
-        return func(args)
+        try:
+            return func(args)
+        except TrackerAuthError as exc:
+            print(f"Error: {exc}")
+            return exc.exit_code
     return 1
 
 

@@ -267,63 +267,62 @@ class TestAC1RefactorTicketingAndTasksBridge(_HermeticBrigadeGitTestCase):
 
     def test_create_refactor_ticket_sync_tasks_and_hold_captain_with_mocked_subprocess(self) -> None:
         tasks_bridge = importlib.import_module("tools.brigade.tasks_bridge")
-        recorded_cmds: List[str] = []
+        from tools.tracker.local_backend import LocalTrackerBackend
 
-        def fake_run(cmd, *args, **kwargs):
-            cmd_str = " ".join(str(c) for c in cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
-            recorded_cmds.append(cmd_str)
-            return subprocess.CompletedProcess(
-                args=cmd,
-                returncode=0,
-                stdout='{"id": "ref-bookings-a1"}\n',
-                stderr="",
-            )
-
-        with (
-            patch("shutil.which", return_value="/usr/local/bin/tasks-axi"),
-            patch("subprocess.run", side_effect=fake_run),
-        ):
-            ok, ticket_path, tasks_id = tasks_bridge.create_refactor_ticket(
-                repo_path=self.repo_path,
-                slug="bookings-sync",
-                track="core",
-                target_rules=["RULE-ACTION-DB-LEAK"],
-                target_files=["src/actions/bookings.ts"],
-                metric_targets={"db_leaks": 0},
-                door_type="two-way",
-                sync_tasks=True,
-                hold_captain=True,
-            )
+        ok, ticket_path, issue_id = tasks_bridge.create_refactor_ticket(
+            repo_path=self.repo_path,
+            slug="bookings-sync",
+            track="core",
+            target_rules=["RULE-ACTION-DB-LEAK"],
+            target_files=["src/actions/bookings.ts"],
+            metric_targets={"db_leaks": 0},
+            door_type="two-way",
+            sync_tasks=True,
+            hold_captain=True,
+        )
 
         self.assertTrue(ok)
-        self.assertTrue(tasks_id, "Expected non-empty tasks_axi_id when sync_tasks=True")
-        self.assertTrue(
-            any("tasks-axi" in c and "add" in c and "--hold" in c and "captain" in c for c in recorded_cmds),
-            f"Expected tasks-axi add with --hold captain, got: {recorded_cmds}",
-        )
+        self.assertEqual(issue_id, "1")
         fm, _ = _parse_frontmatter(ticket_path)
-        self.assertEqual(fm.get("tasks_axi_id"), tasks_id)
+        self.assertEqual(fm.get("issue_number"), 1)
+        self.assertIsNone(fm.get("tasks_axi_id"))
+        created = LocalTrackerBackend(self.repo_path).get_issue(1)
+        self.assertTrue({"track:core", "status:ready", "hold:captain"}.issubset(set(created.labels)))
 
     def test_create_refactor_ticket_missing_tasks_axi_binary_degrades_gracefully(self) -> None:
         tasks_bridge = importlib.import_module("tools.brigade.tasks_bridge")
-        with (
-            patch("shutil.which", return_value=None),
-            patch("subprocess.run", side_effect=FileNotFoundError("tasks-axi")),
-        ):
-            ok, ticket_path, tasks_id = tasks_bridge.create_refactor_ticket(
-                repo_path=self.repo_path,
-                slug="bookings-offline",
-                track="ui",
-                target_rules=["RULE-ZERO-WRAPPERS"],
-                target_files=["src/components/OldModal.tsx"],
-                metric_targets={"max_cc": 8},
-                sync_tasks=True,
-                hold_captain=True,
-            )
+        from tools.tracker.models import TrackerAuthError
 
+        ok, ticket_path, issue_id = tasks_bridge.create_refactor_ticket(
+            repo_path=self.repo_path,
+            slug="bookings-offline",
+            track="ui",
+            target_rules=["RULE-ZERO-WRAPPERS"],
+            target_files=["src/components/OldModal.tsx"],
+            metric_targets={"max_cc": 8},
+            sync_tasks=False,
+            hold_captain=True,
+        )
         self.assertTrue(ok)
         self.assertTrue(ticket_path.is_file())
-        self.assertIsNone(tasks_id)
+        self.assertIsNone(issue_id)
+
+        # With a GitHub remote and no tracker binary, fail-fast TrackerAuthError is raised
+        self._git("remote", "add", "origin", "https://github.com/acme/widgets.git")
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("EDGE_TRACKER", None)
+            with patch("shutil.which", return_value=None):
+                with self.assertRaises(TrackerAuthError):
+                    tasks_bridge.create_refactor_ticket(
+                        repo_path=self.repo_path,
+                        slug="bookings-auth-fail",
+                        track="ui",
+                        target_rules=["RULE-ZERO-WRAPPERS"],
+                        target_files=["src/components/OldModal.tsx"],
+                        metric_targets={"max_cc": 8},
+                        sync_tasks=True,
+                    )
+        self._git("remote", "remove", "origin")
 
     def test_complete_linked_task_runs_done_with_pr_and_degrades_gracefully(self) -> None:
         tasks_bridge = importlib.import_module("tools.brigade.tasks_bridge")
@@ -368,18 +367,9 @@ class TestAC1RefactorTicketingAndTasksBridge(_HermeticBrigadeGitTestCase):
             self.assertIsInstance(res_missing[1], str)
 
     def test_brigade_cli_create_refactor_ticket_command(self) -> None:
-        recorded_cmds: List[str] = []
-
-        def fake_run(cmd, *args, **kwargs):
-            cmd_str = " ".join(str(c) for c in cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
-            if "tasks-axi" in cmd_str:
-                recorded_cmds.append(cmd_str)
-                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout='{"id": "cli-task-1"}\n', stderr="")
-            return _ORIG_SUBPROCESS_RUN(cmd, *args, **kwargs)
+        from tools.tracker.local_backend import LocalTrackerBackend
 
         with (
-            patch("shutil.which", return_value="/usr/local/bin/tasks-axi"),
-            patch("subprocess.run", side_effect=fake_run),
             patch.object(
                 sys,
                 "argv",
@@ -412,7 +402,9 @@ class TestAC1RefactorTicketingAndTasksBridge(_HermeticBrigadeGitTestCase):
         self.assertEqual(fm.get("track"), "core")
         self.assertIn("RULE-MAX-CC", fm.get("target_rules", []))
         self.assertIn("src/core/clients.ts", fm.get("target_files", []))
-        self.assertTrue(any("--hold" in c and "captain" in c for c in recorded_cmds))
+        self.assertEqual(fm.get("issue_number"), 1)
+        created = LocalTrackerBackend(self.repo_path).get_issue(1)
+        self.assertTrue({"track:core", "status:ready", "hold:captain"}.issubset(set(created.labels)))
 
     def test_radar_export_tasks_converts_open_ledger_items_deduplicated_and_skips_resolved(self) -> None:
         ledger = LedgerEngine(self.repo_path)
