@@ -411,6 +411,178 @@ class TestBackendResolutionAndRunner:
         assert not created_host_paths[-1].exists()
 
 
+class TestTrackerDotenvAuthLoader:
+    def test_dotenv_env_var_takes_precedence_over_repo_and_plugin_dotenv(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        repo = _init_git_repo(tmp_path / "repo")
+        (repo / ".env").write_text("GITHUB_TOKEN=ghp_fake_repo_loses\n", encoding="utf-8")
+
+        fake_plugin = tmp_path / "plugin"
+        fake_backends_file = fake_plugin / "tools" / "tracker" / "backends.py"
+        fake_backends_file.parent.mkdir(parents=True, exist_ok=True)
+        (fake_plugin / ".env").write_text("GITHUB_TOKEN=ghp_fake_plugin_loses\n", encoding="utf-8")
+        monkeypatch.setattr(backends, "__file__", str(fake_backends_file))
+
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        monkeypatch.setenv("GH_TOKEN", "ghp_fake_env_wins")
+
+        captured_envs: List[Optional[Dict[str, str]]] = []
+        real_run = subprocess.run
+
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == "gh":
+                captured_envs.append(kwargs.get("env"))
+                return subprocess.CompletedProcess(cmd, 0, "ok\n", "")
+            return real_run(cmd, **kwargs)
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        rc, out, _ = backends.run_tracker_cmd(["gh", "issue", "list"], cwd=repo)
+
+        assert rc == 0 and out == "ok\n"
+        assert "GITHUB_TOKEN" not in os.environ
+        assert os.environ["GH_TOKEN"] == "ghp_fake_env_wins"
+        if captured_envs and captured_envs[0] is not None:
+            assert captured_envs[0].get("GH_TOKEN") == "ghp_fake_env_wins"
+            assert captured_envs[0].get("GITHUB_TOKEN") != "ghp_fake_repo_loses"
+            assert captured_envs[0].get("GITHUB_TOKEN") != "ghp_fake_plugin_loses"
+
+    def test_dotenv_repo_env_takes_precedence_over_plugin_and_parses_syntax(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        primary = _init_git_repo(tmp_path / "primary")
+        wt = tmp_path / "worktree"
+        _git(primary, "worktree", "add", str(wt), "-b", "feat/dotenv-wt")
+
+        (primary / ".env").write_text(
+            "\n"
+            "# Leading comment\n"
+            "# GITHUB_TOKEN=ghp_fake_commented_out\n"
+            "  export GITHUB_TOKEN=\"ghp_fake_repo_token\"  \n",
+            encoding="utf-8",
+        )
+        fake_plugin = tmp_path / "plugin"
+        fake_backends_file = fake_plugin / "tools" / "tracker" / "backends.py"
+        fake_backends_file.parent.mkdir(parents=True, exist_ok=True)
+        (fake_plugin / ".env").write_text("GITHUB_TOKEN=ghp_fake_plugin_loses\n", encoding="utf-8")
+        monkeypatch.setattr(backends, "__file__", str(fake_backends_file))
+
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        monkeypatch.delenv("GH_TOKEN", raising=False)
+
+        captured_envs: List[Optional[Dict[str, str]]] = []
+        real_run = subprocess.run
+
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == "gh-axi":
+                captured_envs.append(kwargs.get("env"))
+                return subprocess.CompletedProcess(cmd, 0, "ok\n", "")
+            return real_run(cmd, **kwargs)
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        rc, _, _ = backends.run_tracker_cmd(["gh-axi", "issue", "list"], cwd=wt)
+
+        assert rc == 0
+        assert captured_envs and captured_envs[0] is not None
+        assert captured_envs[0]["GITHUB_TOKEN"] == "ghp_fake_repo_token"
+        assert captured_envs[0]["GH_TOKEN"] == "ghp_fake_repo_token"
+        assert "GITHUB_TOKEN" not in os.environ
+        assert "GH_TOKEN" not in os.environ
+
+    def test_dotenv_plugin_fallback_populates_both_vars_and_wslenv(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        repo = _init_git_repo(tmp_path / "repo")
+        fake_plugin = tmp_path / "plugin"
+        fake_backends_file = fake_plugin / "tools" / "tracker" / "backends.py"
+        fake_backends_file.parent.mkdir(parents=True, exist_ok=True)
+        (fake_plugin / ".env").write_text(
+            "# comment\nexport GH_TOKEN='ghp_fake_plugin_single'\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(backends, "__file__", str(fake_backends_file))
+
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        monkeypatch.delenv("GH_TOKEN", raising=False)
+        monkeypatch.setenv("WSLENV", "EXISTING_VAR/u")
+
+        captured_envs: List[Optional[Dict[str, str]]] = []
+        real_run = subprocess.run
+
+        def fake_run(cmd, **kwargs):
+            if cmd[0] in ("gh", "wsl"):
+                captured_envs.append(kwargs.get("env"))
+                return subprocess.CompletedProcess(cmd, 0, "ok\n", "")
+            return real_run(cmd, **kwargs)
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        # Native run
+        assert backends.run_tracker_cmd(["gh", "issue", "list"], cwd=repo)[0] == 0
+        assert captured_envs[0] is not None
+        assert captured_envs[0]["GITHUB_TOKEN"] == "ghp_fake_plugin_single"
+        assert captured_envs[0]["GH_TOKEN"] == "ghp_fake_plugin_single"
+        assert "GITHUB_TOKEN" not in os.environ
+        assert "GH_TOKEN" not in os.environ
+
+        # WSL-dispatched run preserves and appends WSLENV
+        monkeypatch.setattr(backends, "needs_wsl_dispatch", lambda _cwd: True)
+        assert backends.run_tracker_cmd(["gh", "issue", "list"], cwd="/home/oguz/repo")[0] == 0
+        assert captured_envs[1] is not None
+        assert captured_envs[1]["GITHUB_TOKEN"] == "ghp_fake_plugin_single"
+        assert captured_envs[1]["GH_TOKEN"] == "ghp_fake_plugin_single"
+        wslenv_parts = captured_envs[1].get("WSLENV", "").split(":")
+        assert "EXISTING_VAR/u" in wslenv_parts
+        assert "GITHUB_TOKEN" in wslenv_parts
+        assert "GH_TOKEN" in wslenv_parts
+
+    def test_dotenv_secret_hygiene_redacts_token_from_errors_and_output(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        repo = _init_git_repo(tmp_path / "repo")
+        secret_tok = "ghp_fake_secret_999"
+        (repo / ".env").write_text(f"GITHUB_TOKEN={secret_tok}\n", encoding="utf-8")
+
+        fake_plugin = tmp_path / "plugin"
+        fake_backends_file = fake_plugin / "tools" / "tracker" / "backends.py"
+        fake_backends_file.parent.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(backends, "__file__", str(fake_backends_file))
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        monkeypatch.delenv("GH_TOKEN", raising=False)
+
+        real_run = subprocess.run
+
+        def fake_fail(cmd, **kwargs):
+            if cmd[0] == "gh":
+                return subprocess.CompletedProcess(
+                    cmd,
+                    1,
+                    f"debug echo {secret_tok}\n",
+                    f"HTTP 401 Bad credentials for {secret_tok}",
+                )
+            return real_run(cmd, **kwargs)
+
+        monkeypatch.setattr(subprocess, "run", fake_fail)
+
+        rc, out, err = backends.run_tracker_cmd(["gh", "issue", "view", "1"], cwd=repo)
+        assert rc == 1
+        assert secret_tok not in out
+        assert secret_tok not in err
+
+        with pytest.raises(TrackerAuthError) as exc_info:
+            backends.run_tracker_checked(["gh", "issue", "view", "1"], cwd=repo)
+        assert exc_info.value.exit_code == 2
+        assert secret_tok not in str(exc_info.value)
+
+
 # =============================================================================
 # 3. GhAxiBackend + GraphQL Lossless Reads
 # =============================================================================
