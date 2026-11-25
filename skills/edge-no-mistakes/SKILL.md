@@ -27,9 +27,10 @@ Run `no-mistakes` as an external read-only second-opinion auditor. Do **not** le
    ```bash
    gh issue create --title "[Audit] <concise finding>" --body "<file, impact, reproduction>"
    ```
-2. **Local Backlog Staging (`frontier-axi`):**
+2. **Tracker Frontier Staging (`tools/tracker`; `frontier-axi` is soft-deprecated):**
    ```bash
-   frontier-axi add "<finding title>" --body "<evidence & context>"
+   python3 tools/tracker/cli.py create . --title "<finding title>" --body "<evidence & context>" --label type:frontier
+   # Legacy soft-deprecated fallback: frontier-axi add "<finding title>" --body "<evidence & context>"
    ```
 
 ---

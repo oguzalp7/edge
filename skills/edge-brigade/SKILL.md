@@ -84,7 +84,7 @@ Instead of spawning disposable generalist agents that try to do everything and e
 8. **QA_ENGINEER (`qa_engineer` / Sommelier)**:
    - **Role:** End-to-end browser verification, visual quality assurance, and user journey testing.
    - **Protocol:** Receives translated user scenarios mapped to project ubiquitous domain vocabulary by the Orchestrator. Delegates physical browser interactions to the built-in `browser` subagent (`TypeName: "browser"`, `Model: "flash"`). Stages Lavish references to `<Artifact Directory>/browser_sandbox/references/`. Enforces state persistence via DOM reload and backend DB/state cross-checks (`run_command`). Synthesizes `ProofVerifier`-compliant Behavioral Proof Receipt (`.edge/qa/proofs/<slug>.json` with unique-SHA-256 screenshots, non-auth URLs, `host_facts_verified: true`, and `db_crosscheck`) before advancing to `REVIEW` (`EXAMINER`).
-   - **Constraint:** Strictly zero production code mutation (`src/**`, `app/**`, `lib/**`, `db/**`). Documents defects with reproduction steps, network payloads, console errors, and screenshots. Parks non-blocking UX issues to `frontier-axi`.
+   - **Constraint:** Strictly zero production code mutation (`src/**`, `app/**`, `lib/**`, `db/**`). Documents defects with reproduction steps, network payloads, console errors, and screenshots. Parks non-blocking UX issues via `qa-inspect --frontier` into `tools/tracker` (`type:frontier`, `track:ui`; `frontier-axi` soft-deprecated).
 
 ### Station Memory Models: Elephant vs. Goldfish
 * 🐘 **Persistent Elephant Stations (`PERSISTENT_ELEPHANT_ROLES`):**  
@@ -166,8 +166,8 @@ Transitions are **stateless reducers** governed purely by process exit codes and
 - Tracks every dead end, failed approach, compiler trap, or architectural deadlock.
 - Automatically formats and injects a `> [!CAUTION] 🚫 ZERO-AMNESIA FLIGHT RECORDER` alert into station prompts (`brigade ticket --prompt`) so successor agents or retry cycles never repeat proven fatal mistakes.
 
-### 3. Ephemeral Spec Archival & Living Domain Deeds (`edge-drift`)
-- **Scaffolding Spec Archival:** Once a slice successfully merges in `finish-slice`, its ephemeral specification (`.edge/specs/<slice>.md`) is automatically moved to `.edge/archive/specs/`.
+### 3. Tracker Spec SSOT, Cache & Living Domain Deeds (`edge-drift`)
+- **GitHub Issues + Sub-issues SSOT (`tools/tracker/`):** Parent Issues (`spec:draft` -> `spec:approved`) hold specifications and are cached under `.edge/cache/issues/` (never archived). Child sub-issues transition `status:ready` -> `status:in-progress` -> `status:done` on `finish-slice`. Legacy `.edge/specs/`, `tasks-axi`, and `frontier-axi` are soft-deprecated (legacy `.edge/specs/<slice>.md` still archives to `.edge/archive/specs/`).
 - **Living Domain Deeds:** Long-lived architectural and domain contracts reside under `docs/domains/<domain>.md` (containing YAML frontmatter with `tracked_paths`).
 - **Zero Token Waste Drift Audits:** Running `/edge-drift` (`python3 tools/drift/cli.py check <repo>`) compares git diff against `tracked_paths`. Only domains whose underlying files have changed are audited, resulting in zero token waste for untouched domains.
 
@@ -202,12 +202,12 @@ brigade worktree /path/to/repo                              # Havuz durumunu gö
 brigade worktree /path/to/repo --action lease --branch feat/my-feat  # İzole slot kirala
 brigade worktree /path/to/repo --action return --force     # Worktree'yi havuza iade et
 
-# 5. Şartname Danışman Denetimi (Cross-Provider Spec Critic)
-brigade critique-spec /path/to/repo --spec .edge/specs/<slice-adi>.md
+# 5. Şartname Danışman Denetimi (Parent Issue SSOT via tools/tracker)
+brigade critique-spec --issue <parent_issue> /path/to/repo
 
-# 6. Dikey Dilim Başlat (Feature için worktree peşin kiralanır ve RED_TEST durumunda başlar; core/ui için allow_migration=False varsayılanıdır)
-brigade start-slice /path/to/repo --name staff-allocation --track feature
-brigade create-refactor-ticket /path/to/repo --slug bookings-leak --track core --rules RULE-ACTION-DB-LEAK --files src/actions/bookings.ts --targets db_leaks=0,max_cc=10 --sync-tasks --hold-captain
+# 6. Dikey Dilim Başlat (Feature: Parent Issue cached to .edge/cache/issues/, Child Issue -> status:in-progress)
+brigade start-slice --issue <child_issue> --parent-issue <parent_issue> --name staff-allocation --track feature /path/to/repo
+brigade create-refactor-ticket /path/to/repo --slug bookings-leak --track core --rules RULE-ACTION-DB-LEAK --files src/actions/bookings.ts --targets db_leaks=0,max_cc=10 --parent-issue <parent_issue> --hold-captain
 
 # 7. Radar Bilet Triage (Refactor borç defterinden bilet alır ve worktree kiralar)
 brigade triage /path/to/repo --track core

@@ -14,8 +14,8 @@ Bu doküman, `edge` eklentisi bünyesinde **Yeni Davranış & Feature Ekleme** o
    * Büyük hikayeleri (N-spec) dikey dilim mikro-spesifikasyonlarına böler.
    * **Visual Approval Gate (`lavish-axi` Direct Ownership):** UI katmanına dokunulacaksa, `.lavish/<feature>.html` prototipi üretilir, `lavish-axi <file>` ile session URL'i açılır ve bizzat `SPEC_WRITER` `lavish-axi poll <file>` çalıştırarak kullanıcı geri bildirimini/onayını dinler ve revizyonları işler. Kullanıcı tarayıcıdan "Send & End" ile onay vermeden kodlamaya geçiş **KESİNLİKLE YASAKTIR**.
 3. **SPEC_CRITIC (Danışman Şartname Denetçisi / Cross-Provider Goldfish):**
-   * Şartname mühürlendikten sonra (ve UI varsa `lavish-axi` onayı sonrası), Orkestratör `brigade critique-spec <repo> --spec <spec_path>` çalıştırır.
-   * Sıfır bağlamlı ve salt-okunur `claude-opus-5-5-high` (kota aşımında otomatik `gemini-3.8-flash-high` fallback) modeli çağrılır ve `.edge/specs/<stem>-critique.md` raporu üretilir.
+   * Şartname mühürlendikten sonra (ve UI varsa `lavish-axi` onayı sonrası), Orkestratör `brigade critique-spec --issue <P> <repo>` (veya legacy `--spec <spec_path>`) çalıştırır.
+   * Sıfır bağlamlı ve salt-okunur `claude-opus-5-5-high` (kota aşımında otomatik `gemini-3.8-flash-high` fallback) modeli çağrılır; rapor `.edge/cache/issues/<P>-critique.md` dosyasına yazılır ve `--no-post-comment` verilmedikçe Issue yorumu olarak eklenir.
    * **Danışman (Advisory) Kapı:** FSM'i kilitlemez; Orkestratör anti-borç, yeniden kullanılabilirlik ve eksik karar uyarılarını insan kaptana özetler.
 4. **RESEARCHER (Deep Research & RCA):**
    * Kod tabanında bağımlılıkları, çağrı ağaçlarını inceler. Gerekirse web üzerinden 3. parti API dokümanlarını araştırır. Kod değiştirmez.
@@ -40,8 +40,8 @@ Bu doküman, `edge` eklentisi bünyesinde **Yeni Davranış & Feature Ekleme** o
    * **Deterministik `ProofVerifier` Kapısı:** `browser` alt-ajanı ile canlı DOM reload ve DB çapraz doğrulaması (`db_crosscheck`) yürütülür. `.edge/qa/proofs/<slug>.json` makbuzunda diskte mevcut, sıfır bayt olmayan ve benzersiz SHA-256 özetine sahip ekran görüntüleri, auth-wall redirect tuzağı içermeyen URL'ler ve `host_facts_verified: true` aranır.
    * **Lavish-to-Reality Parity & Tier-1 Console Gate:** Prototip ile canlı DOM arasındaki görsel/fonksiyonel birebirliği denetler (`track == "ui"` dilimlerinde `GATE` aşamasında `tools/ui_audit/diff_image.py` ile `<= 0.15%` piksel eşliği zorunludur). Kritik hata çıkarsa FSM `POLISH` durumuna döner ve ardından `GATE`'e yeniden girer.
 9. **Deterministik Teslimat (`brigade finish-slice`, `edge-drift` & `brigade prepare-ship`):**
-   * Doğrulanan dalı FSM üzerinden ana depodaki `development` dalına fast-forward birleştirir, worktree'yi havuza iade eder ve `brigade prepare-ship` ile Specs-to-PR köprüsünü (`--intent`, `## Summary`, `## Evidence`, `## Merge Danger`) kurarak `no-mistakes` kapısına sunar.
-   * Geçici dilim şartnamesini (`.edge/specs/<slice>.md`) otomatik olarak `.edge/archive/specs/` dizinine arşivler.
+   * Doğrulanan dalı FSM üzerinden ana depodaki `development` dalına fast-forward birleştirir, worktree'yi havuza iade eder, çocuk alt-bileti `status:done` olarak kapatır (Parent Issue açık kalır) ve `brigade prepare-ship --issue <C> --parent-issue <P>` ile `Closes #<C>` + `Parent Spec: #<P>` PR gövdesini üretir.
+   * `.edge/cache/issues/` önbelleği asla arşivlenmez (`INV-CACHE-NO-ARCHIVE`); yalnızca soft-deprecated `.edge/specs/<slice>.md` dosyaları `.edge/archive/specs/` dizinine arşivlenir.
    * Yaşayan alan sözleşmeleri `docs/domains/<domain>.md` altında saklanır ve `/edge-drift` (`python3 tools/drift/cli.py check <repo>`) ile değişmeyen alanlarda sıfır token israfıyla mimari sapma denetimine tabi tutulur.
 
 ---
@@ -98,14 +98,14 @@ Bu doküman, `edge` eklentisi bünyesinde **Yeni Davranış & Feature Ekleme** o
    Kullanıcı birden fazla mock/tasarım istediğinde, `SPEC_WRITER` varyantları hazırlar. Kullanıcı Lavish Editor üzerinden seçimini tamamlamadan bir sonraki istasyona geçiş KESİNLİKLE YASAKTIR.
 
 ### 🛑 2.2 Danışman Şartname Eleştirisi (`brigade critique-spec`)
-1. **Çapraz Sağlayıcı Goldfish Eleştirisi:** `SPEC_WRITER` şartnameyi mühürledikten sonra (ve UI varsa `lavish-axi` mührü sonrası), Orkestratör `brigade critique-spec <repo> --spec <spec_path>` komutunu çalıştırır.
-2. **Model Kademesi:** Sıfır bağlamlı ve salt-okunur `claude-opus-5-5-high` modeli çağrılır; kota aşımı durumunda otomatik olarak `gemini-3.8-flash-high` modeline fallback yapar. Rapor atomik olarak `.edge/specs/<stem>-critique.md` dosyasına yazılır.
+1. **Çapraz Sağlayıcı Goldfish Eleştirisi:** `SPEC_WRITER` şartnameyi mühürledikten sonra (ve UI varsa `lavish-axi` mührü sonrası), Orkestratör Parent Issue (`spec:approved`) üzerinde `brigade critique-spec --issue <P> <repo>` komutunu çalıştırır.
+2. **Model Kademesi:** Sıfır bağlamlı ve salt-okunur `claude-opus-5-5-high` modeli çağrılır; kota aşımı durumunda otomatik olarak `gemini-3.8-flash-high` modeline fallback yapar. Rapor atomik olarak `.edge/cache/issues/<P>-critique.md` dosyasına yazılır.
 3. **Danışman (Advisory) Nitelik:** Bu kapı FSM'i sert bir şekilde kilitlemez. Orkestratör, şartnamedeki eksik kararları, yetim kalabilecek yapıları ve mevcut kodun yeniden kullanılabilirliğini insan kaptana danışmanlık olarak sunar.
 
 ### 🛑 2.3 Deterministik Treehouse Worktree & RED_TEST Kapısı (Zero-Touch Invariant)
 1. **Peşin Worktree Kiralama:** Ana depoda doğrudan üretim kodu yazma yasağı (Zero-Touch Primary Invariant) uyarınca, test yazımına başlamadan ÖNCE Treehouse üzerinden izole bir worktree kiralanır:
    ```bash
-   python3 tools/brigade/cli.py start-slice /home/oguz/<project> --name <feature-name> --track feature [--expected-files ...] [--spec ...]
+   python3 tools/brigade/cli.py start-slice --issue <C> --parent-issue <P> --name <feature-name> --track feature /home/oguz/<project> [--expected-files ...]
    ```
    Bu komut izole bir worktree slotu kiralar ve FSM'i doğrudan `RED_TEST` durumunda başlatır.
 2. **Kırmızı Test Doğrulaması:** `SEAM_ARCHITECT` sözleşmeleri ve kırmızı testleri kiralık worktree (`/home/oguz/.treehouse/pool/slot-N/...`) içinde yazar. `brigade advance` deterministik olarak hakiki non-zero assertion hatasını doğrular (sözdizimi hatası veya pass-before-code durumunu engeller) ve FSM'i `CODER` için `SURGERY` aşamasına ilerletir.
@@ -123,7 +123,7 @@ Bu doküman, `edge` eklentisi bünyesinde **Yeni Davranış & Feature Ekleme** o
    * Eğer slice salt backend/motor işiyse, `CycleState.QA` güvenle atlanarak doğrudan `CycleState.REVIEW` aşamasına geçilir.
 2. **Tier-1 Sıfır Konsol Hatası ve POLISH Yönlendirmesi:**
    * `CycleState.QA` içinde tespit edilen herhangi bir `console.error`, unhandled exception veya Lavish prototipinden kopukluk `CRITICAL` bulgu sayılır ve `brigade advance` FSM'i `POLISH` aşamasına geri yönlendirir (düzeltme sonrası yeniden `GATE` kapısına girer).
-   * Kusursuz çalışan ancak kozmetik/stil pürüzü içeren durumlar `frontier-axi`'ye journal edilir ve teslimatı bloklamaz.
+   * Kusursuz çalışan ancak kozmetik/stil pürüzü içeren durumlar `brigade qa-inspect --frontier` ile `tools/tracker/` (`type:frontier`, `track:ui`) üzerine journal edilir ve teslimatı bloklamaz (`tasks-axi`/`frontier-axi` & `.edge/specs/` soft-deprecated).
 
 
 ---

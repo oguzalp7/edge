@@ -35,9 +35,9 @@ Bu kurallar, `edge` eklentisini kullanan tüm çalışma alanlarında geçerli e
 
 Ajanlar çevre birimleriyle (Git, Tarayıcı, Görev Listesi) etkileşime girerken token tasarrufu ve determinizm adına aşağıdaki öncelik sırasını takip etmekle yükümlüdür:
 
-### 📋 A. Görev & Backlog Yönetimi
-1. **`tasks-axi` (Birincil):** Kabul kriterleri ve dikey sınırları netleşmiş, derhal başlanabilecek iş paketleri için kullanılır. Çıktı token maliyeti neredeyse sıfırdır (`ready`, `done`).
-2. **`frontier-axi` (İkincil / Otopark):** Henüz derinleştirilmemiş, bilişsel sis barındıran veya mimari tartışma gerektiren ham fikirlerin park alanıdır. Kabul kriteri netleşmeyen hiçbir iş `tasks-axi`'ye aktarılamaz.
+### 📋 A. Görev & Backlog Yönetimi (GitHub Issues + Sub-issues SSOT)
+1. **GitHub Issues + Native Sub-issues (`tools/tracker/` — Birincil):** Tüm epikler (`type:frontier`, `spec:draft` $\rightarrow$ `spec:approved`) ve yürütülebilir dikey dilim alt-biletleri (`status:ready` $\rightarrow$ `status:in-progress` $\rightarrow$ `status:done`) `tools/tracker/cli.py` üzerinden yönetilir (`gh-axi` $\rightarrow$ `gh` fallback; remote yoksa veya `--offline` / `EDGE_TRACKER=local` ile `.edge/issues/` yerel deposu). Uzak kimlik doğrulama/ağ hatasında sessizce `local`'e düşülmez (fail-fast exit `2`).
+2. **Legacy `tasks-axi` & `frontier-axi` (Soft-Deprecated):** Yalnızca mevcut/eski biletlerin geriye dönük uyumluluk fallback'i için korunur; yeni şartname, dilim ve QA park kayıtları `tools/tracker/` üzerinden açılır.
 
 ### 🐙 B. Sürüm Kontrolü ve GitHub İşlemleri
 1. **`gh-axi` (Birincil):** AXI standardında hafif siklet GitHub CLI köprüsü.

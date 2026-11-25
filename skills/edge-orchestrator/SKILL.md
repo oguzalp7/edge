@@ -88,11 +88,11 @@ brigade register <repo_path> --role coder --conversation-id <id> --model flash
 brigade register <repo_path> --role examiner --conversation-id <id> --model flash
 brigade register <repo_path> --role qa_engineer --conversation-id <id> --model flash
 
-# 3. Şartname Danışman Denetimi (Cross-Provider Spec Critic)
-brigade critique-spec <repo_path> --spec .edge/specs/<slice-adi>.md
+# 3. Şartname Danışman Denetimi (Parent Issue SSOT via tools/tracker)
+brigade critique-spec <repo_path> --issue <parent_issue>
 
-# 4. Dikey Dilimi Başlat (Treehouse Worktree Kiralar & RED_TEST Başlatır)
-brigade start-slice <repo_path> --name <slice-adi> --track feature
+# 4. Dikey Dilimi Başlat (Parent Issue = Spec SSOT, Child Issue = Ticket)
+brigade start-slice <repo_path> --name <slice-adi> --track feature --issue <child_issue> --parent-issue <parent_issue>
 
 # 5. İşi İlerlet (Deterministik Kapılar Geçişi Yönetir: VERIFY -> GATE -> [QA] -> REVIEW -> STAGING)
 brigade advance <repo_path>
@@ -129,4 +129,4 @@ brigade pause <repo_path> --reason CONTEXT_LIMIT_YELLOW
 * ❌ **Asla Ad-Hoc Persona / Rol Türetme:** `Database Operator`, `Quality Worker` gibi keyfi roller açma; yalnızca 8 kanonik Brigade istasyonunu kullan.
 * ❌ **Asla UI'ı Onaysız Geçme:** `lavish-axi` prototipi insan tarafından onaylanmadan kodlama fazını başlatma.
 * ❌ **Asla Kırmızı Test Olmadan Coder'a İşi Verme:** `seam_architect` fail eden birim testi yazmadan kodlayıcı işe başlayamaz.
-* ❌ **Asla E2E Anomalilerini Doğrudan Düzeltmeye Çalışma:** `qa_engineer` bulduğu UI/UX anomalilerini `frontier-axi`'ye loglar, kod tabanını mutasyona uğratmaz.
+* ❌ **Asla E2E Anomalilerini Doğrudan Düzeltmeye Çalışma:** `qa_engineer` bulduğu UI/UX anomalilerini `brigade qa-inspect --frontier` ile `tools/tracker/` (`type:frontier`, `track:ui`) üzerine loglar (`frontier-axi` soft-deprecated), kod tabanını mutasyona uğratmaz.
