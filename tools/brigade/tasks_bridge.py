@@ -16,41 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import yaml
 
-from tools.common import normalize_target_path
-
-
-def resolve_target_repo_root(repo_path: Union[str, Path]) -> Path:
-    """
-    Resolves the primary target repository root from either the main checkout
-    or a leased git worktree via `git rev-parse --git-common-dir`.
-    """
-    norm = normalize_target_path(repo_path)
-    try:
-        proc = subprocess.run(
-            ["git", "rev-parse", "--git-common-dir"],
-            cwd=str(norm),
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if proc.returncode == 0 and proc.stdout.strip():
-            raw_common = Path(proc.stdout.strip())
-            common_path = raw_common if raw_common.is_absolute() else (norm / raw_common)
-            resolved_common = common_path.resolve()
-            if resolved_common.name == ".git":
-                return resolved_common.parent
-            return resolved_common.parent
-    except Exception:
-        pass
-    return norm
-
-
-def atomic_write_text(out_path: Path, content: str) -> None:
-    """Atomically writes UTF-8 text via a temporary sibling file and os.replace."""
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = out_path.with_suffix(out_path.suffix + ".tmp")
-    tmp_path.write_text(content, encoding="utf-8")
-    os.replace(tmp_path, out_path)
+from tools.common.fs import atomic_write_text, resolve_target_repo_root
 
 
 def _clean_ticket_slug(slug: str) -> str:
