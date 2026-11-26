@@ -11,7 +11,7 @@ _MUTATION_TOOLS = ("write_file", "edit_file", "write_to_file", "replace_file_con
 
 def _scan_afk_file(tp: Path) -> Tuple[bool, str]:
     try:
-        with open(tp, "r", encoding="utf-8", errors="ignore") as f:
+        with open(tp, "r", encoding="utf-8-sig", errors="ignore") as f:
             head = [next(f, "") for _ in range(25)]
     except Exception:
         return False, ""

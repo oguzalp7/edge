@@ -82,7 +82,7 @@ def detect_session_role(payload: dict) -> Tuple[str, str]:
     tp = to_wsl_path(payload.get("transcriptPath", ""))
     if payload.get("transcriptPath") and tp.exists():
         try:
-            with open(tp, "r", encoding="utf-8", errors="ignore") as f:
+            with open(tp, "r", encoding="utf-8-sig", errors="ignore") as f:
                 first_lines = [line for idx, line in enumerate(f) if idx <= 25]
             if first_lines:
                 return detect_transcript_role(first_lines, normalize_role, _scan_role_in_text)

@@ -102,14 +102,14 @@ def _read_bounded_transcript(env_mod: Any, payload: Dict[str, Any]) -> Tuple[Lis
         return [], []
     try:
         head_lines: List[str] = []
-        with open(tp, "r", encoding="utf-8", errors="ignore") as fh:
+        with open(tp, "r", encoding="utf-8-sig", errors="ignore") as fh:
             for idx, line in enumerate(fh):
                 if idx >= _MAX_HEAD_LINES:
                     break
                 head_lines.append(line)
         file_size = tp.stat().st_size
         if file_size <= _MAX_TAIL_BYTES:
-            all_lines = tp.read_text(encoding="utf-8", errors="ignore").splitlines()
+            all_lines = tp.read_text(encoding="utf-8-sig", errors="ignore").splitlines()
             return head_lines, all_lines[-_MAX_TAIL_LINES:] if len(all_lines) > _MAX_TAIL_LINES else all_lines
         with open(tp, "rb") as fb:
             fb.seek(max(0, file_size - _MAX_TAIL_BYTES))

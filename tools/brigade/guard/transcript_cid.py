@@ -60,7 +60,7 @@ def _read_tail_dicts(transcript_path: str) -> List[Dict[str, Any]]:
     if not tp.exists():
         return []
     try:
-        lines = tp.read_text(encoding="utf-8", errors="ignore").splitlines()[-15:]
+        lines = tp.read_text(encoding="utf-8-sig", errors="ignore").splitlines()[-15:]
     except Exception:
         return []
     out: List[Dict[str, Any]] = []
