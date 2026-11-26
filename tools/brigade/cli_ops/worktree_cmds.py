@@ -1,10 +1,11 @@
-"""Treehouse worktree management and transcript context-heat check commands."""
+"""Isolated worktree management and transcript context-heat check commands."""
 
 import argparse
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict
 
 from tools.brigade.cli_ops._facade import resolve_symbol
+from tools.brigade.worktree_git import is_native_worktree_path
 from tools.common import normalize_target_path
 
 
@@ -16,16 +17,24 @@ def _worktree_lease(fsm: Any, args: argparse.Namespace) -> int:
     acquire_fn = resolve_symbol("acquire_worktree", "tools.brigade.worktree")
     ok, wt_path, err = acquire_fn(fsm.target_repo, branch_name=branch, lease_holder=getattr(args, "holder", "edge-brigade"))
     if not ok:
-        print(f"❌ Failed to acquire Treehouse worktree: {err}")
+        print(f"❌ Failed to acquire isolated worktree: {err}")
         return 1
     fsm.state.active_worktree = wt_path
     if fsm.state.active_ticket:
         fsm.state.active_ticket.worktree_path = wt_path
     fsm.save()
-    print("\n=======================================================\n🌳  TREEHOUSE WORKTREE LEASED\n=======================================================")
+    print("\n=======================================================\n🌳  ISOLATED WORKTREE LEASED\n=======================================================")
     print(f"Repository:      {fsm.target_repo}\nBranch:          {branch}\nWorktree Path:   {wt_path}\n=======================================================")
     print(f"\n👉 ZERO-TOUCH INVARIANT: Execute all file edits & tests inside:\n   cd {wt_path}\n")
     return 0
+
+
+def _clear_active_worktree(fsm: Any, path_to_return: str) -> None:
+    if fsm.state.active_worktree == path_to_return:
+        fsm.state.active_worktree = None
+    if fsm.state.active_ticket and fsm.state.active_ticket.worktree_path == path_to_return:
+        fsm.state.active_ticket.worktree_path = None
+    fsm.save()
 
 
 def _worktree_return(fsm: Any, args: argparse.Namespace) -> int:
@@ -34,21 +43,30 @@ def _worktree_return(fsm: Any, args: argparse.Namespace) -> int:
         print("❌ No active worktree recorded to return. Specify --path.")
         return 1
     return_fn = resolve_symbol("return_worktree", "tools.brigade.worktree")
-    ok, msg = return_fn(fsm.target_repo, path_to_return, force=getattr(args, "force", False))
+    ret_kwargs: Dict[str, Any] = {"force": getattr(args, "force", False)}
+    if is_native_worktree_path(path_to_return):
+        ret_kwargs["base_branch"] = fsm.state.base_branch or "development"
+    ok, msg = return_fn(fsm.target_repo, path_to_return, **ret_kwargs)
     if not ok:
         print(f"❌ Failed to return worktree: {msg}")
         return 1
-    if fsm.state.active_worktree == path_to_return:
-        fsm.state.active_worktree = None
-    if fsm.state.active_ticket and fsm.state.active_ticket.worktree_path == path_to_return:
-        fsm.state.active_ticket.worktree_path = None
-    fsm.save()
-    print(f"✅ Worktree at '{path_to_return}' returned to Treehouse pool.")
+    _clear_active_worktree(fsm, path_to_return)
+    print(f"✅ Worktree at '{path_to_return}' returned cleanly: {msg}")
+    return 0
+
+
+def _worktree_prune(fsm: Any, _args: argparse.Namespace) -> int:
+    prune_fn = resolve_symbol("prune_worktrees", "tools.brigade.worktree")
+    ok, msg = prune_fn(fsm.target_repo)
+    if not ok:
+        print(f"❌ Failed to prune worktrees: {msg}")
+        return 1
+    print(f"✅ {msg}")
     return 0
 
 
 def cmd_worktree(args: argparse.Namespace) -> int:
-    """Inspect, lease, or return a Treehouse worktree."""
+    """Inspect, lease, return, or prune isolated worktrees."""
     repo_path = normalize_target_path(args.repo)
     fsm = resolve_symbol("BrigadeFSM", "tools.brigade.fsm")(repo_path)
     action = getattr(args, "action", "status")
@@ -56,10 +74,12 @@ def cmd_worktree(args: argparse.Namespace) -> int:
         return _worktree_lease(fsm, args)
     if action == "return":
         return _worktree_return(fsm, args)
-    print("\n=======================================================\n🌳  TREEHOUSE WORKTREE STATUS\n=======================================================")
+    if action == "prune":
+        return _worktree_prune(fsm, args)
+    print("\n=======================================================\n🌳  ISOLATED WORKTREE STATUS\n=======================================================")
     print(f"Repository:      {fsm.target_repo}\nActive Worktree: {fsm.state.active_worktree or 'None (idle/no active lease)'}")
     ok, out, err = resolve_symbol("get_pool_status", "tools.brigade.worktree")(fsm.target_repo)
-    print(f"\n--- Treehouse Pool Status ---\n{out}" if ok else f"\n⚠️ Could not query Treehouse status: {err}")
+    print(f"\n--- Worktree Pool Status ---\n{out}" if ok else f"\n⚠️ Could not query worktree status: {err}")
     print("=======================================================\n")
     return 0
 

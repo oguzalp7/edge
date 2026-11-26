@@ -8,6 +8,7 @@ from tools.brigade.flight_recorder import FlightRecorder
 from tools.brigade.fsm_ops.constants import GREEN_HEAT_THRESHOLD, VERIFICATION_TIMEOUT_SECONDS, YELLOW_HEAT_THRESHOLD, call_facade
 from tools.brigade.models import BrigadeState, Checkpoint, ContextHeatZone, CycleState, ReviewFinding, StationRole, Ticket, TransitionLog
 from tools.brigade.worktree import acquire_worktree, is_treehouse_installed, return_worktree
+from tools.brigade.worktree_git import is_native_worktree_path
 from tools.common import normalize_target_path, run_command
 
 
@@ -63,7 +64,11 @@ class FsmStagingSyncMixin:
 
     def _prepare_primary_ff_merge(self, ticket: Ticket) -> Tuple[bool, str, Dict[str, Any]]:
         _, status_out, _ = call_facade("run_command", run_command)(["git", "status", "--porcelain"], cwd=self.target_repo)
-        if status_out.strip():
+        dirty_lines = [
+            line for line in status_out.splitlines()
+            if line.strip() and not line.lstrip().startswith("?? .edge/") and line.strip() != "?? .edge"
+        ]
+        if dirty_lines:
             return False, f"Primary repository {self.target_repo} has uncommitted dirty changes. Refusing to merge into dirty checkout.", {}
         _, curr_branch, _ = call_facade("run_command", run_command)(["git", "branch", "--show-current"], cwd=self.target_repo)
         if curr_branch.strip() != self.state.base_branch:
@@ -76,6 +81,16 @@ class FsmStagingSyncMixin:
             if not rebase_ok:
                 return False, rebase_msg, rebase_details
         return True, "", {}
+
+    def _release_completed_worktree(self, ticket: Ticket) -> None:
+        if not ticket.worktree_path:
+            return
+        ret_kwargs: Dict[str, Any] = {"force": False}
+        if is_native_worktree_path(ticket.worktree_path):
+            ret_kwargs["base_branch"] = self.state.base_branch or "development"
+        ok, wt_msg = call_facade("return_worktree", return_worktree)(self.target_repo, ticket.worktree_path, **ret_kwargs)
+        if not ok:
+            print(f"[WARN] Failed to cleanly return worktree: {wt_msg}")
 
     def guard_staging_to_completed(self) -> Tuple[bool, str, Dict[str, Any]]:
         """Executes local fast-forward merge, worktree release, recorder resolution, and radar rescan."""
@@ -91,10 +106,7 @@ class FsmStagingSyncMixin:
         code, merge_out, merge_err = call_facade("run_command", run_command)(["git", "merge", "--ff-only", ticket.branch_name], cwd=self.target_repo)
         if code != 0:
             return False, f"Failed to fast-forward merge {ticket.branch_name} into {self.state.base_branch}: {merge_err or merge_out}", {}
-        if ticket.worktree_path:
-            ok, wt_msg = call_facade("return_worktree", return_worktree)(self.target_repo, ticket.worktree_path, force=False)
-            if not ok:
-                print(f"[WARN] Failed to cleanly return worktree to Treehouse pool: {wt_msg}")
+        self._release_completed_worktree(ticket)
         try:
             call_facade("FlightRecorder", FlightRecorder)(self.target_repo, ticket.ticket_id).mark_status("RESOLVED")
         except Exception as e:

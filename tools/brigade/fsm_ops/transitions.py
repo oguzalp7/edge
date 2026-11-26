@@ -7,6 +7,7 @@ from tools.brigade.flight_recorder import FlightRecorder
 from tools.brigade.fsm_ops.constants import GREEN_HEAT_THRESHOLD, VERIFICATION_TIMEOUT_SECONDS, YELLOW_HEAT_THRESHOLD, call_facade
 from tools.brigade.models import BrigadeState, Checkpoint, ContextHeatZone, CycleState, ReviewFinding, StationRole, Ticket, TransitionLog
 from tools.brigade.worktree import acquire_worktree, is_treehouse_installed, return_worktree
+from tools.brigade.worktree_git import is_native_worktree_path
 
 
 class FsmTransitionsMixin:
@@ -95,13 +96,17 @@ class FsmTransitionsMixin:
             print(f"[WARN] Failed to record dead-end in flight recorder: {e}")
         if ticket.worktree_path:
             try:
-                call_facade("return_worktree", return_worktree)(self.target_repo, ticket.worktree_path, force=force)
+                ret_kwargs: Dict[str, Any] = {"force": force}
+                if is_native_worktree_path(ticket.worktree_path):
+                    ret_kwargs["base_branch"] = self.state.base_branch or "development"
+                    ret_kwargs["preserve_commits"] = True
+                call_facade("return_worktree", return_worktree)(self.target_repo, ticket.worktree_path, **ret_kwargs)
             except Exception as e:
                 print(f"[WARN] Failed to return worktree during abort: {e}")
 
     def abort(self, reason: str, force: bool = True, negative_constraint: Optional[str] = None) -> None:
         """
-        Aborts active cycle, releases isolated worktree back to Treehouse pool,
+        Aborts active cycle, releases isolated worktree cleanly,
         records dead-end into FlightRecorder, and resets machine to IDLE.
         """
         ticket = self.state.active_ticket

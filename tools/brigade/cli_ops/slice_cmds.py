@@ -8,7 +8,7 @@ from tools.common import normalize_target_path
 
 
 def cmd_start_slice(args: argparse.Namespace) -> int:
-    """Initiate a feature or refactor slice with an isolated Treehouse worktree."""
+    """Initiate a feature or refactor slice with an isolated worktree."""
     repo_path = normalize_target_path(args.repo)
     fsm = resolve_symbol("BrigadeFSM", "tools.brigade.fsm")(repo_path)
     expected_files = [f.strip() for f in args.expected_files.split(",") if f.strip()] if getattr(args, "expected_files", None) else None
@@ -34,7 +34,7 @@ def cmd_start_slice(args: argparse.Namespace) -> int:
             print(f"{label + ':':<17}{val}")
     if getattr(ticket, "require_qa", None) is not None:
         print(f"Require QA:      {ticket.require_qa}")
-    print(f"Test Seam:       {ticket.test_seam_command}\nWorktree Path:   {ticket.worktree_path or 'Primary (no treehouse)'}")
+    print(f"Test Seam:       {ticket.test_seam_command}\nWorktree Path:   {ticket.worktree_path or 'Primary (no worktree backend)'}")
     print("=======================================================")
     if ticket.worktree_path:
         print(f"\n🛡️ ZERO-TOUCH INVARIANT: Coder/Surgeon MUST work strictly inside:\n   cd {ticket.worktree_path}\n")

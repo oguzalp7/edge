@@ -92,15 +92,15 @@ def register_worktree_slice_parsers(subparsers: Any) -> None:
     """Register worktree, start-slice, prompt, critique-spec, and finish-slice subparsers."""
     from tools.brigade.spec_critic import FALLBACK_CRITIC_MODEL, PRIMARY_CRITIC_MODEL
 
-    p_wt = subparsers.add_parser("worktree", help="Inspect or manage Treehouse worktree pool")
+    p_wt = subparsers.add_parser("worktree", help="Inspect or manage isolated worktree pool")
     p_wt.add_argument("repo", nargs="?", default=".", help="Path to target repository (default: .)")
-    p_wt.add_argument("--action", choices=["status", "lease", "return"], default="status", help="Worktree action")
+    p_wt.add_argument("--action", choices=["status", "lease", "return", "prune"], default="status", help="Worktree action")
     p_wt.add_argument("--branch", help="Branch name for lease")
     p_wt.add_argument("--path", help="Worktree path for return")
     p_wt.add_argument("--force", action="store_true", help="Force return worktree")
     p_wt.add_argument("--holder", default="edge-brigade", help="Lease holder tag")
 
-    p_start = subparsers.add_parser("start-slice", help="Initiate a feature or refactor slice with an isolated Treehouse worktree")
+    p_start = subparsers.add_parser("start-slice", help="Initiate a feature or refactor slice with an isolated worktree")
     p_start.add_argument("repo", help="Path to target repository")
     p_start.add_argument("--name", required=True, help="Slice/feature name")
     p_start.add_argument("--track", default="feature", choices=["feature", "core", "ui"], help="Slice track")

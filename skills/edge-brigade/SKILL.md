@@ -155,11 +155,17 @@ Transitions are **stateless reducers** governed purely by process exit codes and
 
 ## 🌳 Isolated Worktree & Zero-Amnesia Flight Recorder Architecture
 
-### 1. Treehouse Worktree Pool Allocation (`treehouse get --lease`)
-- Every vertical slice (feature or refactor) runs in a dedicated, isolated git worktree leased from the Treehouse pool (`/home/oguz/.treehouse/pool/slot-N`).
+### 1. Isolated Worktree Allocation (`treehouse` Primary + Native `git worktree` Fallback)
+- Every vertical slice (feature or refactor) runs in a dedicated, isolated git worktree:
+  - **Primary (`treehouse`):** Leased via `treehouse get --lease` when installed.
+  - **Cross-OS Fallback (Native `git worktree`):** When `treehouse` is absent (Windows/macOS/Linux), `acquire_worktree` automatically falls back to native `git worktree` under `~/.edge/worktrees/<repo>-<hash6>/<sanitized-branch>` outside the repository root.
+  - **Antigravity Swarm / Subagent Isolation:** Parallel swarm workers use Antigravity's native `workspace="share"` (or `workspace="branch"`) and land changes before cleanup.
 - In feature slices, `brigade start-slice --track feature` leases the worktree upfront, preserving the Zero-Touch Primary Invariant throughout test authoring, surgery, verification, and review.
 - The primary checkout stays on `<integration_branch>` (`main` in Pure Core/`typescript`; `development` in `nextjs-drizzle-tailwind`) completely untouched during surgery, verification, and review.
-- In `guard_staging_to_completed`, changes are fast-forward merged (`git merge --ff-only`) into `<integration_branch>`, and the worktree slot is returned cleanly to the pool.
+- **Mandatory Cleanup & Zero-Data-Loss Return:**
+  - In `guard_staging_to_completed` (`brigade finish-slice`), changes are fast-forward merged (`git merge --ff-only`) into `<integration_branch>`, the worktree is removed and pruned (`git worktree remove` + `prune`), and merged branches are deleted with ancestry-guarded `git branch -d` (unmerged `--pr` branches are preserved).
+  - On `brigade abort`, native worktrees with commits ahead of base are never destroyed with `-D`; they are safely renamed to `edge/aborted/<sanitized>-<timestamp>`.
+  - Stale or orphaned worktree directories are cleaned via `brigade worktree /path/to/repo --action prune`.
 
 ### 2. Living Flight Recorder & Negative Constraints Ledger
 - Maintained under `.edge/flight-recorder/<ticket_id>.json` and `<ticket_id>-learnings.md`.
@@ -197,10 +203,11 @@ brigade register /path/to/repo --role qa_engineer --conversation-id <id> --name 
 # 3. View registered stations
 brigade stations /path/to/repo
 
-# 4. Treehouse Worktree Yönetimi
+# 4. Isolated Worktree Yönetimi (Treehouse / Native git worktree Fallback)
 brigade worktree /path/to/repo                              # Havuz durumunu göster
 brigade worktree /path/to/repo --action lease --branch feat/my-feat  # İzole slot kirala
-brigade worktree /path/to/repo --action return --force     # Worktree'yi havuza iade et
+brigade worktree /path/to/repo --action return --force     # Worktree'yi güvenli iade et
+brigade worktree /path/to/repo --action prune              # Yetim worktree dizinlerini temizle
 
 # 5. Şartname Danışman Denetimi (Parent Issue SSOT via tools/tracker)
 brigade critique-spec --issue <parent_issue> /path/to/repo

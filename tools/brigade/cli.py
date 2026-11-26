@@ -39,6 +39,8 @@ _EXTRA_EXPORTS: Dict[str, Tuple[str, str]] = {
     "return_worktree": ("tools.brigade.worktree", "return_worktree"),
     "get_pool_status": ("tools.brigade.worktree", "get_pool_status"),
     "is_treehouse_installed": ("tools.brigade.worktree", "is_treehouse_installed"),
+    "is_worktree_backend_available": ("tools.brigade.worktree", "is_worktree_backend_available"),
+    "prune_worktrees": ("tools.brigade.worktree", "prune_worktrees"),
     "run_command": ("tools.common", "run_command"),
     "normalize_target_path": ("tools.common", "normalize_target_path"),
     "toon_encode": ("tools.common", "toon_encode"),
