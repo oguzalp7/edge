@@ -2,8 +2,8 @@
 """
 Cross-OS runtime environment, configuration, and split-brain path resolution.
 @intent Provide stdlib-only OS detection, MachineConfig persistence, and host path resolution
-@concepts atomic-state-store
-@invariants [INV-BRIGADE-ATOMIC-STATE]
+@concepts cross-os-runtime-env, atomic-state-store
+@invariants [INV-BRIGADE-CROSS-OS-ENV], [INV-BRIGADE-ATOMIC-STATE]
 """
 
 from dataclasses import dataclass

@@ -2,8 +2,8 @@
 """
 Session-gated, fail-open lifecycle hook dispatcher for Edge.
 @intent Gate lifecycle hooks to active Edge sessions with stdlib-only fast-path and fail-open boundary
-@concepts zero-handoff-guard
-@invariants [INV-ORCH-HOOK-LATENCY]
+@concepts session-gated-hooks, fail-open-dispatch, cross-os-runtime-env
+@invariants [INV-ORCH-SESSION-GATE], [INV-ORCH-FAIL-OPEN], [INV-ORCH-HOOK-LATENCY]
 """
 
 import importlib.util
