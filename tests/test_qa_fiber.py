@@ -78,11 +78,8 @@ export function SampleCard({ title }: SampleCardProps) {
         )
         self.assertIsNone(loc)
 
-    @patch("tools.brigade.qa_fiber.subprocess.run")
-    def test_stage_to_frontier_cli(self, mock_run):
-        mock_proc = MagicMock()
-        mock_proc.returncode = 0
-        mock_run.return_value = mock_proc
+    def test_stage_to_frontier_cli(self):
+        from tools.tracker.local_backend import LocalTrackerBackend
 
         res = qa_fiber.stage_to_frontier(
             repo_path=self.repo_path,
@@ -90,33 +87,44 @@ export function SampleCard({ title }: SampleCardProps) {
             line_number=11,
             component="SampleCard",
             issue="Metin butondan taştı",
-            category="overflow"
+            category="overflow",
+            offline=True,
         )
         self.assertTrue(res["success"])
-        self.assertEqual(res["method"], "frontier-axi CLI")
+        self.assertEqual(res["method"], "tracker (local)")
         self.assertIn("src/components/SampleCard.tsx:11", res["title"])
         self.assertIn("Metin butondan taştı", res["title"])
         self.assertIn("(#overflow)", res["title"])
+        issues = LocalTrackerBackend(self.repo_path).list_issues(state="open", labels=["type:frontier", "track:ui"])
+        self.assertEqual(len(issues), 1)
 
     def test_stage_to_frontier_file_fallback(self):
-        # Force FileNotFoundError on subprocess to test direct .frontier.toml fallback
-        with patch("tools.brigade.qa_fiber.subprocess.run", side_effect=FileNotFoundError):
-            res = qa_fiber.stage_to_frontier(
-                repo_path=self.repo_path,
-                file_path="src/components/SampleCard.tsx",
-                line_number=11,
-                component="SampleCard",
-                issue="Font boyutu okunamıyor",
-                category="contrast"
-            )
-            self.assertTrue(res["success"])
-            self.assertEqual(res["method"], "Direct .frontier.toml append")
-            frontier_file = self.repo_path / ".frontier.toml"
-            self.assertTrue(frontier_file.exists())
-            content = frontier_file.read_text(encoding="utf-8")
-            self.assertIn("[[frontiers]]", content)
-            self.assertIn("src/components/SampleCard.tsx:11", content)
-            self.assertIn("(#contrast)", content)
+        from tools.tracker.local_backend import LocalTrackerBackend
+
+        first = qa_fiber.stage_to_frontier(
+            repo_path=self.repo_path,
+            file_path="src/components/SampleCard.tsx",
+            line_number=11,
+            component="SampleCard",
+            issue="Font boyutu okunamıyor",
+            category="contrast",
+            offline=True,
+        )
+        second = qa_fiber.stage_to_frontier(
+            repo_path=self.repo_path,
+            file_path="src/components/SampleCard.tsx",
+            line_number=11,
+            component="SampleCard",
+            issue="Font boyutu okunamıyor",
+            category="contrast",
+            offline=True,
+        )
+        self.assertTrue(first["success"])
+        self.assertTrue(second["success"])
+        self.assertIn("deduped", second["method"])
+        self.assertFalse((self.repo_path / ".frontier.toml").exists())
+        issues = LocalTrackerBackend(self.repo_path).list_issues(state="open", labels=["type:frontier"])
+        self.assertEqual(len(issues), 1)
 
     @patch("tools.brigade.qa_fiber.execute_browser_eval")
     def test_inspect_fiber_hierarchy_filtering(self, mock_eval):

@@ -7,11 +7,11 @@ Authoritative self-ontology for the `edge` plugin repository.
 | Domain | Paths | Owner |
 | :--- | :--- | :--- |
 | `orchestration` | `skills/edge-orchestrator/**`, `skills/edge-pro/**`, `skills/edge-ultra/**`, `skills/edge-antigraveyard/**`, `skills/edge-agentecho/**`, `skills/edge-technical-writing/**`, `skills/edge-gnhf/**`, `rules/**`, `agents/orchestrator.md`, `agents/spec-writer.md`, `agents/spec-critic.md`, `agents/researcher.md`, `tools/brigade/orchestrator_guard.py`, `tools/brigade/stations.py`, `tools/brigade/spec_critic.py`, `tools/brigade/tier.py`, `tools/gnhf/**`, `hooks.json` | @edge-orchestration |
-| `brigade` | `tools/brigade/cli.py`, `tools/brigade/fsm.py`, `tools/brigade/models.py`, `tools/brigade/worktree.py`, `tools/brigade/flight_recorder.py`, `tools/brigade/navigation.py`, `tools/brigade/tasks_bridge.py`, `tools/brigade/refactor_receipt.py`, `tools/common/**`, `skills/edge-brigade/**`, `skills/edge-core-refactor/**`, `skills/edge-ui-refactor/**`, `agents/seam-architect.md`, `agents/coder.md`, `agents/surgeon.md` | @edge-brigade |
+| `brigade` | `tools/brigade/cli.py`, `tools/brigade/fsm.py`, `tools/brigade/models.py`, `tools/brigade/worktree.py`, `tools/brigade/flight_recorder.py`, `tools/brigade/navigation.py`, `tools/brigade/tasks_bridge.py`, `tools/brigade/tracker_hooks.py`, `tools/brigade/refactor_receipt.py`, `tools/tracker/**`, `tools/common/**`, `skills/edge-brigade/**`, `skills/edge-core-refactor/**`, `skills/edge-ui-refactor/**`, `agents/seam-architect.md`, `agents/coder.md`, `agents/surgeon.md` | @edge-brigade |
 | `distill` | `tools/distill/**`, `tools/brigade/distill.py`, `skills/edge-distill/**` | @edge-distill |
 | `drift` | `tools/drift/**`, `skills/edge-drift/**` | @edge-drift |
 | `quality-gates` | `tools/gate.py`, `tools/rules.py`, `tools/audit/**`, `tools/ui_audit/**`, `tools/test_audit/**`, `tools/radar/**`, `tools/mutator/**`, `tools/brigade/qa_fiber.py`, `tools/brigade/security_audit.py`, `tools/brigade/smoke_routes.py`, `skills/edge-audit/**`, `skills/edge-ui-audit/**`, `skills/edge-tests-audit-typescript/**`, `skills/edge-radar/**`, `skills/edge-mutator/**`, `skills/edge-security-audit/**`, `agents/examiner.md`, `agents/qa-engineer.md` | @edge-quality |
-| `delivery` | `tools/brigade/ship_prep.py`, `skills/edge-ship/**`, `skills/edge-no-mistakes/**` | @edge-delivery |
+| `delivery` | `tools/brigade/ship_prep.py`, `tools/brigade/ship_tracker.py`, `skills/edge-ship/**`, `skills/edge-no-mistakes/**` | @edge-delivery |
 
 ## Closed Concept Glossary
 
@@ -25,6 +25,9 @@ Authoritative self-ontology for the `edge` plugin repository.
 | `exit-code-fsm` | `BrigadeFSM`, `ProofVerifier` (`tools/brigade/fsm.py`) | Deterministic phase transition state machine driven by CLI exit codes |
 | `atomic-state-store` | `DriftStateStore.save`, `FlightRecorder` (`tools/drift/models.py`, `tools/brigade/flight_recorder.py`) | Crash-safe temp-write and `os.replace` persistence for `.edge/` state |
 | `bounded-navigation` | `build_navigation_context` (`tools/brigade/navigation.py`) | Bounded <=15-line domain/index/glossary context slice with `[STALE]` checking |
+| `github-issues-ssot` | `resolve_backend`, `GhAxiBackend`, `LocalTrackerBackend` (`tools/tracker/backends.py`, `tools/tracker/gh_axi_backend.py`, `tools/tracker/local_backend.py`) | GitHub Issues and native sub-issues SSOT (`gh-axi -> gh -> local`) with offline/no-remote fallback |
+| `fail-fast-tracker-auth` | `TrackerAuthError`, `preflight_ticket_tracker` (`tools/tracker/models.py`, `tools/brigade/tracker_hooks.py`) | Fail-fast exit code 2 preflight on missing binary or auth/network failure before git mutations |
+| `ephemeral-spec-cache` | `cache_issue_spec`, `resolve_slice_issue_spec` (`tools/tracker/cache.py`, `tools/brigade/tracker_hooks.py`) | Non-archived primary-root local cache of tracker issue specifications |
 | `watermark-harvest` | `TranscriptGraphHarvester`, `DistillWatermarkState` (`tools/distill/harvester.py`, `tools/distill/models.py`) | Incremental zero-token session harvesting keyed by conversation watermark |
 | `lexical-stack-gate` | `LexicalStackGate`, `CandidatePool` (`tools/distill/state.py`) | Deterministic classification between `REPO_LOCAL` overlays and `PLUGIN_CANDIDATE` rules |
 | `line-budget-ceiling` | `check_line_budget`, `collect_budget_targets` (`tools/distill/state.py`) | Hard physical line caps on agent rubrics (`<=60`L) and station overlays (`<=40`L) |

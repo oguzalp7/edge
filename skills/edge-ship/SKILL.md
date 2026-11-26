@@ -27,7 +27,7 @@ user-invocable: true
 ## 🎯 Purpose & PR Body Contract
 
 - **Lean 2-Section PR Body & 1-Minute Briefing:** Emits concise `## Summary` starting with a **1-Minute Briefing** (*What changed*, *Why*, *Risk / Blast Radius*, *Verification* — 60-second scannable overview with verified counts) followed by code-only changed file count, `### Spec Expectations vs. Realization` diff + `AC`/`IC` criteria matrix, `### Architecture & Call-Stack Flow` Mermaid/call-stack blocks, `specs/INDEX.md`, `CONTEXT.md`, and `## Evidence` (spec link, Gate status, `### Examiner 3-Axis Seal` with collapsible repo-relative artifacts, `### Live QA Proof & Visual Evidence` with visited routes, collapsible E2E actions, formatted `db_crosscheck` JSON, and titled visual gallery).
-- **Refactor Receipts & Door Brakes (`kind="refactor"`):** Discovers valid non-stale `.edge/receipts/refactor/<slug>.json` receipts bound to `(commit_sha, changed_files_hash)` under `target_repo`, builds `refactor(<slug>):` `SpecShipPlan` entries (avoiding `ship/<slug>` collisions via `ship/refactor-<slug>`), renders a `### Before/After Metric Delta` table under `## Summary` + `RefactorReceipt` / Gate / `Examiner 3-Axis Seal` under `## Evidence`, and enforces refactor One-Way Door brakes (exported public API removal/signature break, whole-segment auth/security paths excluding `sessionStorage.ts`/`authorName.tsx`, `> 15` files, or `> 500` diff lines). Two-Way Door PRs with `--auto` queued enter `AWAITING_MERGE` until `brigade confirm-merge` confirms `MERGED` and completes `tasks-axi done`.
+- **Refactor Receipts & Door Brakes (`kind="refactor"`):** Discovers valid non-stale `.edge/receipts/refactor/<slug>.json` receipts bound to `(commit_sha, changed_files_hash)` under `target_repo`, builds `refactor(<slug>):` `SpecShipPlan` entries (avoiding `ship/<slug>` collisions via `ship/refactor-<slug>`), renders a `### Before/After Metric Delta` table under `## Summary` + `RefactorReceipt` / Gate / `Examiner 3-Axis Seal` under `## Evidence`, and enforces refactor One-Way Door brakes (exported public API removal/signature break, whole-segment auth/security paths excluding `sessionStorage.ts`/`authorName.tsx`, `> 15` files, or `> 500` diff lines). Two-Way Door PRs with `--auto` queued enter `AWAITING_MERGE` until `brigade confirm-merge` confirms `MERGED`, sets `status:done` via `tools/tracker`, and closes the child issue (soft-deprecating `tasks-axi done`). Passing `--issue <C> --parent-issue <P>` to `prepare-ship` caches `.edge/cache/issues/<C>.md` and emits `Closes #<C>` + `Parent Spec: #<P>` without auto-closing the parent.
 - **Decoupled from `/edge-no-mistakes`:** Primary delivery uses native `brigade` + `gh` / `gh-axi` + CI. For optional external auditing, invoke `/edge-no-mistakes` separately.
 
 ---
@@ -59,7 +59,7 @@ Discover changed specs in `development..HEAD` (or `origin/development..developme
 python3 tools/brigade/cli.py prepare-ship . --base development --split-branches --publish-evidence --evidence-branch edge-qa-evidence --format json --out .edge/ship-payload.json
 
 # Or inspect / target a single spec slice (omitting --base also defaults to development)
-python3 tools/brigade/cli.py prepare-ship . --base development --spec <spec-slug> --format pr
+python3 tools/brigade/cli.py prepare-ship . --base development --issue <child_num> --parent-issue <parent_num> --format pr
 ```
 
 ### Step 3: Push & Per-Spec PR Creation (`gh pr create --base development`)

@@ -14,8 +14,8 @@ description: Git-diff gated domain contract drift detector, ephemeral spec archi
 ## 🏛️ The "Scaffolding vs. Domain Deed (Tapu)" Doctrine
 
 In fast-moving agentic workflows, specifications tend to scatter and rot:
-1. **İskele (Ephemeral Task/Slice Specs - `.edge/specs/*.md`):**  
-   Temporary construction scaffolding written by `SPEC_WRITER` to execute a single vertical slice. Once tests are green and the code is merged, keeping task specs active causes context noise, hallucinations, and confusion. They must be safely moved to `.edge/archive/specs/`.
+1. **İskele (Tracker Issue Cache `.edge/cache/issues/*.md` & Soft-Deprecated `.edge/specs/*.md`):**  
+   Slice specifications now live as GitHub Issues via `tools/tracker` and are cached locally under `.edge/cache/issues/` (never archived). Legacy `.edge/specs/*.md` scaffolding is soft-deprecated and moved to `.edge/archive/specs/` on completion.
 2. **Tapu (Canonical Domain Deeds - `docs/<domain>/DOMAIN.md`):**  
    Pure abstract, 100% code-free behavioral deeds ("Tapu") declaring `- **Owner / DRI:**`, `- **Concepts:**`, living invariants (`[INV-*]`), adopted patterns (`[PAT-*]`), and optional `mermaid`/`pseudo` diagrams (guarded by `CODE_LEAK_IN_DOMAIN_DOC`). Domain-to-glob ownership lives canonically in `CONTEXT.md` `## Domain Map` (falling back to `DOMAIN.md` `Paths:` or legacy `docs/domains/<domain>.md` only when absent; `docs/domains/DOMAIN.md` is rejected as a collision).
 
@@ -144,7 +144,7 @@ Distills scattered specs and live code into a domain deed (`docs/<domain>/DOMAIN
 python tools/drift/cli.py consolidate . \
   --domain bookings \
   --paths "src/lib/bookings/**,src/actions/bookings.ts" \
-  --sources ".edge/specs/slice-booking-calendar.md,.edge/specs/slice-cancellation.md" \
+  --issue 10 \
   --archive-sources
 ```
 
@@ -167,8 +167,8 @@ If the live code changes represent intentional, approved architectural enhanceme
 ### 🚨 Path B: Broken Invariant or Shortcut (Fix the Implementation)
 If the live code took an illegal shortcut (e.g. bypassing repository boundary, importing raw DB queries in UI actions):
 1. Review findings in `.edge/drift/latest-drift-report.md`.
-2. File an immediate remediation ticket via `tasks-axi` or `frontier-axi`:
+2. File an immediate remediation ticket via `tools/tracker/cli.py` (`tasks-axi` and `frontier-axi` are soft-deprecated):
    ```bash
-   tasks-axi add "Fix DB leak in src/actions/bookings.ts violating bookings domain contract"
+   python3 tools/tracker/cli.py create . --title "Fix DB leak in src/actions/bookings.ts" --label track:core --label status:ready
    ```
 3. Run the slice through Edge Brigade to restore alignment with the contract.

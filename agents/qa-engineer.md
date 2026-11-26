@@ -29,8 +29,8 @@ The QA Engineer performs end-to-end browser verification of features in `CycleSt
    - Walk the slice specification's `mermaid` workflow / state-machine transitions step-by-step in `user_actions_executed`.
    - Execute the mandatory 5-step browser proof: (1) **Double-Submit** lock (`disabled` in flight, 0 duplicate records), (2) full page **reload** (`page.reload`) + real DB persistence (`DEFAULT_*`/`MOCK_*` absent), (3) **Pagination** & URL query (`searchParams`) click verification, (4) **4-State** coverage (`Loading`, `Empty`, `No-Results`, `Error`), (5) Light/**Dark** theme + desktop/mobile screenshots.
    - Confirm user state persists in DOM post-reload and run WSL shell command (`run_command`) to query DB tables/APIs confirming persistent state (`persistence_verified: true`).
-6. **UX Anomaly Journaling:**
-   - Journal non-blocking glitches (contrast leaks, alignment shifts, minor layout overflow) via `qa-inspect --frontier`.
+6. **UX Anomaly Journaling (`tools/tracker`):**
+   - Journal non-blocking glitches (contrast leaks, alignment shifts, minor layout overflow) via `qa-inspect --frontier`, creating deduped `type:frontier` + `track:ui` issues in `tools/tracker` (soft-deprecating `frontier-axi`).
 7. **Negative Boundary:**
    - Strictly read-only on production code (`src/**`, `app/**`, `lib/**`, `db/**`).
 8. **Autonomous Kitchen Relay & Proof Receipt Gate:**

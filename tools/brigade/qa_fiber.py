@@ -219,49 +219,48 @@ def stage_to_frontier(
     line_number: int,
     component: str,
     issue: str,
-    category: Optional[str] = None
+    category: Optional[str] = None,
+    offline: bool = False,
 ) -> Dict[str, Any]:
-    """Stages an anomaly or visual bug into frontier-axi in TOON format."""
+    """Stages an anomaly or visual bug into the tracker frontier (`type:frontier`, `track:ui`)."""
+    from tools.tracker.backends import resolve_backend
+
     cat_tag = f" (#{category.lstrip('#')})" if category else ""
     title = f"[e2e-journal] {file_path}:{line_number} ({component}) - {issue}{cat_tag}"
-    
-    # Generate slug ID
-    slug_base = re.sub(r"[^a-zA-Z0-9]+", "-", f"e2e-{component}-{issue[:20]}").strip("-").lower()
-    item_id = slug_base[:40]
+    backend = resolve_backend(repo_path, offline=offline)
 
-    cmd = ["frontier-axi", "add", item_id, title]
-    try:
-        proc = subprocess.run(
-            cmd,
-            cwd=str(repo_path),
-            capture_output=True,
-            text=True,
-            check=False
-        )
-        if proc.returncode == 0:
-            return {"success": True, "method": "frontier-axi CLI", "id": item_id, "title": title}
-    except FileNotFoundError:
-        pass
+    existing = backend.list_issues(state="open", labels=["type:frontier"])
+    for item in existing:
+        if item.title == title or (f"{file_path}:{line_number}" in item.title and issue in item.title):
+            return {
+                "success": True,
+                "method": f"tracker ({backend.kind}, deduped)",
+                "id": str(item.number),
+                "issue_number": item.number,
+                "title": item.title,
+                "url": item.url,
+            }
 
-    # Fallback: append directly to .frontier.toml if frontier-axi CLI is not in path
-    frontier_toml = repo_path / ".frontier.toml"
-    try:
-        from datetime import date
-        today = date.today().isoformat()
-        entry = f"""
-[[frontiers]]
-id = "{item_id}"
-title = "{title}"
-state = "open"
-created = "{today}"
-updated = "{today}"
-body = "Automated visual anomaly detected by QA Engineer (Sommelier) during browser verification."
-"""
-        with open(frontier_toml, "a", encoding="utf-8") as f:
-            f.write(entry)
-        return {"success": True, "method": "Direct .frontier.toml append", "id": item_id, "title": title}
-    except Exception as e:
-        return {"success": False, "error": f"Failed to stage to frontier: {str(e)}", "title": title}
+    body = (
+        "Automated visual anomaly detected by QA Engineer (Sommelier) during browser verification.\n\n"
+        f"- **File:** `{file_path}:{line_number}`\n"
+        f"- **Component:** `{component}`\n"
+        f"- **Category:** `{category or 'ui'}`\n"
+        f"- **Issue:** {issue}\n"
+    )
+    created = backend.create_issue(
+        title=title,
+        body=body,
+        labels=["type:frontier", "track:ui", "status:ready"],
+    )
+    return {
+        "success": True,
+        "method": f"tracker ({backend.kind})",
+        "id": str(created.number),
+        "issue_number": created.number,
+        "title": created.title,
+        "url": created.url,
+    }
 
 
 def inspect_fiber(
@@ -269,7 +268,8 @@ def inspect_fiber(
     repo_path_str: str = ".",
     log_frontier: bool = False,
     issue: str = "",
-    category: Optional[str] = None
+    category: Optional[str] = None,
+    offline: bool = False,
 ) -> Dict[str, Any]:
     """High-level inspection function bridging DOM query to source code and frontier."""
     repo_path = Path(normalize_target_path(repo_path_str))
@@ -318,7 +318,8 @@ def inspect_fiber(
             line_number=source_location["line"],
             component=selected_component,
             issue=issue,
-            category=category
+            category=category,
+            offline=offline,
         )
 
     return {

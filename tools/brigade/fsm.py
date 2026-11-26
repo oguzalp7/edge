@@ -1363,6 +1363,7 @@ class BrigadeFSM:
 
         candidates: List[Path] = []
         edge_specs_dir = (self.target_repo / ".edge" / "specs").resolve()
+        edge_cache_dir = (self.target_repo / ".edge" / "cache").resolve()
 
         if ticket.spec_path:
             p = Path(ticket.spec_path)
@@ -1371,7 +1372,8 @@ class BrigadeFSM:
             if p.exists() and p.is_file():
                 try:
                     p_resolved = p.resolve()
-                    if edge_specs_dir in p_resolved.parents or p_resolved.parent == edge_specs_dir:
+                    in_cache = p_resolved == edge_cache_dir or edge_cache_dir in p_resolved.parents
+                    if not in_cache and (edge_specs_dir in p_resolved.parents or p_resolved.parent == edge_specs_dir):
                         candidates.append(p)
                 except Exception:
                     pass
@@ -1986,6 +1988,9 @@ class BrigadeFSM:
         spec_path: Optional[str] = None,
         lavish_path: Optional[str] = None,
         require_qa: Optional[bool] = None,
+        issue_number: Optional[int] = None,
+        parent_issue: Optional[int] = None,
+        offline: bool = False,
     ) -> Tuple[bool, Optional[Ticket], str]:
         """
         Deterministically initiates a live feature or refactor slice:
@@ -2040,11 +2045,21 @@ class BrigadeFSM:
                 if cand_domain.exists():
                     resolved_lavish = str(cand_domain.relative_to(self.target_repo)).replace("\\", "/")
 
+        from .tracker_hooks import mark_issue_in_progress, resolve_slice_issue_spec
+
+        eff_spec_path, eff_issue_number, eff_parent_issue = resolve_slice_issue_spec(
+            self.target_repo,
+            issue_number=issue_number,
+            parent_issue=parent_issue,
+            spec_path=spec_path,
+            offline=offline,
+        )
+
         eff_expected_files = list(expected_files or [])
         if not eff_expected_files:
             eff_expected_files = _extract_spec_expected_files(
                 repo_path=self.target_repo,
-                spec_path=spec_path,
+                spec_path=eff_spec_path,
                 clean_name=clean_name,
             )
 
@@ -2071,9 +2086,12 @@ class BrigadeFSM:
             enforce_contraction=False,
             allow_schema_migration=allow_schema_migration,
             expected_files=eff_expected_files,
-            spec_path=spec_path,
+            spec_path=eff_spec_path,
             lavish_path=resolved_lavish,
             require_qa=require_qa,
+            issue_number=eff_issue_number,
+            parent_issue=eff_parent_issue,
+            tracker_offline=bool(offline),
             before_metrics=before_metrics,
             surgeon_cid=surgeon_cid,
             negative_constraints=all_constraints,
@@ -2101,6 +2119,7 @@ class BrigadeFSM:
             expected_files=ticket.expected_files,
         )
 
+        mark_issue_in_progress(self.target_repo, eff_issue_number, offline=offline)
         self.state.active_ticket = ticket
         self.state.active_branch = branch_name
         if track == "feature":
@@ -2334,9 +2353,9 @@ class BrigadeFSM:
             rec_data = None
         return True, "", rec_data
 
-    def _finish_slice_via_pr(self, ticket: Ticket, auto_merge_two_way: bool = True) -> Tuple[bool, str]:
+    def _finish_slice_via_pr(self, ticket: Ticket, auto_merge_two_way: bool = True, offline: bool = False) -> Tuple[bool, str]:
         from .ship_prep import prepare_ship_payload
-        from .tasks_bridge import complete_linked_task
+        from .tracker_hooks import warn_complete_ticket_tracker_issue
 
         is_refactor_track = getattr(ticket, "track", "core") in ("core", "ui")
         diff_repo = normalize_target_path(ticket.worktree_path) if ticket.worktree_path else self.target_repo
@@ -2408,7 +2427,7 @@ class BrigadeFSM:
 
             if is_refactor_track:
                 if pr_state == "MERGED":
-                    complete_linked_task(getattr(ticket, "tasks_axi_id", None), eff_url)
+                    warn_complete_ticket_tracker_issue(self.target_repo, ticket, eff_url, offline=offline)
                     self._reset_after_slice_finish(ticket)
                     return True, f"Two-way door PR ({eff_url or pr_title}) merged into {self.state.base_branch}."
                 ticket.pr_url = eff_url
@@ -2432,7 +2451,7 @@ class BrigadeFSM:
                     f"state transitioned to AWAITING_MERGE."
                 )
 
-            complete_linked_task(getattr(ticket, "tasks_axi_id", None), eff_url)
+            warn_complete_ticket_tracker_issue(self.target_repo, ticket, eff_url, offline=offline)
             self._reset_after_slice_finish(ticket)
             return True, f"Two-way door PR ({pr_title}) created and auto-merged into {self.state.base_branch}."
 
@@ -2446,9 +2465,9 @@ class BrigadeFSM:
         self._reset_after_slice_finish(ticket)
         return True, f"Two-way door PR ({pr_title}) created and auto-merged into {self.state.base_branch}."
 
-    def confirm_merge(self) -> Tuple[bool, str]:
-        """Confirms a queued AWAITING_MERGE PR has merged, completes tasks-axi, and resets FSM to IDLE."""
-        from .tasks_bridge import complete_linked_task
+    def confirm_merge(self, offline: bool = False) -> Tuple[bool, str]:
+        """Confirms a queued AWAITING_MERGE PR has merged, completes tracker issue, and resets FSM to IDLE."""
+        from .tracker_hooks import complete_ticket_tracker_issue
 
         ticket = self.state.active_ticket
         if not ticket or self.state.current_state != CycleState.AWAITING_MERGE:
@@ -2471,26 +2490,37 @@ class BrigadeFSM:
             return False, f"PR '{ref}' is not merged yet (state: {pr_state or 'UNKNOWN'}). Remaining in AWAITING_MERGE."
 
         eff_url = viewed_url or getattr(ticket, "pr_url", "") or ""
-        complete_linked_task(getattr(ticket, "tasks_axi_id", None), eff_url)
+        t_ok, t_msg = complete_ticket_tracker_issue(self.target_repo, ticket, eff_url, offline=offline)
+        if not t_ok:
+            print(f"[WARN] {t_msg}")
         self._reset_after_slice_finish(ticket)
         return True, f"PR {eff_url or ref} confirmed MERGED; linked task completed and FSM reset to IDLE."
 
-    def finish_slice(self, open_pr: bool = False, auto_merge_two_way: bool = True) -> Tuple[bool, str]:
+    def finish_slice(self, open_pr: bool = False, auto_merge_two_way: bool = True, offline: bool = False) -> Tuple[bool, str]:
         """
         Fast-forward merges the active slice worktree into base_branch (development),
         or opens a Spec-Anchored GitHub PR when open_pr=True (auto-merging Two-Way Doors
         and holding One-Way Doors open for mandatory human review).
         """
+        from .tracker_hooks import complete_ticket_tracker_issue, preflight_ticket_tracker
+
         ticket = self.state.active_ticket
         if not ticket:
             return False, "No active slice or ticket to finish. Brigade is IDLE."
 
+        preflight_ticket_tracker(self.target_repo, ticket, offline=offline)
+
         if open_pr:
-            return self._finish_slice_via_pr(ticket, auto_merge_two_way=auto_merge_two_way)
+            return self._finish_slice_via_pr(ticket, auto_merge_two_way=auto_merge_two_way, offline=offline)
 
         ok, msg, details = self.guard_staging_to_completed()
         if not ok:
             return False, f"Finish slice failed: {msg}"
+
+        t_ok, t_msg = complete_ticket_tracker_issue(self.target_repo, ticket, offline=offline)
+        if not t_ok:
+            print(f"[WARN] {t_msg}")
+            msg = f"{msg} (Warning: {t_msg})"
 
         self.state.active_ticket = None
         self.state.active_branch = None

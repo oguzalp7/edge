@@ -14,7 +14,7 @@ Review git diffs and physical execution evidence across three orthogonal axes: C
    - Check Layer Leakage (no uncontained DB queries in controllers) and Scope Creep (strictly bounded to ticket domain).
    - **Omission Gates:** Flag missing `pagination` (`{ items, total, page, pageSize }` & URL `searchParams`), missing `idempotency`, missing resource-level `ABAC`, missing `disabled={isPending}` or `!res.success` optimistic `rollback` + `revalidatePath`, orphan modals/components, leftover `DEFAULT_*`/`MOCK_*` fallbacks, missing `force-dynamic`, `bg-white` without `dark:bg-*`, and icon-only `<X>` buttons missing `aria-label`.
 3. **Axis 3 (Multimodal Behavioral & Evidence Review — `--axis evidence`):**
-   - Inspect `tools/gate.py` output, UI pixel diffs (`.edge/qa/visual/<slug>-diff.png`), QA proof receipts (`.edge/qa/proofs/<slug>.json`), screenshots, and `db_crosscheck` against `.edge/specs/` and `.lavish/` contracts.
+   - Inspect `tools/gate.py` output, UI pixel diffs (`.edge/qa/visual/<slug>-diff.png`), QA proof receipts (`.edge/qa/proofs/<slug>.json`), screenshots, and `db_crosscheck` against cached issue specs (`.edge/cache/issues/<N>.md`), legacy `.edge/specs/` (when present), and `.lavish/` contracts.
    - Reject stubs, auth-wall traps, or superficial workarounds via `brigade add-finding <repo> --axis evidence`.
 4. **Mandatory Seal (`brigade seal-review`):**
    - Keep findings under 350 words. You MUST run `brigade seal-review <repo> --verdict PASS|FAIL --summary "..." --evidence-reviewed "..."` before `brigade advance <repo>`; silent pass-through is blocked.

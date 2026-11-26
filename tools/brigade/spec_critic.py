@@ -140,19 +140,36 @@ def _resolve_spec_path(norm_repo: Path, spec_path: Union[Path, str]) -> Path:
 
 def run_spec_critique(
     repo_path: Union[Path, str],
-    spec_path: Union[Path, str],
+    spec_path: Optional[Union[Path, str]] = None,
     primary_model: str = PRIMARY_CRITIC_MODEL,
     fallback_model: str = FALLBACK_CRITIC_MODEL,
     timeout: int = 180,
+    issue_number: Optional[int] = None,
+    offline: bool = False,
+    post_comment: bool = True,
 ) -> SpecCritiqueResult:
     """
     Executes an advisory single-shot critique of the target specification.
-    Invokes primary model with transparent fallback to secondary model on quota/failure.
-    Atomically writes the resulting critique report to .edge/specs/<spec_stem>-critique.md.
-    Advisory invariant: Does not mutate .edge/brigade.json or lock FSM transitions.
+    Supports either a file `spec_path` or a tracker `issue_number` (caching the
+    issue spec under `.edge/cache/issues/<N>.md` and optionally posting a comment).
     """
+    from tools.common.fs import atomic_write_text, resolve_target_repo_root
+    from tools.tracker.backends import resolve_backend
+    from tools.tracker.cache import cache_issue_spec
+
     norm_repo = normalize_target_path(repo_path)
-    resolved_spec = _resolve_spec_path(norm_repo, spec_path)
+    tracker_backend = None
+    if issue_number is not None:
+        tracker_backend = resolve_backend(norm_repo, offline=offline)
+        issue = tracker_backend.get_issue(int(issue_number), include_comments=False)
+        resolved_spec = cache_issue_spec(norm_repo, issue)
+    elif spec_path is not None:
+        resolved_spec = _resolve_spec_path(norm_repo, spec_path)
+    else:
+        return SpecCritiqueResult(
+            success=False, model_used="", fallback_triggered=False,
+            report_path="", summary="", error="Either spec_path or issue_number must be provided.",
+        )
 
     if not resolved_spec.is_file():
         return SpecCritiqueResult(
@@ -202,18 +219,14 @@ def run_spec_critique(
         fallback_triggered = True
         model_used = fallback_model
 
-    specs_dir = norm_repo / ".edge" / "specs"
-    report_file = specs_dir / f"{resolved_spec.stem}-critique.md"
-    tmp_file = specs_dir / f"{resolved_spec.stem}-critique.md.tmp.{os.getpid()}"
-
-    if tmp_file.exists():
-        try:
-            tmp_file.unlink()
-        except OSError:
-            pass
+    if issue_number is not None:
+        report_dir = resolve_target_repo_root(norm_repo) / ".edge" / "cache" / "issues"
+        report_file = report_dir / f"{int(issue_number)}-critique.md"
+    else:
+        report_dir = norm_repo / ".edge" / "specs"
+        report_file = report_dir / f"{resolved_spec.stem}-critique.md"
 
     if code == 0 and out.strip() and not _should_fallback(code, out, err):
-        specs_dir.mkdir(parents=True, exist_ok=True)
         gen_time = datetime.now(timezone.utc).isoformat()
         report_content = (
             f"# Spec Critique: {resolved_spec.name}\n\n"
@@ -224,15 +237,9 @@ def run_spec_critique(
             f"---\n\n"
             f"{out.strip()}\n"
         )
-        try:
-            tmp_file.write_text(report_content, encoding="utf-8")
-            os.replace(tmp_file, report_file)
-        finally:
-            if tmp_file.exists():
-                try:
-                    tmp_file.unlink()
-                except OSError:
-                    pass
+        atomic_write_text(report_file, report_content)
+        if tracker_backend is not None and issue_number is not None and post_comment:
+            tracker_backend.add_comment(int(issue_number), report_content)
 
         summary_line = out.strip().split("\n\n")[0] if "\n\n" in out.strip() else out.strip()[:200]
         return SpecCritiqueResult(
@@ -243,12 +250,6 @@ def run_spec_critique(
             summary=summary_line,
             error=None,
         )
-
-    if tmp_file.exists():
-        try:
-            tmp_file.unlink()
-        except OSError:
-            pass
 
     error_msg = err.strip() if err.strip() else "Process exited with non-zero code or empty output"
     return SpecCritiqueResult(

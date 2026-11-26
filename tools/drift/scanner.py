@@ -113,6 +113,13 @@ def archive_ephemeral_spec(
     if not spec_file.exists() or not spec_file.is_file():
         return None
 
+    from tools.common.fs import resolve_target_repo_root
+
+    resolved_spec = spec_file.resolve()
+    cache_roots = [(norm_repo / ".edge" / "cache").resolve(), (resolve_target_repo_root(norm_repo) / ".edge" / "cache").resolve()]
+    if any(resolved_spec == c or c in resolved_spec.parents for c in cache_roots):
+        return None
+
     archive_dir = norm_repo / ".edge" / "archive" / "specs"
     archive_dir.mkdir(parents=True, exist_ok=True)
 
@@ -184,10 +191,10 @@ def _discover_domain_contract_files(
     return entries
 
 
-def discover_specs(repo_path: Union[Path, str]) -> SpecDiscoveryReport:
+def discover_specs(repo_path: Union[Path, str], include_cached_issues: bool = True) -> SpecDiscoveryReport:
     """
     Finds canonical docs/<domain>/DOMAIN.md & docs/domains/*.md contracts vs scattered
-    ephemeral/task specs under .edge/specs/*.md, specs/*.md, and docs/**/*.md.
+    ephemeral/task specs under .edge/specs/*.md, specs/*.md, docs/**/*.md, and cached issues.
     """
     norm_repo = normalize_target_path(repo_path)
     contracts = _discover_domain_contract_files(norm_repo)
@@ -214,6 +221,14 @@ def discover_specs(repo_path: Union[Path, str]) -> SpecDiscoveryReport:
         if p.name.lower() in EXCLUDED_SPEC_NAMES:
             continue
         ephemeral_candidates.append(rel)
+
+    if include_cached_issues:
+        from tools.drift.tracker_specs import list_cached_issue_specs
+
+        for cached_rel in list_cached_issue_specs(norm_repo):
+            if cached_rel not in seen:
+                seen.add(cached_rel)
+                ephemeral_candidates.append(cached_rel)
 
     return SpecDiscoveryReport(
         domain_contracts=domain_contracts,
