@@ -45,7 +45,7 @@ def _check_no_mistakes_transcript(payload: Dict[str, Any]) -> Optional[str]:
     if not t_path or not t_path.is_file():
         return None
     try:
-        with open(t_path, "r", encoding="utf-8", errors="ignore") as f:
+        with open(t_path, "r", encoding="utf-8-sig", errors="ignore") as f:
             head = "".join(line for idx, line in enumerate(f) if idx < 25)
         marker = _find_marker_in_text(head)
         return f"transcript:{marker}" if marker else None

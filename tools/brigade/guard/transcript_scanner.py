@@ -47,7 +47,7 @@ def _scan_parent_line(line_str: str, pending_roles: List[str], pairs: List[Tuple
 def _sum_transcript_heat(transcript: Path) -> Tuple[int, bool]:
     total_tokens, total_chars, found_explicit = 0, 0, False
     try:
-        lines = transcript.read_text(encoding="utf-8", errors="ignore").splitlines(keepends=True)
+        lines = transcript.read_text(encoding="utf-8-sig", errors="ignore").splitlines(keepends=True)
     except Exception:
         return 0, False
     for line in lines:
@@ -72,7 +72,7 @@ class TranscriptStationScanner:
         pairs: List[Tuple[str, str]] = []
         pending_roles: List[str] = []
         try:
-            for line_str in parent_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            for line_str in parent_path.read_text(encoding="utf-8-sig", errors="ignore").splitlines():
                 _scan_parent_line(line_str, pending_roles, pairs)
         except Exception:
             pass

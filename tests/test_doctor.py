@@ -210,6 +210,33 @@ def test_probe_binary_available_missing_and_timeout(monkeypatch: pytest.MonkeyPa
     assert isinstance(timeout_res.to_dict(), dict)
 
 
+def test_probe_binary_python_sys_executable_fallback_when_which_missing_or_store_stub(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checks = importlib.import_module("tools.doctor.checks")
+    expected_ver = f"Python {sys.version.split()[0]}"
+
+    # 1. shutil.which returns None (e.g. uv-cached CPython on Windows not on PATH)
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
+    py_res = checks.probe_binary("python")
+    assert py_res.available is True
+    assert py_res.path == sys.executable
+    assert py_res.version == expected_ver
+
+    # 2. shutil.which returns WindowsApps Store stubs -> ignored, falls back to sys.executable
+    monkeypatch.setattr(
+        shutil,
+        "which",
+        lambda name: rf"C:\Users\alice\AppData\Local\Microsoft\WindowsApps\{name}.exe"
+        if name in ("python", "python3")
+        else None,
+    )
+    stub_res = checks.probe_binary("python")
+    assert stub_res.available is True
+    assert stub_res.path == sys.executable
+    assert stub_res.version == expected_ver
+
+
 def test_check_hooks_health_valid_and_broken_cases(tmp_path: Path) -> None:
     checks = importlib.import_module("tools.doctor.checks")
 
@@ -244,6 +271,16 @@ def test_check_hooks_health_valid_and_broken_cases(tmp_path: Path) -> None:
         (crlf_root / "hooks" / "dispatch.cmd").write_bytes(b": << 'CMDBLOCK'\r\n@echo off\r\nCMDBLOCK\r\n")
         os.chmod(crlf_root / "hooks" / "dispatch.cmd", 0o755)
         assert _is_hooks_healthy(checks.check_hooks_health(crlf_root)) is False
+
+    # 6. Regression: unprefixed "hooks/dispatch.cmd" (vulnerable to Windows cmd /c quote stripping) fails
+    unprefixed_root = _make_healthy_plugin_tree(tmp_path / "unprefixed_cmd")
+    old_hooks = (unprefixed_root / "hooks.json").read_text(encoding="utf-8").replace(
+        'cd . && \\"hooks/dispatch.cmd\\"', '\\"hooks/dispatch.cmd\\"'
+    )
+    (unprefixed_root / "hooks.json").write_text(old_hooks, encoding="utf-8")
+    unprefixed_res = checks.check_hooks_health(unprefixed_root)
+    assert _is_hooks_healthy(unprefixed_res) is False
+    assert any("cmd /c" in issue for issue in unprefixed_res.issues)
 
 
 def test_build_capability_matrix_lite_core_full_and_browser_aliases() -> None:

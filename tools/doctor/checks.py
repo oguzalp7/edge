@@ -12,7 +12,8 @@ from pathlib import Path
 import shutil
 import stat
 import subprocess
-from typing import Dict, Iterable, List, Optional, Tuple
+import sys
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from tools.common.env import detect_os_mode
 from .models import CapabilityEntry, HooksHealthResult, ToolProbeResult
@@ -41,20 +42,29 @@ def _extract_version_line(stdout: str, stderr: str) -> str:
     return ""
 
 
+def _is_windows_store_stub(path_str: str) -> bool:
+    norm = path_str.replace("\\", "/").lower()
+    return "/microsoft/windowsapps/" in norm or "/windowsapps/" in norm
+
+
 def _resolve_binary_path(name: str) -> Optional[str]:
-    found = shutil.which(name)
-    if found:
-        return found
-    if name == "python":
-        return shutil.which("python3")
+    candidates = ("python", "python3") if name == "python" else (name,)
+    for candidate in candidates:
+        found = shutil.which(candidate)
+        if found and not (name == "python" and _is_windows_store_stub(found)):
+            return found
     return None
 
 
-def probe_binary(name: str, timeout: int = 3) -> ToolProbeResult:
-    """Probe a single binary using shutil.which and a bounded version check."""
-    resolved = _resolve_binary_path(name)
-    if not resolved:
-        return ToolProbeResult(name=name, available=False)
+def _fallback_sys_python() -> ToolProbeResult:
+    exe = sys.executable or ""
+    if exe and Path(exe).is_file() and sys.version:
+        ver = sys.version.split()[0]
+        return ToolProbeResult(name="python", available=True, path=exe, version=f"Python {ver}")
+    return ToolProbeResult(name="python", available=False)
+
+
+def _run_version_probe(name: str, resolved: str, timeout: int) -> ToolProbeResult:
     try:
         proc = subprocess.run(
             [resolved, "--version"],
@@ -64,12 +74,24 @@ def probe_binary(name: str, timeout: int = 3) -> ToolProbeResult:
             errors="replace",
             timeout=timeout,
         )
+        if name == "python" and proc.returncode != 0:
+            fallback = _fallback_sys_python()
+            if fallback.available:
+                return fallback
         version = _extract_version_line(proc.stdout, proc.stderr)
         return ToolProbeResult(name=name, available=True, path=resolved, version=version)
     except subprocess.TimeoutExpired:
         return ToolProbeResult(name=name, available=True, path=resolved, error="timeout")
     except Exception as exc:
         return ToolProbeResult(name=name, available=True, path=resolved, error=str(exc))
+
+
+def probe_binary(name: str, timeout: int = 3) -> ToolProbeResult:
+    """Probe a single binary using shutil.which, sys.executable fallback, and --version."""
+    resolved = _resolve_binary_path(name)
+    if not resolved:
+        return _fallback_sys_python() if name == "python" else ToolProbeResult(name=name, available=False)
+    return _run_version_probe(name, resolved, timeout)
 
 
 def probe_all_tools(names: Iterable[str] = PROBE_BINARIES) -> Dict[str, ToolProbeResult]:
@@ -82,6 +104,23 @@ def probe_all_tools(names: Iterable[str] = PROBE_BINARIES) -> Dict[str, ToolProb
             continue
         results[name] = probe_binary(name)
     return results
+
+
+def _iter_hook_commands(guard_cfg: Dict[str, Any], key: str) -> List[str]:
+    entries = guard_cfg.get(key)
+    if not isinstance(entries, list):
+        return []
+    cmds: List[str] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        cmd = entry.get("command")
+        if isinstance(cmd, str):
+            cmds.append(cmd)
+        for nested in entry.get("hooks") or ():
+            if isinstance(nested, dict) and isinstance(nested.get("command"), str):
+                cmds.append(nested["command"])
+    return cmds
 
 
 def _validate_hooks_json(hooks_json_path: Path, issues: List[str]) -> None:
@@ -98,9 +137,19 @@ def _validate_hooks_json(hooks_json_path: Path, issues: List[str]) -> None:
         issues.append("hooks.json missing 'edge-orchestrator-guard' section")
         return
     guard_cfg = data["edge-orchestrator-guard"]
+    if not isinstance(guard_cfg, dict):
+        issues.append("hooks.json 'edge-orchestrator-guard' must be an object")
+        return
     for key in ("PreToolUse", "PostToolUse", "PreInvocation"):
         if key not in guard_cfg:
             issues.append(f"hooks.json missing '{key}' hook configuration")
+            continue
+        cmds = _iter_hook_commands(guard_cfg, key)
+        if not any("hooks/dispatch.cmd" in cmd and 'cd . && "hooks/dispatch.cmd"' in cmd for cmd in cmds):
+            issues.append(
+                f"hooks.json '{key}' must invoke 'cd . && \"hooks/dispatch.cmd\"' "
+                "(prevents Windows cmd /c quote stripping)"
+            )
 
 
 def _validate_dispatch_cmd(cmd_path: Path, issues: List[str]) -> None:

@@ -1242,9 +1242,9 @@ def test_root_hooks_json_cross_os_schema_contract() -> None:
     post_cmd = guard_cfg["PostToolUse"][0]["hooks"][0]["command"]
     inv_cmd = guard_cfg["PreInvocation"][0]["command"]
 
-    assert pre_cmd == '"hooks/dispatch.cmd" pre_tool'
-    assert post_cmd == '"hooks/dispatch.cmd" post_tool'
-    assert inv_cmd == '"hooks/dispatch.cmd" pre_invocation'
+    assert pre_cmd == 'cd . && "hooks/dispatch.cmd" pre_tool'
+    assert post_cmd == 'cd . && "hooks/dispatch.cmd" post_tool'
+    assert inv_cmd == 'cd . && "hooks/dispatch.cmd" pre_invocation'
     assert guard_cfg["PreInvocation"][0]["type"] == "command"
     assert guard_cfg["PreInvocation"][0]["timeout"] == 30
 
@@ -1321,7 +1321,7 @@ def test_dispatch_cmd_live_posix_sh_execution_vanilla_off_and_empty_path(
     base_env = _make_subprocess_env(paths)
     for mode, want in expected_vanilla.items():
         proc = subprocess.run(
-            ["sh", "-c", f'"hooks/dispatch.cmd" {mode}'],
+            ["sh", "-c", f'cd . && "hooks/dispatch.cmd" {mode}'],
             cwd=str(REPO_ROOT),
             env=base_env,
             input=json.dumps(vanilla_payload),
@@ -1339,7 +1339,7 @@ def test_dispatch_cmd_live_posix_sh_execution_vanilla_off_and_empty_path(
         "toolCall": {"name": "write_file", "args": {"Path": "src/app.ts", "Content": "x"}},
     }
     proc_off = subprocess.run(
-        ["sh", "-c", '"hooks/dispatch.cmd" pre_tool'],
+        ["sh", "-c", 'cd . && "hooks/dispatch.cmd" pre_tool'],
         cwd=str(REPO_ROOT),
         env=_make_subprocess_env(paths, {"EDGE_HOOKS": "off"}),
         input=json.dumps(off_payload),
@@ -1353,7 +1353,7 @@ def test_dispatch_cmd_live_posix_sh_execution_vanilla_off_and_empty_path(
     sh_bin = shutil.which("sh") or "/bin/sh"
     for mode, want in expected_vanilla.items():
         proc_no_py = subprocess.run(
-            [sh_bin, "-c", f'"hooks/dispatch.cmd" {mode}'],
+            [sh_bin, "-c", f'cd . && "hooks/dispatch.cmd" {mode}'],
             cwd=str(REPO_ROOT),
             env=_make_subprocess_env(paths, {"PATH": ""}),
             input=json.dumps(vanilla_payload),
@@ -1362,3 +1362,29 @@ def test_dispatch_cmd_live_posix_sh_execution_vanilla_off_and_empty_path(
         )
         assert proc_no_py.returncode == 0, f"empty PATH fail-open failed for {mode}: stderr={proc_no_py.stderr!r}"
         assert json.loads(proc_no_py.stdout.strip()) == want
+
+
+def test_utf8_bom_transcript_handled_by_dispatch_and_role_detection(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _isolate_runtime_paths(monkeypatch, tmp_path)
+    dispatch_mod = _load_dispatch_module()
+    role_mod = importlib.import_module("tools.brigade.guard.role_detection")
+
+    bom_tp = tmp_path / "bom_transcript.jsonl"
+    line0 = json.dumps(
+        {"step_index": 0, "type": "USER_INPUT", "source": "USER_EXPLICIT", "content": "/edge-orchestrator start"}
+    )
+    bom_tp.write_bytes(b"\xef\xbb\xbf" + (line0 + "\n").encode("utf-8"))
+
+    enforced, reason = dispatch_mod.should_enforce_hooks(
+        {"conversationId": "bom-cid-dispatch", "transcriptPath": str(bom_tp)}
+    )
+    assert enforced is True
+    assert reason == "transcript_user_trigger"
+
+    role, source = role_mod.detect_session_role(
+        {"conversationId": "bom-cid-role", "transcriptPath": str(bom_tp)}
+    )
+    assert role == "ORCHESTRATOR"
+    assert source == "transcript_root"

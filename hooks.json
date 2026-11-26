@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"hooks/dispatch.cmd\" pre_tool",
+            "command": "cd . && \"hooks/dispatch.cmd\" pre_tool",
             "timeout": 30
           }
         ]
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"hooks/dispatch.cmd\" post_tool",
+            "command": "cd . && \"hooks/dispatch.cmd\" post_tool",
             "timeout": 30
           }
         ]
@@ -27,7 +27,7 @@
     "PreInvocation": [
       {
         "type": "command",
-        "command": "\"hooks/dispatch.cmd\" pre_invocation",
+        "command": "cd . && \"hooks/dispatch.cmd\" pre_invocation",
         "timeout": 30
       }
     ]
