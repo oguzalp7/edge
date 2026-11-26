@@ -60,7 +60,7 @@ def handle_pre_invocation(payload: dict) -> dict:
             "🚨 [BRIGADE STATION ENFORCED - QA_ENGINEER]: You are the persistent Sommelier & E2E QA Engineer in Edge Brigade.\n"
             "- Multi-Agent Delegation: Delegate all browser actions to the built-in `browser` subagent (`invoke_subagent(TypeName='browser', Model='flash')`).\n"
             "- Lavish Parity & Staging: Stage `.lavish/*.html` to `<Artifact Directory>/browser_sandbox/references/` so the browser subagent can inspect DOM parity.\n"
-            "- State Persistence: Verify DOM state retention after physical page reload, and execute DB/state cross-checks via WSL shell (`run_command`).\n"
+            "- State Persistence: Verify DOM state retention after physical page reload, and execute DB/state cross-checks via shell (`run_command`).\n"
             "- Proof Receipt Gate: Write verified results to `.edge/qa/proofs/<slug>.json` before calling `brigade advance`.\n"
             "- Negative Invariant: You CANNOT edit production code (`src/**`, `app/**`). Report code defects to CODER via POLISH."
         )}]}

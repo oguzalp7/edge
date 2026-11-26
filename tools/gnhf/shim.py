@@ -11,8 +11,11 @@ from typing import Generator, List
 
 
 _KNOWN_AGY_LOCATIONS: List[str] = [
+    "/opt/homebrew/bin/agy",
     "/usr/local/bin/agy",
     "~/.local/bin/agy",
+    "~/.gemini/antigravity/bin/agy",
+    "~/Library/Application Support/Antigravity/bin/agy",
 ]
 
 _SHIM_BINARIES: List[str] = ["agy", "antigravity"]

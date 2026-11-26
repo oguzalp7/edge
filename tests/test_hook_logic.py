@@ -1,31 +1,61 @@
+"""Hermetic cross-OS subprocess smoke tests for orchestrator_guard.py hooks."""
+
 import json
-import subprocess
+import os
 from pathlib import Path
+import subprocess
+import sys
 
-payload_tool = {
-    "toolCall": {"name": "replace_file_content", "args": {}},
-    "transcriptPath": "C:\\Users\\oguz_\\.gemini\\antigravity\\brain\\5aa2a2a7-254a-4db3-b406-64afa103dd0c\\.system_generated\\logs\\transcript.jsonl"
-}
+REPO_ROOT = Path(__file__).resolve().parent.parent
+GUARD_SCRIPT = REPO_ROOT / "tools" / "brigade" / "orchestrator_guard.py"
 
-res = subprocess.check_output(
-    ["python3", "/mnt/c/Users/oguz_/.gemini/config/plugins/edge/tools/brigade/orchestrator_guard.py", "pre_tool"],
-    input=json.dumps(payload_tool).encode("utf-8")
-).decode("utf-8")
-print("PreToolUse output:", res.strip())
 
-res_inv = subprocess.check_output(
-    ["python3", "/mnt/c/Users/oguz_/.gemini/config/plugins/edge/tools/brigade/orchestrator_guard.py", "pre_invocation"],
-    input=json.dumps(payload_tool).encode("utf-8")
-).decode("utf-8")
-print("PreInvocation output:", res_inv.strip())
+def _run_guard(mode: str, payload: dict, tmp_path: Path) -> dict:
+    env = os.environ.copy()
+    env["EDGE_ANTIGRAVITY_DIR"] = str(tmp_path / "agy")
+    env["EDGE_HOME"] = str(tmp_path / "edge_home")
+    raw = subprocess.check_output(
+        [sys.executable, str(GUARD_SCRIPT), mode],
+        input=json.dumps(payload).encode("utf-8"),
+        env=env,
+    ).decode("utf-8")
+    return json.loads(raw.strip())
 
-# Non orchestrator test
-payload_non_orch = {
-    "toolCall": {"name": "replace_file_content", "args": {}},
-    "transcriptPath": "C:\\Users\\oguz_\\.gemini\\antigravity\\brain\\b28d971a-e45c-4b3e-9f87-3f5e2c5483ac\\.system_generated\\logs\\transcript.jsonl"
-}
-res_allow = subprocess.check_output(
-    ["python3", "/mnt/c/Users/oguz_/.gemini/config/plugins/edge/tools/brigade/orchestrator_guard.py", "pre_tool"],
-    input=json.dumps(payload_non_orch).encode("utf-8")
-).decode("utf-8")
-print("Non-orch PreToolUse output:", res_allow.strip())
+
+def test_orchestrator_guard_cli_pre_tool_and_pre_invocation(tmp_path: Path) -> None:
+    orch_tp = tmp_path / "orch_transcript.jsonl"
+    orch_tp.write_text(
+        json.dumps({"type": "USER_INPUT", "source": "USER_EXPLICIT", "content": "/edge-orchestrator start"}) + "\n",
+        encoding="utf-8",
+    )
+    payload_tool = {
+        "conversationId": "orch-cli-smoke",
+        "toolCall": {"name": "replace_file_content", "args": {"TargetFile": "src/app.ts"}},
+        "transcriptPath": str(orch_tp),
+    }
+
+    res_tool = _run_guard("pre_tool", payload_tool, tmp_path)
+    assert res_tool["decision"] == "deny"
+
+    res_inv = _run_guard("pre_invocation", payload_tool, tmp_path)
+    assert res_inv.get("injectSteps")
+
+    coder_tp = tmp_path / "coder_transcript.jsonl"
+    coder_tp.write_text(
+        json.dumps(
+            {
+                "type": "SYSTEM_MESSAGE",
+                "source": "SYSTEM",
+                "content": "[Message] content=[edge-station:CODER] You are the CODER station worker.",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    payload_coder = {
+        "conversationId": "coder-cli-smoke",
+        "toolCall": {"name": "replace_file_content", "args": {"TargetFile": "src/app.ts"}},
+        "transcriptPath": str(coder_tp),
+    }
+    res_allow = _run_guard("pre_tool", payload_coder, tmp_path)
+    assert res_allow["decision"] == "allow"

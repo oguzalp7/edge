@@ -34,7 +34,8 @@ def _normalize_match_path(raw: Optional[str]) -> str:
         s = s[7:]
         if re.match(r"^/[a-zA-Z]:/", s):
             s = s[1:]
-    return to_wsl_path(s).replace("\\", "/").rstrip("/").lower()
+    norm = to_wsl_path(s).replace("\\", "/").rstrip("/").lower()
+    return re.sub(r"^/private(?=/(?:tmp|var|etc)(?:/|$))", "", norm)
 
 
 def _collect_worktree_aliases(project_path: Path) -> List[str]:

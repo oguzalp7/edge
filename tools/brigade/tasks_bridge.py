@@ -15,10 +15,46 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-import yaml
-
 from tools.common.fs import atomic_write_text, resolve_target_repo_root
 from tools.tracker.backends import resolve_backend
+
+
+def _dump_frontmatter_fallback(data: Dict[str, Any]) -> str:
+    def _fmt(v: Any) -> str:
+        if v is None:
+            return "null"
+        if isinstance(v, bool):
+            return "true" if v else "false"
+        if isinstance(v, (int, float)):
+            return str(v)
+        return json.dumps(str(v), ensure_ascii=False)
+
+    lines: List[str] = []
+    for key, val in data.items():
+        if isinstance(val, list):
+            if not val:
+                lines.append(f"{key}: []")
+            else:
+                lines.append(f"{key}:")
+                lines.extend(f"- {_fmt(item)}" for item in val)
+        elif isinstance(val, dict):
+            if not val:
+                lines.append(f"{key}: {{}}")
+            else:
+                lines.append(f"{key}:")
+                lines.extend(f"  {sub_k}: {_fmt(sub_v)}" for sub_k, sub_v in val.items())
+        else:
+            lines.append(f"{key}: {_fmt(val)}")
+    return "\n".join(lines)
+
+
+def _dump_frontmatter_yaml(frontmatter: Dict[str, Any]) -> str:
+    try:
+        import yaml
+
+        return yaml.safe_dump(frontmatter, sort_keys=False, default_flow_style=False).strip()
+    except ImportError:
+        return _dump_frontmatter_fallback(frontmatter)
 
 
 def _clean_ticket_slug(slug: str) -> str:
@@ -133,7 +169,7 @@ def _render_refactor_ticket_md(
         "parent_issue": parent_issue,
         "tasks_axi_id": None,
     }
-    yaml_block = yaml.safe_dump(frontmatter, sort_keys=False, default_flow_style=False).strip()
+    yaml_block = _dump_frontmatter_yaml(frontmatter)
     rules_md = ", ".join(f"`{r}`" for r in rules) if rules else "_None_"
     files_md = "\n".join(f"- `{f}`" for f in files) if files else "- _TBD_"
     targets_md = "\n".join(f"- `{k}`: `{v}`" for k, v in targets.items()) if targets else "- _Non-regression_"

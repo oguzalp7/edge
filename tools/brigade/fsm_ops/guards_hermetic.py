@@ -1,6 +1,7 @@
 """BrigadeFSM mixin: guards_hermetic."""
 
 from pathlib import Path
+import shlex
 import shutil
 import sys
 from typing import Any, Dict, List, Optional, Tuple
@@ -24,10 +25,13 @@ class FsmGuardsHermeticMixin:
             return ticket.test_seam_command
         if (eff_dir / "package.json").exists():
             return "npm run test:unit"
-        uv_bin = shutil.which("uv") or (Path.home() / ".local/bin/uv")
-        if uv_bin and (isinstance(uv_bin, str) or (isinstance(uv_bin, Path) and uv_bin.is_file())):
-            return f"{uv_bin} run --with pytest pytest -q"
-        return f"{sys.executable} -m pytest -q"
+        uv_bin = shutil.which("uv") or next(
+            (str(c) for c in (Path("/opt/homebrew/bin/uv"), Path("/usr/local/bin/uv"), Path.home() / ".local" / "bin" / "uv") if c.is_file()),
+            None,
+        )
+        if uv_bin:
+            return f"{shlex.quote(uv_bin)} run --with pytest pytest -q"
+        return f"{shlex.quote(sys.executable)} -m pytest -q"
 
     def _should_run_typecheck(self, eff_dir: Path, ticket: Optional[Ticket]) -> Tuple[bool, List[str]]:
         from tools.common.profiles import has_profile_capability, resolve_active_profiles
@@ -51,7 +55,7 @@ class FsmGuardsHermeticMixin:
         ticket = self.state.active_ticket
         eff_dir = work_dir or (normalize_target_path(ticket.worktree_path) if (ticket and ticket.worktree_path) else self.target_repo)
         test_cmd = self._resolve_test_command(eff_dir)
-        test_code, test_out, test_err = self._run_cmd(test_cmd.split(), cwd=eff_dir)
+        test_code, test_out, test_err = self._run_cmd(shlex.split(test_cmd), cwd=eff_dir)
         if test_code != 0:
             no_tests = test_code == 5 and "no tests ran" in (test_out + test_err)
             missing_dir = "No such file or directory" in (test_err + test_out) and not (eff_dir / ".git").exists()

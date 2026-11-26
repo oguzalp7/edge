@@ -225,7 +225,7 @@ class TestFlightRecorder(unittest.TestCase):
 class TestFsmEscalationAndAbort(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
-        self.repo_path = Path(self.temp_dir)
+        self.repo_path = Path(self.temp_dir).resolve()
         self.mock_slot = self.repo_path / "mock-slot"
         self.mock_slot.mkdir(parents=True, exist_ok=True)
         subprocess.run(["git", "init"], cwd=self.mock_slot, capture_output=True, check=True)

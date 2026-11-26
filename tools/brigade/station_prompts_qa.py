@@ -13,7 +13,7 @@ def _qa_protocol_section(target_route: str, eff_slug: str, eff_lavish: Optional[
 1. Step 1: Reference Ingestion & Stage Preparation:
    - If an approved Lavish prototype exists ({eff_lavish or "none"}), copy it to:
      `<Artifact Directory>/browser_sandbox/references/{eff_slug}.html`
-   - If scenario mutates data, query baseline database/API state via WSL shell (`run_command`).
+   - If scenario mutates data, query baseline database/API state via shell (`run_command`).
 
 2. Step 2: Browser Subagent Delegation:
    - Delegate physical browser interactions to the built-in browser subagent:
@@ -24,15 +24,15 @@ def _qa_protocol_section(target_route: str, eff_slug: str, eff_lavish: Optional[
 3. Step 3: State Persistence & Reload Verification:
    - Message the browser subagent (`send_message`) to perform a physical page reload (`page.reload`).
    - Confirm that user state persists in the DOM post-reload.
-   - Run WSL shell command (`run_command`) to verify persistent database records (DB Cross-Check).
+   - Run shell command (`run_command`) to verify persistent database records (DB Cross-Check).
    - Both DOM reload and DB check MUST pass for `persistence_verified: true`.
 
 4. Step 4: Proof Receipt Synthesis & Relay:
    - If non-blocking UX/visual defects are found, log them via:
-     `python tools/brigade/cli.py qa-inspect "<query>" . --issue "<desc>" --category <category> --frontier`
+     `brigade qa-inspect "<query>" . --issue "<desc>" --category <category> --frontier`
    - Write `.edge/qa/proofs/{eff_slug}.json` adhering to ProofVerifier schema:
      `visited_urls`, `user_actions_executed`, `persistence_verified: true`, `console_clean: true`, `screenshot_paths`, `host_facts_verified: true`, `db_crosscheck: {{...}}`.
-   - Run `python tools/brigade/cli.py advance .` to transition to `REVIEW` (`EXAMINER`).
+   - Run `brigade advance .` to transition to `REVIEW` (`EXAMINER`).
    - If critical bugs exist, record a CRITICAL review finding (`--axis qa`) to automatically route to `POLISH`."""
 
 

@@ -43,9 +43,18 @@ def _extract_frontmatter_keys(md_file: Path, existing: Set[str]) -> None:
     parts = text.split("---", 2)
     if len(parts) < 3:
         return
-    import yaml
+    fm: Dict[str, Any] = {}
     try:
-        fm = yaml.safe_load(parts[1]) or {}
+        import yaml
+
+        parsed = yaml.safe_load(parts[1])
+        if isinstance(parsed, dict):
+            fm = parsed
+    except ImportError:
+        for line in parts[1].splitlines():
+            if ":" in line:
+                k, v = line.split(":", 1)
+                fm[k.strip()] = v.strip().strip("'\"")
     except Exception:
         return
     if not isinstance(fm, dict):

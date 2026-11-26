@@ -59,7 +59,10 @@ class FsmGuardsVisualMixin:
 
     def _run_diff_image_subprocess(self, baseline: Path, refactored: Path, diff_out: Path) -> Tuple[bool, str, Dict[str, Any]]:
         plugin_root = Path(__file__).resolve().parents[3]
-        uv_bin = shutil.which("uv") or str(Path.home() / ".local" / "bin" / "uv")
+        uv_bin = shutil.which("uv") or next(
+            (str(c) for c in (Path("/opt/homebrew/bin/uv"), Path("/usr/local/bin/uv"), Path.home() / ".local" / "bin" / "uv") if c.is_file()),
+            str(Path.home() / ".local" / "bin" / "uv"),
+        )
         b_arg = to_wsl_path(baseline) if is_wsl_path(baseline) else str(baseline)
         r_arg = to_wsl_path(refactored) if is_wsl_path(refactored) else str(refactored)
         d_arg = to_wsl_path(diff_out) if is_wsl_path(diff_out) else str(diff_out)

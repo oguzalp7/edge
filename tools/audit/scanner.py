@@ -77,7 +77,10 @@ class FileScanner:
         try:
             rel_path = str(filepath.relative_to(root))
         except ValueError:
-            rel_path = str(filepath.relative_to(target_dir))
+            try:
+                rel_path = str(filepath.resolve().relative_to(root.resolve()))
+            except ValueError:
+                rel_path = str(filepath.resolve().relative_to(target_dir.resolve()))
         file_metric = HealthScorer.score_file(
             adapter.analyze(
                 path=filepath,

@@ -1663,41 +1663,42 @@ class TestWslCwdAnchorAndQuotingHook(unittest.TestCase):
     def test_handle_pre_tool_argument_key_preservation(self):
         """Validates that overwrite preserves whether incoming arg was 'CommandLine' or 'command'."""
         self.assertTrue(hasattr(guard, "evaluate_wsl_command_guard"))
-        # 1. Incoming CommandLine
-        p_cl = {
-            "conversationId": "coder-1",
-            "toolCall": {
-                "name": "run_command",
-                "args": {
-                    "CommandLine": "wsl npm test",
-                    "cwd": r"\\wsl.localhost\Ubuntu-24.04\home\oguz\proj",
+        with patch("tools.common.env.detect_os_mode", return_value="windows"):
+            # 1. Incoming CommandLine
+            p_cl = {
+                "conversationId": "coder-1",
+                "toolCall": {
+                    "name": "run_command",
+                    "args": {
+                        "CommandLine": "wsl npm test",
+                        "cwd": r"\\wsl.localhost\Ubuntu-24.04\home\oguz\proj",
+                    },
                 },
-            },
-        }
-        res_cl = guard.handle_pre_tool(p_cl)
-        self.assertEqual(res_cl.get("decision"), "allow")
-        self.assertIn("overwrite", res_cl)
-        self.assertIn("CommandLine", res_cl["overwrite"])
-        self.assertNotIn("command", res_cl["overwrite"])
-        self.assertEqual(res_cl["overwrite"]["CommandLine"], "wsl --cd /home/oguz/proj npm test")
+            }
+            res_cl = guard.handle_pre_tool(p_cl)
+            self.assertEqual(res_cl.get("decision"), "allow")
+            self.assertIn("overwrite", res_cl)
+            self.assertIn("CommandLine", res_cl["overwrite"])
+            self.assertNotIn("command", res_cl["overwrite"])
+            self.assertEqual(res_cl["overwrite"]["CommandLine"], "wsl --cd /home/oguz/proj npm test")
 
-        # 2. Incoming command
-        p_c = {
-            "conversationId": "coder-1",
-            "toolCall": {
-                "name": "run_command",
-                "args": {
-                    "command": "wsl npm test",
-                    "cwd": r"\\wsl.localhost\Ubuntu-24.04\home\oguz\proj",
+            # 2. Incoming command
+            p_c = {
+                "conversationId": "coder-1",
+                "toolCall": {
+                    "name": "run_command",
+                    "args": {
+                        "command": "wsl npm test",
+                        "cwd": r"\\wsl.localhost\Ubuntu-24.04\home\oguz\proj",
+                    },
                 },
-            },
-        }
-        res_c = guard.handle_pre_tool(p_c)
-        self.assertEqual(res_c.get("decision"), "allow")
-        self.assertIn("overwrite", res_c)
-        self.assertIn("command", res_c["overwrite"])
-        self.assertNotIn("CommandLine", res_c["overwrite"])
-        self.assertEqual(res_c["overwrite"]["command"], "wsl --cd /home/oguz/proj npm test")
+            }
+            res_c = guard.handle_pre_tool(p_c)
+            self.assertEqual(res_c.get("decision"), "allow")
+            self.assertIn("overwrite", res_c)
+            self.assertIn("command", res_c["overwrite"])
+            self.assertNotIn("CommandLine", res_c["overwrite"])
+            self.assertEqual(res_c["overwrite"]["command"], "wsl --cd /home/oguz/proj npm test")
 
     def test_existing_cd_or_management_flags_bypass(self):
         """Commands with existing --cd or management flags are not modified."""

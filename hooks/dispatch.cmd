@@ -77,13 +77,33 @@ if [ ! -f "$EDGE_DISPATCH" ]; then
     exit 0
 fi
 
-if command -v python3 >/dev/null 2>&1; then
-    python3 "$EDGE_DISPATCH" "$EDGE_MODE" && exit 0
-elif command -v python >/dev/null 2>&1; then
-    python "$EDGE_DISPATCH" "$EDGE_MODE" && exit 0
-elif command -v uv >/dev/null 2>&1; then
-    uv run --no-project --offline python "$EDGE_DISPATCH" "$EDGE_MODE" && exit 0
+_EDGE_HOME_DIR="${EDGE_HOME:-$HOME/.edge}"
+_EDGE_PY=""
+for _cache_file in "${PLUGIN_DATA:+$PLUGIN_DATA/python_exe.txt}" "$_EDGE_HOME_DIR/python_exe.txt"; do
+    if [ -n "$_cache_file" ] && [ -f "$_cache_file" ]; then
+        _cand="$(head -n 1 "$_cache_file" | tr -d '\r\n')"
+        if [ -n "$_cand" ] && [ -x "$_cand" ] && "$_cand" -c "import sys" </dev/null >/dev/null 2>&1; then
+            _EDGE_PY="$_cand"
+            break
+        fi
+    fi
+done
+
+if [ -n "$_EDGE_PY" ]; then
+    "$_EDGE_PY" "$EDGE_DISPATCH" "$EDGE_MODE" && exit 0
 fi
+
+for _cand in python3 /opt/homebrew/bin/python3 /usr/local/bin/python3 python; do
+    if command -v "$_cand" >/dev/null 2>&1 && "$_cand" -c "import sys" </dev/null >/dev/null 2>&1; then
+        "$_cand" "$EDGE_DISPATCH" "$EDGE_MODE" && exit 0
+    fi
+done
+
+for _uv_cand in uv /opt/homebrew/bin/uv /usr/local/bin/uv "$HOME/.local/bin/uv"; do
+    if command -v "$_uv_cand" >/dev/null 2>&1; then
+        "$_uv_cand" run --no-project --offline python "$EDGE_DISPATCH" "$EDGE_MODE" && exit 0
+    fi
+done
 
 _fail_open "$EDGE_MODE"
 exit 0

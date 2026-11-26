@@ -363,7 +363,7 @@ tracked_paths:
 class TestSpecDiscoveryAndArchiving(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.repo = Path(self.temp_dir.name)
+        self.repo = Path(self.temp_dir.name).resolve()
 
     def tearDown(self):
         self.temp_dir.cleanup()

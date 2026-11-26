@@ -28,7 +28,10 @@ def _render_tool_frictions_toon(tool_frictions: List[ToolFrictionSignal]) -> Opt
         if key not in clusters:
             clusters[key] = {"tool": tf.tool_name, "exit": tf.exit_code, "cmd": cmd_core, "err": _extract_meaningful_error_snippet(tf.error_output, max_len=80), "count": 0}
         clusters[key]["count"] += 1
-    item_lines = [f"- [TOOL:{c['tool']}] exit={c['exit']}{f' (repeated {c["count"]}x)' if c['count'] > 1 else ''}: {c['cmd']} -> {c['err']}" for c in clusters.values()]
+    item_lines = []
+    for c in clusters.values():
+        repeat_tag = f" (repeated {c['count']}x)" if c["count"] > 1 else ""
+        item_lines.append(f"- [TOOL:{c['tool']}] exit={c['exit']}{repeat_tag}: {c['cmd']} -> {c['err']}")
     return _cap_section_lines("\n## Tool Frictions", item_lines, limit=5)
 
 

@@ -46,7 +46,8 @@ def _normalize_display_path(raw_path: str, repo: Optional[Path] = None) -> str:
     s = _strip_repo_prefix(s, repo)
     s = _TREEHOUSE_SLOT_RE.sub("", s)
     s = _KNOWN_ROOT_RE.sub("", s)
-    s = re.sub(r"^/home/[^/]+/[^/]+/", "", s)
+    s = re.sub(r"^/private(?=/(?:tmp|var)/)", "", s)
+    s = re.sub(r"^/(?:home|Users)/[^/]+/[^/]+/", "", s)
     return s.lstrip("./") if s.startswith("./") else s
 
 

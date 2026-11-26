@@ -71,7 +71,8 @@ def normalize_path_string(p: str) -> str:
         return ""
     p = str(p).strip().strip("\"'")
     if p.startswith("file:///"):
-        p = p[8:]
+        rest = p[8:]
+        p = rest if (len(rest) >= 2 and rest[1] == ":" and rest[0].isalpha()) else "/" + rest
     elif p.startswith("file://"):
         p = p[7:]
     return p.replace("\\\\", "/").replace("\\", "/")
@@ -110,10 +111,13 @@ def extract_project_from_path(p: str) -> Optional[str]:
     wt_proj = _extract_worktree_project(stripped)
     if wt_proj:
         return wt_proj
-    m_user = re.search(r"(?:/home/[^/]+|/Users/[^/]+/Desktop|/Desktop)/([a-zA-Z0-9_\-]+)", stripped)
+    m_user = re.search(
+        r"(?:/home/[^/]+|/Users/[^/]+/(?:Desktop|Documents|Projects|Developer|dev|code|repos|workspace|work)|/Users/[^/]+|/Desktop)/([a-zA-Z0-9_\-]+)",
+        stripped,
+    )
     if m_user:
         name = m_user.group(1).lstrip(".")
-        if name not in ("tmp", "temp", "cache", "var"):
+        if name not in ("tmp", "temp", "cache", "var", "Library", "Applications"):
             return name
 
     parts = [part for part in stripped.strip("/").split("/") if part]

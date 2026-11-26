@@ -4,8 +4,16 @@ set -eu
 if [ -n "${PLUGIN_ROOT:-}" ]; then
     EDGE_ROOT="$PLUGIN_ROOT"
 else
-    case "$0" in
-        */*) _self_dir="${0%/*}" ;;
+    _self="$0"
+    while [ -L "$_self" ]; do
+        _link_target="$(readlink "$_self")"
+        case "$_link_target" in
+            /*) _self="$_link_target" ;;
+            *) _self="${_self%/*}/$_link_target" ;;
+        esac
+    done
+    case "$_self" in
+        */*) _self_dir="${_self%/*}" ;;
         *) _self_dir="." ;;
     esac
     EDGE_ROOT="$(CDPATH= cd -- "$_self_dir/.." && pwd)"
@@ -13,13 +21,27 @@ fi
 
 export PYTHONPATH="${EDGE_ROOT}${PYTHONPATH:+:$PYTHONPATH}"
 
-if command -v python3 >/dev/null 2>&1; then
-    exec python3 -m tools.brigade.cli "$@"
-elif command -v python >/dev/null 2>&1; then
-    exec python -m tools.brigade.cli "$@"
-elif command -v uv >/dev/null 2>&1; then
-    exec uv run --no-project --offline python -m tools.brigade.cli "$@"
-fi
+_EDGE_HOME_DIR="${EDGE_HOME:-$HOME/.edge}"
+for _cache_file in "${PLUGIN_DATA:+$PLUGIN_DATA/python_exe.txt}" "$_EDGE_HOME_DIR/python_exe.txt"; do
+    if [ -n "$_cache_file" ] && [ -f "$_cache_file" ]; then
+        _cand="$(head -n 1 "$_cache_file" | tr -d '\r\n')"
+        if [ -n "$_cand" ] && [ -x "$_cand" ]; then
+            exec "$_cand" -m tools.brigade.cli "$@"
+        fi
+    fi
+done
+
+for _cand in python3 /opt/homebrew/bin/python3 /usr/local/bin/python3 python; do
+    if command -v "$_cand" >/dev/null 2>&1 && "$_cand" -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" >/dev/null 2>&1; then
+        exec "$_cand" -m tools.brigade.cli "$@"
+    fi
+done
+
+for _uv_cand in uv /opt/homebrew/bin/uv /usr/local/bin/uv "$HOME/.local/bin/uv"; do
+    if command -v "$_uv_cand" >/dev/null 2>&1; then
+        exec "$_uv_cand" run --no-project --offline python -m tools.brigade.cli "$@"
+    fi
+done
 
 printf '%s\n' "Error: Python 3.10+ or uv not found on PATH." >&2
 exit 1

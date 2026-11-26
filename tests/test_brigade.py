@@ -1704,7 +1704,7 @@ class TestPersonaCompletenessAndLineBudget(unittest.TestCase):
 class TestBrigadePromptCLI(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
-        self.repo_path = Path(self.temp_dir)
+        self.repo_path = Path(self.temp_dir).resolve()
         self.cli_path = Path(__file__).resolve().parents[1] / "tools" / "brigade" / "cli.py"
 
         # Initialize brigade state in temp repo
@@ -1789,7 +1789,7 @@ class TestBrigadePromptCLI(unittest.TestCase):
 class TestStackAwareVerification(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
-        self.repo_path = Path(self.temp_dir)
+        self.repo_path = Path(self.temp_dir).resolve()
         self.fsm = BrigadeFSM(self.repo_path)
         self.ticket = Ticket(
             ticket_id="TICK-PYTHON-STACK",
@@ -3416,7 +3416,7 @@ class TestWorktreeAutoRebaseAndQaPreflight(unittest.TestCase):
 
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
-        self.repo_path = Path(self.temp_dir)
+        self.repo_path = Path(self.temp_dir).resolve()
         (self.repo_path / ".git").mkdir(parents=True, exist_ok=True)
 
         self.worktree_path = self.repo_path / "worktrees" / "slot-1"
@@ -3802,10 +3802,10 @@ class TestBrigadeFSMHardeningAndWorktreePreemption(unittest.TestCase):
 
     def setUp(self):
         self.test_dir = tempfile.mkdtemp()
-        self.repo_path = Path(self.test_dir)
+        self.repo_path = Path(self.test_dir).resolve()
         self.fsm = BrigadeFSM(self.repo_path)
         self.worktree_dir = tempfile.mkdtemp()
-        self.worktree_path = Path(self.worktree_dir)
+        self.worktree_path = Path(self.worktree_dir).resolve()
 
     def tearDown(self):
         shutil.rmtree(self.test_dir, ignore_errors=True)
