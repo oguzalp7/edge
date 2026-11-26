@@ -1,9 +1,11 @@
 """Station model resolution and swarm dispatch directive builder."""
 
 from pathlib import Path
-from typing import Any, Dict, Union, Optional
+from typing import Any, Dict, Optional, Tuple, Union
 
 from tools.brigade.models import StationRole, Ticket
+from tools.brigade.tier_ssot import resolve_subagent_model
+from tools.common.fs import atomic_write_text
 
 _GENERIC_DOMAINS = frozenset({"general", "core", "ui", "feature"})
 
@@ -99,3 +101,46 @@ def build_swarm_dispatch_directive(
     if eff_fork:
         directive["fork"] = eff_fork
     return directive
+
+
+def build_subagent_dispatch_directive(
+    role: Union[StationRole, str],
+    prompt: str,
+    model: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Construct an invoke_subagent directive with a normalized Antigravity Model enum."""
+    role_slug = role.value if isinstance(role, StationRole) else str(role).strip().lower()
+    role_title = role_slug.replace("_", " ").title()
+    raw_model = model or resolve_default_station_model(role_slug, tier="pro")
+    return {
+        "tool": "invoke_subagent",
+        "TypeName": "self",
+        "Model": resolve_subagent_model(raw_model),
+        "Role": role_title,
+        "Prompt": prompt,
+    }
+
+
+def build_spec_critic_dispatch(
+    repo_path: Path,
+    spec_path: Path,
+    prompt: str,
+    tier: Optional[str] = None,
+    issue_number: Optional[int] = None,
+) -> Tuple[str, Dict[str, Any], Path]:
+    """Persist critic prompt to disk and build Ultra Swarm or Pro Subagent dispatch directive."""
+    eff_tier = _resolve_effective_tier(tier)
+    if issue_number is not None:
+        prompt_file = repo_path / ".edge" / "cache" / "issues" / f"{int(issue_number)}-critic-prompt.md"
+        report_hint = f".edge/cache/issues/{int(issue_number)}-critique.md"
+    else:
+        prompt_file = repo_path / ".edge" / "specs" / f"{spec_path.stem}-critic-prompt.md"
+        report_hint = f".edge/specs/{spec_path.stem}-critique.md"
+    atomic_write_text(prompt_file, prompt)
+    brief = (
+        f"Execute zero-context Spec Critic review for `{spec_path.name}`. "
+        f"Read full rubric and specification prompt at `{prompt_file}` and write your <400-word critique to `{report_hint}`."
+    )
+    if eff_tier == "ultra":
+        return "native_swarm", build_swarm_dispatch_directive("spec_critic", brief), prompt_file
+    return "native_subagent", build_subagent_dispatch_directive("spec_critic", brief), prompt_file

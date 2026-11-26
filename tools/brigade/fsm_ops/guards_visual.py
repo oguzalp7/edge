@@ -64,7 +64,7 @@ class FsmGuardsVisualMixin:
         r_arg = to_wsl_path(refactored) if is_wsl_path(refactored) else str(refactored)
         d_arg = to_wsl_path(diff_out) if is_wsl_path(diff_out) else str(diff_out)
         cmd = [
-            uv_bin, "run", "--with", "pillow", "python3",
+            uv_bin, "run", "--with", "pillow", "python",
             "-m", "tools.ui_audit.diff_image",
             b_arg, r_arg, "--tolerance", "15", "--max-mismatch", "0.15", "--diff-out", d_arg,
         ]

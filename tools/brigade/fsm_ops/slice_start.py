@@ -5,7 +5,7 @@ from typing import Tuple, Dict, Any, Optional, List, Set
 import re
 
 from tools.brigade.flight_recorder import FlightRecorder
-from tools.brigade.fsm_ops.constants import GREEN_HEAT_THRESHOLD, VERIFICATION_TIMEOUT_SECONDS, YELLOW_HEAT_THRESHOLD, call_facade
+from tools.brigade.fsm_ops.constants import GREEN_HEAT_THRESHOLD, VERIFICATION_TIMEOUT_SECONDS, YELLOW_HEAT_THRESHOLD, call_facade, should_lease_worktree
 from tools.brigade.fsm_ops.spec_expected import _extract_spec_expected_files
 from tools.brigade.fsm_ops.spec_files import _is_non_prod_file, _parse_porcelain_paths
 from tools.brigade.models import BrigadeState, Checkpoint, ContextHeatZone, CycleState, ReviewFinding, StationRole, Ticket, TransitionLog
@@ -24,13 +24,13 @@ class FsmSliceStartMixin:
         return None
 
     def _lease_slice_worktree(self, ticket: Ticket, auto_lease_worktree: bool, branch_name: str) -> Tuple[bool, str, str]:
-        if not (auto_lease_worktree and (self.target_repo / ".git").exists() and call_facade("is_treehouse_installed", is_treehouse_installed)()):
+        if not (auto_lease_worktree and (self.target_repo / ".git").exists() and should_lease_worktree(self.target_repo)):
             return True, "", ""
         ok, wt_path, err = call_facade("acquire_worktree", acquire_worktree)(
             repo_path=self.target_repo, branch_name=branch_name, lease_holder=f"brigade-{ticket.ticket_id}",
         )
         if not ok:
-            return False, "", f"Failed to acquire isolated Treehouse worktree: {err}"
+            return False, "", f"Failed to acquire isolated worktree: {err}"
         ticket.worktree_path = wt_path
         self.state.active_worktree = wt_path
         return True, f" Worktree leased at {wt_path}.", ""

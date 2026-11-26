@@ -1,6 +1,7 @@
 """Vertical slice lifecycle, spec critique, and queued merge commands."""
 
 import argparse
+import json
 from typing import Any, Dict
 
 from tools.brigade.cli_ops._facade import resolve_symbol
@@ -8,7 +9,7 @@ from tools.common import normalize_target_path
 
 
 def cmd_start_slice(args: argparse.Namespace) -> int:
-    """Initiate a feature or refactor slice with an isolated Treehouse worktree."""
+    """Initiate a feature or refactor slice with an isolated worktree."""
     repo_path = normalize_target_path(args.repo)
     fsm = resolve_symbol("BrigadeFSM", "tools.brigade.fsm")(repo_path)
     expected_files = [f.strip() for f in args.expected_files.split(",") if f.strip()] if getattr(args, "expected_files", None) else None
@@ -34,11 +35,25 @@ def cmd_start_slice(args: argparse.Namespace) -> int:
             print(f"{label + ':':<17}{val}")
     if getattr(ticket, "require_qa", None) is not None:
         print(f"Require QA:      {ticket.require_qa}")
-    print(f"Test Seam:       {ticket.test_seam_command}\nWorktree Path:   {ticket.worktree_path or 'Primary (no treehouse)'}")
+    print(f"Test Seam:       {ticket.test_seam_command}\nWorktree Path:   {ticket.worktree_path or 'Primary (no worktree backend)'}")
     print("=======================================================")
     if ticket.worktree_path:
         print(f"\n🛡️ ZERO-TOUCH INVARIANT: Coder/Surgeon MUST work strictly inside:\n   cd {ticket.worktree_path}\n")
     return 0
+
+
+def _render_critique_output(res: Any, as_json: bool) -> int:
+    if as_json:
+        payload = res.to_dict() if hasattr(res, "to_dict") else vars(res)
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return 0 if res.success else 1
+    print("\n=======================================================\n🐟  EDGE BRIGADE — SPEC CRITIC (GOLDFISH CRITIC)\n=======================================================")
+    print(f"Status:             {'SUCCESS' if res.success else 'FAILED'}\nModel Used:         {res.model_used}\nFallback Triggered: {res.fallback_triggered}")
+    for lbl, val in (("Dispatch Mode", getattr(res, "dispatch_mode", "cli")), ("Report Path", res.report_path), ("Summary", res.summary), ("Error", res.error)):
+        if val:
+            print(f"{lbl + ':':<20}{val}")
+    print("=======================================================\n")
+    return 0 if res.success else 1
 
 
 def cmd_critique_spec(args: argparse.Namespace) -> int:
@@ -49,21 +64,19 @@ def cmd_critique_spec(args: argparse.Namespace) -> int:
         print("❌ Either --spec or --issue must be provided.")
         return 1
     crit_fn = resolve_symbol("run_spec_critique", "tools.brigade.spec_critic")
-    pri = resolve_symbol("PRIMARY_CRITIC_MODEL", "tools.brigade.spec_critic")
-    fb = resolve_symbol("FALLBACK_CRITIC_MODEL", "tools.brigade.spec_critic")
-    res = crit_fn(
-        repo_path=repo_path, spec_path=spec_arg,
-        primary_model=getattr(args, "model", pri), fallback_model=getattr(args, "fallback_model", fb),
-        timeout=getattr(args, "timeout", 180), issue_number=issue_arg,
-        offline=bool(getattr(args, "offline", False)), post_comment=not bool(getattr(args, "no_post_comment", False)),
-    )
-    print("\n=======================================================\n🐟  EDGE BRIGADE — SPEC CRITIC (GOLDFISH CRITIC)\n=======================================================")
-    print(f"Status:             {'SUCCESS' if res.success else 'FAILED'}\nModel Used:         {res.model_used}\nFallback Triggered: {res.fallback_triggered}")
-    for lbl, val in (("Report Path", res.report_path), ("Summary", res.summary), ("Error", res.error)):
-        if val:
-            print(f"{lbl + ':':<20}{val}")
-    print("=======================================================\n")
-    return 0 if res.success else 1
+    crit_kwargs: Dict[str, Any] = {
+        "repo_path": repo_path,
+        "spec_path": spec_arg,
+        "primary_model": getattr(args, "model", resolve_symbol("PRIMARY_CRITIC_MODEL", "tools.brigade.spec_critic")),
+        "fallback_model": getattr(args, "fallback_model", resolve_symbol("FALLBACK_CRITIC_MODEL", "tools.brigade.spec_critic")),
+        "timeout": getattr(args, "timeout", 180),
+        "issue_number": issue_arg,
+        "offline": bool(getattr(args, "offline", False)),
+        "post_comment": not bool(getattr(args, "no_post_comment", False)),
+    }
+    if getattr(args, "native", False):
+        crit_kwargs["native"] = True
+    return _render_critique_output(crit_fn(**crit_kwargs), bool(getattr(args, "json", False)))
 
 
 def cmd_finish_slice(args: argparse.Namespace) -> int:

@@ -13,20 +13,25 @@ Bu kurallar, `edge` eklentisini kullanan tüm çalışma alanlarında geçerli e
 
 ---
 
-## 🌳 0.1 Zero-Touch Primary Working Tree & Treehouse Worktree İnvaryantı
+## 🌳 0.1 Zero-Touch Primary Working Tree & İzole Worktree İnvaryantı
 > [!CRITICAL]
 > **Ana Repo Çalışma Ağacına Doğrudan Kod Yazma Yasağı (Zero-Touch Primary Invariant):**
-> İster Feature ister Refactor operasyonu olsun; **kırmızı testleri geçmek için üretim koduna dokunmadan önce (`CODER`)** veya **ameliyat başlatılmadan önce (`SURGEON`)**, her durumda Treehouse üzerinden izole bir worktree kiralanmalıdır:
+> İster Feature ister Refactor operasyonu olsun; **kırmızı testleri geçmek için üretim koduna dokunmadan önce (`CODER`)** veya **ameliyat başlatılmadan önce (`SURGEON`)**, her durumda izole bir çalışma ağacı kiralanmalıdır. Worktree Fallback Hiyerarşisi:
+> 1. **Antigravity Swarm / Subagent Çalışması:** Yerleşik **`workspace="share"`** (veya A/B izolasyonunda **`workspace="branch"`**) kullanılır; görev tamamlandığında dal/kopya ana çalışma alanına güvenli biçimde birleştirilir (`kill` öncesi).
+> 2. **Edge Brigade CLI (`treehouse` Birincil $\rightarrow$ Native `git worktree` Fallback):** `treehouse` kuruluysa havuzdan slot kiralanır; `treehouse` yoksa tüm işletim sistemlerinde (`windows`, `wsl`, `macos`, `linux`) otomatik olarak repo dışı native **`git worktree`** havuzuna (`~/.edge/worktrees/<repo>-<hash6>/<branch>`) düşülür:
 > ```bash
-> # Yöntem 1 (Önerilen - Brigade Slice):
+> # Yöntem 1 (Önerilen - Brigade Slice; treehouse veya native git worktree fallback seçer):
 > brigade start-slice <repo-root> --name <slice-adi> --track <feature|core|ui>
 >
-> # Yöntem 2 (Doğrudan Treehouse CLI):
-> treehouse get --lease -b feat/<slice-adi>
+> # Yöntem 2 (Doğrudan Treehouse veya Brigade Worktree CLI):
+> brigade worktree <repo-root> --action lease --branch feat/<slice-adi>
 > ```
 > - Ana repo dizini (`<repo-root>`) sadece koordinasyon, biletleme ve git branch takibi içindir; doğrudan üretim kodu mutasyonuyla KİRLETİLEMEZ.
 > - Tüm dosya düzenleme (`write_file`, `edit_file`) ile aktif **Stack Profile** (`profiles/<id>/`) tarafından tanımlanan derleme, tip kontrolü ve test koşturma işlemleri kiralık worktree (`<worktree-path>`) içinde icra edilir.
-> - Doğrulama ve inceleme tamamlandığında `brigade finish-slice <repo>` ile ana repodaki aktif entegrasyon dalına (Stack Profile `delivery.default_stage_branches.integration`, varsayılan `main`) fast-forward (`git merge --ff-only`) birleştirilir ve worktree havuza iade edilir.
+> - **Zorunlu Temizlik (Mandatory Cleanup & Zero-Data-Loss):**
+>   - Tamamlanan dilimler `brigade finish-slice <repo>` ile entegrasyon dalına fast-forward (`git merge --ff-only`) birleştirilir, worktree kaldırılır (`git worktree remove` + `prune`) ve yalnızca birleştirilmiş dal `git branch -d` ile silinir (birleşmemiş `--pr` dalları korunur).
+>   - İptalde (`brigade abort`) worktree `--force` ile temizlenir; ancak üzerinde yeni commit bulunan dallar asla `git branch -D` ile silinmez, `edge/aborted/<branch>-<timestamp>` dalına taşınır.
+>   - Yetim kalan veya yarım kalmış dizinler `brigade worktree <repo> --action prune` ile deterministik olarak temizlenir.
 
 ---
 
@@ -44,9 +49,8 @@ Ajanlar çevre birimleriyle (Git, Tarayıcı, Görev Listesi) etkileşime girerk
 3. **`github-mcp-server` (Fallback 2):** Doğrudan API çağrıları için MCP araç seti.
 
 ### 🌐 C. Tarayıcı Otomasyonu ve Görsel Doğrulama (Visual QA)
-1. **`chrome-dev-tools-axi` (Birincil):** Headless ve token-tasarruflu görsel regresyon / snapshot aracı.
-2. **`chrome-devtools-mcp` (Fallback 1):** Antigravity bünyesindeki MCP araç seti (`navigate_page`, `take_screenshot` vb.).
-3. **Sistem CLI / Puppeteer (Fallback 2):** Linux/WSL ortamında çalışan yerel tarayıcı betikleri.
+1. **E2E QA Birincil (`browser` Subagent):** Uçtan uca (E2E) etkileşimli tarayıcı doğrulaması tüm platformlarda Antigravity'nin yerleşik **`browser`** alt-ajanı (`TypeName: "browser"`) üzerinden yürütülür.
+2. **Deterministik Görsel Eşlik (`chrome-devtools-axi` $\rightarrow$ `chrome-devtools-mcp` $\rightarrow$ `browser`):** Görsel piksel eşliği (`diff_image`) ve Fiber incelemesi için önce cross-OS `chrome-devtools-axi` (veya `chrome-dev-tools-axi`, Windows `.cmd` shim güvenli sarmalayıcı ile) denenir; kurulu değilse sırasıyla **`chrome-devtools-mcp`** (`evaluate_script`, `take_screenshot`, `navigate_page`) veya yerleşik **`browser`** alt-ajanına düşülür.
 
 ---
 

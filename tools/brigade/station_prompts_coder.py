@@ -14,14 +14,14 @@ def build_coder_prompt(ticket: Ticket, red_test_cmd: str, repo_path: Optional[Pa
     if ticket.worktree_path:
         wt_block = f"""
 WORKTREE WORKING DIRECTORY (CRITICAL ZERO-TOUCH INVARIANT):
-- Assigned Treehouse Worktree: `{ticket.worktree_path}`
+- Assigned Isolated Worktree: `{ticket.worktree_path}`
 - YOU MUST EXECUTE ALL COMMANDS, TESTS, AND FILE EDITS STRICTLY INSIDE: `{ticket.worktree_path}`
 - NEVER MODIFY FILES OR RUN BUILDS DIRECTLY IN THE PRIMARY REPO CHECKOUT.
 """
     else:
         wt_block = """
 ⚠️ WARNING: No isolated worktree assigned!
-Before mutating production code, ensure a Treehouse worktree is leased to preserve zero-touch primary isolation.
+Before mutating production code, ensure an isolated worktree is leased to preserve zero-touch primary isolation.
 """
 
     prompt = f"""You are the CODER station worker in Edge Brigade on branch `{ticket.branch_name}`.
@@ -56,14 +56,14 @@ def build_coder_polish_prompt(ticket: Ticket, findings: List[ReviewFinding], rep
     if ticket.worktree_path:
         wt_block = f"""
 WORKTREE WORKING DIRECTORY (CRITICAL ZERO-TOUCH INVARIANT):
-- Assigned Treehouse Worktree: `{ticket.worktree_path}`
+- Assigned Isolated Worktree: `{ticket.worktree_path}`
 - YOU MUST EXECUTE ALL COMMANDS, TESTS, AND FILE EDITS STRICTLY INSIDE: `{ticket.worktree_path}`
 - NEVER MODIFY FILES OR RUN BUILDS DIRECTLY IN THE PRIMARY REPO CHECKOUT.
 """
     else:
         wt_block = """
 ⚠️ WARNING: No isolated worktree assigned!
-Before mutating production code, ensure a Treehouse worktree is leased to preserve zero-touch primary isolation.
+Before mutating production code, ensure an isolated worktree is leased to preserve zero-touch primary isolation.
 """
 
     prompt = f"""You are the CODER station worker in Edge Brigade on branch `{ticket.branch_name}`.

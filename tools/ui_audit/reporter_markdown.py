@@ -62,13 +62,13 @@ def _append_clusters_and_footer(lines: List[str], summary: UIAuditSummary) -> No
             lines.append(f"  - *...and {len(c.distinct_files) - 6} more files*")
         lines.extend(["", "**Proposed TypeScript Interface:**", "```typescript", c.props_proposal, "```", "", "**Example Concrete Call Site Snippet:**", f"```tsx\n{c.instances[0].snippet}\n```", "", "---", ""])
     lines.extend([
-        "", "## 👁️ 5. Visual Verification Protocol (`chrome-devtools-axi`)", "",
+        "", "## 👁️ 5. Visual Verification Protocol (`chrome-devtools-axi` -> `chrome-devtools-mcp` -> `browser`)", "",
         "When approving and executing any slice above:",
-        "1. **Baseline Screenshot:** Capture baseline UI with `chrome-devtools-axi screenshot <slice>_baseline.png`",
+        "1. **Baseline Screenshot:** Capture baseline UI with `chrome-devtools-axi screenshot <slice>_baseline.png` (or fallback to `chrome-devtools-mcp` `take_screenshot` / built-in `browser` subagent).",
         "2. **Centralize:** Extract the primitive into `src/components/ui/` and swap duplicate JSX with `<Primitive variant=\"...\" />`.",
         "3. **Typecheck & Test:** Run `tsc --noEmit` and component unit tests.",
-        "4. **Parity Comparison:** Capture `chrome-devtools-axi screenshot <slice>_refactored.png` and verify layout consistency (max 3 loops).",
-        "5. **PR Gate:** Final review with `no-mistakes axi run --skip ci`.", "",
+        "4. **Parity Comparison:** Capture `chrome-devtools-axi screenshot <slice>_refactored.png` (or `chrome-devtools-mcp` / `browser`) and verify layout consistency via `diff_image` (max 3 loops).",
+        "5. **PR Gate:** Final review with `brigade prepare-ship` / `no-mistakes`.", "",
     ])
 
 

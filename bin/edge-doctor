@@ -1,0 +1,25 @@
+#!/usr/bin/env sh
+set -eu
+
+if [ -n "${PLUGIN_ROOT:-}" ]; then
+    EDGE_ROOT="$PLUGIN_ROOT"
+else
+    case "$0" in
+        */*) _self_dir="${0%/*}" ;;
+        *) _self_dir="." ;;
+    esac
+    EDGE_ROOT="$(CDPATH= cd -- "$_self_dir/.." && pwd)"
+fi
+
+export PYTHONPATH="${EDGE_ROOT}${PYTHONPATH:+:$PYTHONPATH}"
+
+if command -v python3 >/dev/null 2>&1; then
+    exec python3 -m tools.doctor.cli "$@"
+elif command -v python >/dev/null 2>&1; then
+    exec python -m tools.doctor.cli "$@"
+elif command -v uv >/dev/null 2>&1; then
+    exec uv run --no-project --offline python -m tools.doctor.cli "$@"
+fi
+
+printf '%s\n' "Error: Python 3.10+ or uv not found on PATH." >&2
+exit 1

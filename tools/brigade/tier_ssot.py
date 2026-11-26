@@ -18,6 +18,23 @@ from tools.brigade.tier_models import (
 )
 
 
+_NATIVE_SUBAGENT_MODELS = frozenset({"inherit", "flash", "flash_lite", "pro"})
+
+
+def resolve_subagent_model(model_name: str) -> str:
+    """Map an arbitrary station or custom model name to Antigravity's invoke_subagent Model enum."""
+    clean = (model_name or "").strip().lower()
+    if clean in _NATIVE_SUBAGENT_MODELS:
+        return clean
+    if "lite" in clean:
+        return "flash_lite"
+    if "flash" in clean:
+        return "flash"
+    if any(tok in clean for tok in ("opus", "sonnet", "xhigh", "high", "pro")):
+        return "pro"
+    return "flash"
+
+
 def get_station_models_ssot_path() -> Path:
     """Resolve path for station_models.json SSOT template."""
     env_override = os.environ.get("EDGE_STATION_MODELS_PATH")

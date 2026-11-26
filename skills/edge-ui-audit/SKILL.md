@@ -46,6 +46,6 @@ uv run python ~/.gemini/config/plugins/edge/tools/ui_audit/cli.py <target-path> 
      - `table_container` $\rightarrow$ candidates for `src/components/ui/TableWrapper.tsx`
 
 3. **Visual Parity Verification Protocol:**
-   - **Primary Engine:** `chrome-devtools-axi` (CLI at `/usr/local/bin/chrome-devtools-axi`) for fast, token-efficient screenshot capture.
-   - **Fallback Engine:** `chrome-devtools-mcp` (`take_screenshot`, `navigate_page`).
+   - **Primary Engine:** `chrome-devtools-axi` (resolved on `PATH` with cross-OS `.cmd` shim safety) for fast, token-efficient screenshot capture.
+   - **Fallback Engines:** `chrome-devtools-mcp` (`take_screenshot`, `navigate_page`) or Antigravity's built-in `browser` subagent.
    - Captures baseline and refactored screenshots to verify styling parity during consolidation (max 3 loops).

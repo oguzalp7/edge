@@ -7,6 +7,7 @@ import json
 from tools.brigade.fsm_ops.constants import GREEN_HEAT_THRESHOLD, VERIFICATION_TIMEOUT_SECONDS, YELLOW_HEAT_THRESHOLD, call_facade
 from tools.brigade.models import BrigadeState, Checkpoint, ContextHeatZone, CycleState, ReviewFinding, StationRole, Ticket, TransitionLog
 from tools.brigade.worktree import acquire_worktree, is_treehouse_installed, return_worktree
+from tools.brigade.worktree_git import is_native_worktree_path
 
 
 class FsmRefactorSealMixin:
@@ -115,7 +116,10 @@ class FsmRefactorSealMixin:
 
     def _reset_after_slice_finish(self, ticket: Ticket) -> None:
         if ticket.worktree_path:
-            call_facade("return_worktree", return_worktree)(self.target_repo, ticket.worktree_path, force=False)
+            ret_kwargs: Dict[str, Any] = {"force": False}
+            if is_native_worktree_path(ticket.worktree_path):
+                ret_kwargs["base_branch"] = self.state.base_branch or "development"
+            call_facade("return_worktree", return_worktree)(self.target_repo, ticket.worktree_path, **ret_kwargs)
         self._archive_ticket_spec(ticket)
         self.state.active_ticket = None
         self.state.active_branch = None

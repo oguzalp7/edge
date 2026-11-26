@@ -12,7 +12,14 @@ from tools.brigade.flight_recorder import FlightRecorder
 from tools.brigade.models import BrigadeState, ContextHeatZone, CycleState, ReviewFinding, StationRole, Ticket
 from tools.brigade.proof_verifier import ProofVerifier, SubstepList, _validate_qa_proof_receipt
 from tools.brigade.stations import StationRegistry
-from tools.brigade.worktree import acquire_worktree, get_pool_status, is_treehouse_installed, return_worktree
+from tools.brigade.worktree import (
+    acquire_worktree,
+    get_pool_status,
+    is_treehouse_installed,
+    is_worktree_backend_available,
+    prune_worktrees,
+    return_worktree,
+)
 from tools.common import normalize_target_path, run_command
 
 if not hasattr(BrigadeState, "guard_failures"):
@@ -53,6 +60,8 @@ __all__ = [
     "acquire_worktree",
     "return_worktree",
     "is_treehouse_installed",
+    "is_worktree_backend_available",
+    "prune_worktrees",
 ]
 
 

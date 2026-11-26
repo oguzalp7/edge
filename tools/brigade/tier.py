@@ -35,6 +35,7 @@ from tools.brigade.tier_ssot import (
     get_station_models_ssot_path,
     load_ssot_station_config,
     resolve_ssot_tier_models,
+    resolve_subagent_model,
     set_station_model,
 )
 

@@ -3,7 +3,7 @@
 from typing import Tuple, Dict, Any, Optional, List, Set
 
 from tools.brigade.flight_recorder import FlightRecorder
-from tools.brigade.fsm_ops.constants import GREEN_HEAT_THRESHOLD, VERIFICATION_TIMEOUT_SECONDS, YELLOW_HEAT_THRESHOLD, call_facade
+from tools.brigade.fsm_ops.constants import GREEN_HEAT_THRESHOLD, VERIFICATION_TIMEOUT_SECONDS, YELLOW_HEAT_THRESHOLD, call_facade, should_lease_worktree
 from tools.brigade.fsm_ops.spec_expected import _extract_spec_expected_files
 from tools.brigade.fsm_ops.spec_files import _is_non_prod_file, _parse_porcelain_paths
 from tools.brigade.models import BrigadeState, Checkpoint, ContextHeatZone, CycleState, ReviewFinding, StationRole, Ticket, TransitionLog
@@ -14,7 +14,7 @@ class FsmGuardsEntryMixin:
     """Mixin providing guards_entry operations for BrigadeFSM."""
 
     def guard_triage_to_surgery(self) -> Tuple[bool, str, Dict[str, Any]]:
-        """Validates that a valid ticket exists, allocates an isolated Treehouse worktree, and prepares for surgery."""
+        """Validates that a valid ticket exists, allocates an isolated worktree, and prepares for surgery."""
         if not self.state.active_ticket:
             return False, "No active ticket assigned for surgery.", {}
         
@@ -24,15 +24,15 @@ class FsmGuardsEntryMixin:
         # Check if target repository is a real Git repository
         is_git_repo = (self.target_repo / ".git").exists()
 
-        # Allocate Treehouse isolated worktree if not yet assigned and in a git repo
-        if is_git_repo and not ticket.worktree_path and call_facade("is_treehouse_installed", is_treehouse_installed)():
+        # Allocate isolated worktree if not yet assigned and in a git repo
+        if is_git_repo and not ticket.worktree_path and should_lease_worktree(self.target_repo):
             ok, wt_path, err = call_facade("acquire_worktree", acquire_worktree)(
                 repo_path=self.target_repo,
                 branch_name=ticket.branch_name,
                 lease_holder=f"brigade-{ticket.ticket_id}",
             )
             if not ok:
-                return False, f"Failed to acquire isolated Treehouse worktree: {err}", {"error": err}
+                return False, f"Failed to acquire isolated worktree: {err}", {"error": err}
             
             ticket.worktree_path = wt_path
             self.state.active_worktree = wt_path
