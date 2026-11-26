@@ -1,5 +1,6 @@
 """BrigadeFSM mixin: staging_archive."""
 
+import os
 from pathlib import Path
 import sys
 from typing import List
@@ -47,11 +48,13 @@ class FsmStagingArchiveMixin:
 
     def _run_radar_rescan(self) -> None:
         """Refreshes radar ledger to resolve debt after ticket completion."""
-        radar_cli = Path(__file__).resolve().parents[2] / "radar" / "cli.py"
-        target_path_str = str(self.target_repo)
-        if target_path_str.startswith(r"\\wsl.localhost") or target_path_str.startswith("/home/"):
-            wsl_target = target_path_str.replace(r"\\wsl.localhost\Ubuntu-24.04", "").replace("\\", "/")
-            wsl_radar = str(radar_cli).replace(r"C:\Users\oguz_\.gemini\config\plugins\edge", "/mnt/c/Users/oguz_/.gemini/config/plugins/edge").replace("\\", "/")
+        from tools.common.paths import is_wsl_path, to_wsl_path
+
+        path_cls = call_facade("Path", Path)
+        radar_cli = path_cls(__file__).resolve().parents[2] / "radar" / "cli.py"
+        if os.name == "nt" and is_wsl_path(self.target_repo):
+            wsl_target = to_wsl_path(self.target_repo)
+            wsl_radar = to_wsl_path(radar_cli)
             cmd = ["python3", wsl_radar, "scan", wsl_target]
         else:
             cmd = [sys.executable, str(radar_cli), "scan", str(self.target_repo)]

@@ -104,13 +104,23 @@ def evaluate_wsl_command_guard(command_line: str, cwd: str = "") -> Optional[Dic
     return {"decision": "allow", "overwrite": {"CommandLine": _transform_wsl_command_anchor(command_line, linux_path)}} if linux_path else None
 
 
+def _extract_cmd_key(args: dict) -> Optional[str]:
+    if "CommandLine" in args:
+        return "CommandLine"
+    return "command" if "command" in args else None
+
+
 def _handle_run_command_wsl_guard(tool_name: str, args: dict) -> Optional[dict]:
-    cmd_key = "CommandLine" if "CommandLine" in args else ("command" if "command" in args else None)
-    if not ((tool_name == "run_command" or cmd_key is not None) and cmd_key):
+    from tools.common import env as _edge_env
+
+    if _edge_env.detect_os_mode() in ("macos", "linux"):
+        return None
+    cmd_key = _extract_cmd_key(args)
+    if not cmd_key:
         return None
     cwd = args.get("cwd", "") or args.get("working_directory", "")
     res = evaluate_wsl_command_guard(args.get(cmd_key, ""), cwd=cwd)
-    if res is not None and res.get("decision") == "allow" and "overwrite" in res:
+    if res and res.get("decision") == "allow" and "overwrite" in res:
         new_cmd = res["overwrite"].get("CommandLine") or res["overwrite"].get("command")
         res["overwrite"] = {cmd_key: new_cmd}
     return res

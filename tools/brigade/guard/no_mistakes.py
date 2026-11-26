@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+import sys
 from typing import Any, Dict, List, Optional, Tuple
 
 _NO_MISTAKES_ENV_VARS: Tuple[str, ...] = ("NO_MISTAKES", "NO_MISTAKES_RUN", "NO_MISTAKES_STEP")
@@ -34,7 +35,13 @@ def _check_no_mistakes_payload_text(payload: Dict[str, Any]) -> Optional[str]:
 
 def _check_no_mistakes_transcript(payload: Dict[str, Any]) -> Optional[str]:
     t_path_raw = payload.get("transcriptPath")
-    t_path = Path(str(t_path_raw)) if t_path_raw else None
+    if not t_path_raw:
+        return None
+    facade = sys.modules.get("tools.brigade.orchestrator_guard")
+    resolver = getattr(facade, "to_wsl_path", None) if facade else None
+    if resolver is None:
+        from tools.brigade.guard.tool_args import to_wsl_path as resolver
+    t_path = resolver(str(t_path_raw))
     if not t_path or not t_path.is_file():
         return None
     try:

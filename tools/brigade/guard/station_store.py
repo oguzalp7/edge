@@ -81,24 +81,29 @@ class StationStore:
 
 
 def get_active_stations_path() -> Path:
-    """Resolve the active stations JSON path."""
-    for p in (
-        Path("/mnt/c/Users/oguz_/.gemini/antigravity/edge_active_stations.json"),
-        Path.home() / ".gemini" / "antigravity" / "edge_active_stations.json",
-        Path("/tmp/edge_active_stations.json"),
-    ):
-        if p.parent.exists():
-            return p
-    return Path("/tmp/edge_active_stations.json")
+    """Resolve the active stations JSON path via cross-OS env helper."""
+    from tools.common import env as _edge_env
 
-
-ACTIVE_STATIONS_FILE = get_active_stations_path()
+    return _edge_env.get_active_stations_path()
 
 
 def effective_stations_file() -> Path:
     facade = sys.modules.get("tools.brigade.orchestrator_guard")
-    val = getattr(facade, "ACTIVE_STATIONS_FILE", None) if facade else None
-    return Path(val) if val is not None else ACTIVE_STATIONS_FILE
+    if facade is not None and "ACTIVE_STATIONS_FILE" in facade.__dict__:
+        val = facade.__dict__["ACTIVE_STATIONS_FILE"]
+        if val is not None:
+            return Path(val)
+    if "ACTIVE_STATIONS_FILE" in globals():
+        val = globals()["ACTIVE_STATIONS_FILE"]
+        if val is not None:
+            return Path(val)
+    return get_active_stations_path()
+
+
+def __getattr__(name: str) -> Any:
+    if name == "ACTIVE_STATIONS_FILE":
+        return get_active_stations_path()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def load_active_stations() -> StationStoreEnvelope:

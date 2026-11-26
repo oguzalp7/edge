@@ -61,9 +61,17 @@ class SessionMiner:
 
     @staticmethod
     def _resolve_default_roots() -> List[Path]:
+        from tools.common.env import get_brain_dir
+
+        candidates = [
+            get_brain_dir(),
+            Path.home() / ".gemini" / "antigravity" / "brain",
+            Path.home() / ".gemini" / "antigravity-cli" / "brain",
+            *(Path(r).expanduser() for r in DEFAULT_BRAIN_ROOTS),
+        ]
         valid_roots: List[Path] = []
         seen: Set[str] = set()
-        for r in DEFAULT_BRAIN_ROOTS:
+        for r in candidates:
             norm = _safe_is_dir(r)
             if norm and norm not in seen:
                 seen.add(norm)

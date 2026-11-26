@@ -6,14 +6,12 @@ from typing import Any, Dict, List
 
 
 def to_wsl_path(p_str: str) -> Path:
-    """Convert Windows drive paths into WSL Linux Path objects."""
+    """Convert host paths into runtime Path objects via cross-OS env helper."""
     if not p_str:
         return Path("")
-    p = p_str.replace("\\", "/")
-    if ":" in p:
-        drive, rest = p.split(":", 1)
-        p = f"/mnt/{drive.lower()}{rest}"
-    return Path(p)
+    from tools.common import env as _edge_env
+
+    return _edge_env.resolve_host_path(p_str)
 
 
 def parse_subagents(raw_subagents: Any) -> List[Dict[str, Any]]:

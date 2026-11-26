@@ -12,7 +12,7 @@ from typing import Generator, List
 
 _KNOWN_AGY_LOCATIONS: List[str] = [
     "/usr/local/bin/agy",
-    "/home/oguz/.local/bin/agy",
+    "~/.local/bin/agy",
 ]
 
 _SHIM_BINARIES: List[str] = ["agy", "antigravity"]
@@ -23,9 +23,11 @@ def _find_real_agy() -> str:
     found = shutil.which("agy")
     if found:
         return found
-    for loc in _KNOWN_AGY_LOCATIONS:
-        if os.path.exists(loc):
-            return loc
+    home_agy = str(Path.home() / ".local" / "bin" / "agy")
+    for loc in [home_agy, *_KNOWN_AGY_LOCATIONS]:
+        expanded = os.path.expanduser(loc)
+        if os.path.exists(expanded):
+            return expanded
     return "/usr/local/bin/agy"
 
 

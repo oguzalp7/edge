@@ -9,7 +9,10 @@ import subprocess
 from pathlib import Path
 from typing import List, Tuple, Optional, Union
 
-from .paths import is_wsl_path, to_wsl_path, WSL_DISTRO
+from .env import get_wsl_distro
+from .paths import is_wsl_path, to_wsl_path
+
+WSL_DISTRO: str = get_wsl_distro()
 
 
 def _build_wsl_bash_command(cmd: Union[List[str], str], wsl_cwd: str) -> str:
@@ -25,7 +28,7 @@ def run_command(
 ) -> Tuple[int, str, str]:
     """
     Executes a command cleanly.
-    If the working directory is in WSL, routes the command through `wsl -d <distro> bash -c`.
+    If the working directory is in WSL on Windows, routes via `wsl [-d <distro>] bash -c`.
     Returns (exit_code, stdout, stderr).
     """
     work_dir = Path(cwd) if cwd else Path.cwd()
@@ -34,7 +37,9 @@ def run_command(
     if needs_wsl:
         wsl_cwd = to_wsl_path(work_dir)
         full_bash = _build_wsl_bash_command(cmd, wsl_cwd)
-        exec_cmd = ["wsl", "-d", WSL_DISTRO, "bash", "-c", full_bash]
+        distro = get_wsl_distro() or WSL_DISTRO
+        wsl_prefix = ["wsl", "-d", distro] if distro else ["wsl"]
+        exec_cmd = [*wsl_prefix, "bash", "-c", full_bash]
         exec_cwd = None
     else:
         exec_cmd = cmd

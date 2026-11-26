@@ -4,29 +4,28 @@ Bu kurallar, `edge` eklentisini kullanan tüm çalışma alanlarında geçerli e
 
 ---
 
-## 🐧 0. Kritik Çalışma Ortamı: WSL2-First Doktrini
+## 🧭 0. Cross-OS Çalışma Ortamı Doktrini (Cross-OS Runtime Doctrine)
 > [!CRITICAL]
-> Kullanıcı **İSTİSNASIZ** olarak tüm projelerini **WSL2** (`/home/oguz/...`) ortamında yürütmektedir.
-> - Ajanlar asla doğrudan Windows `cmd.exe`, `powershell.exe` veya Windows `python.exe` varsayımıyla proje dosyalarına yaklaşamaz.
-> - Proje dizinleri daima WSL path'leridir (`/home/oguz/<project>`).
-> - Antigravity üzerinden terminal komutları koşulurken daima `wsl bash -c "cd /home/oguz/<project> && ..."` veya WSL alt kabuğu kullanılmalıdır.
-> - Windows geçici dizinlerinde proje kodu aranmaz veya çalıştırılmaz.
+> `edge` eklentisi **`windows`**, **`wsl`**, **`macos`** ve **`linux`** ortamlarını eşit olarak destekler (`~/.edge/machine.json`).
+> - Ajanlar çalışma ortamını hedef projenin bulunduğu platforma göre çözer (yerel Windows, WSL2, macOS veya native Linux); sabit kullanıcı adı veya tek OS varsayımı yapmaz.
+> - Yalnızca Windows ana makinesinden bir WSL2 deposu hedeflendiğinde terminal komutları `wsl --cd <linux_path> ...` üzerinden çalıştırılır.
+> - Native Linux, macOS veya yerel Windows projelerinde komutlar doğrudan yerel kabuk ve Python/Node çalışma zamanı üzerinden yürütülür (`tools/common/env.py`, `tools/common/paths.py`).
 
 ---
 
 ## 🌳 0.1 Zero-Touch Primary Working Tree & Treehouse Worktree İnvaryantı
 > [!CRITICAL]
 > **Ana Repo Çalışma Ağacına Doğrudan Kod Yazma Yasağı (Zero-Touch Primary Invariant):**
-> İster Feature ister Refactor operasyonu olsun; **kırmızı testleri geçmek için üretim koduna dokunmadan önce (`CODER`)** veya **ameliyat başlatılmadan önce (`SURGEON`)**, İSTİSNASIZ olarak Treehouse üzerinden izole bir worktree kiralanmalıdır:
+> İster Feature ister Refactor operasyonu olsun; **kırmızı testleri geçmek için üretim koduna dokunmadan önce (`CODER`)** veya **ameliyat başlatılmadan önce (`SURGEON`)**, her durumda Treehouse üzerinden izole bir worktree kiralanmalıdır:
 > ```bash
 > # Yöntem 1 (Önerilen - Brigade Slice):
-> brigade start-slice /home/oguz/<project> --name <slice-adi> --track <feature|core|ui>
+> brigade start-slice <repo-root> --name <slice-adi> --track <feature|core|ui>
 >
 > # Yöntem 2 (Doğrudan Treehouse CLI):
 > treehouse get --lease -b feat/<slice-adi>
 > ```
-> - Ana repo dizini (`/home/oguz/<project>`) sadece koordinasyon, biletleme ve git branch takibi içindir; doğrudan üretim kodu mutasyonuyla KİRLETİLEMEZ.
-> - Tüm dosya düzenleme (`write_file`, `edit_file`) ile aktif **Stack Profile** (`profiles/<id>/`) tarafından tanımlanan derleme, tip kontrolü ve test koşturma işlemleri kiralık worktree (`/home/oguz/.treehouse/pool/slot-N/...`) içinde icra edilir.
+> - Ana repo dizini (`<repo-root>`) sadece koordinasyon, biletleme ve git branch takibi içindir; doğrudan üretim kodu mutasyonuyla KİRLETİLEMEZ.
+> - Tüm dosya düzenleme (`write_file`, `edit_file`) ile aktif **Stack Profile** (`profiles/<id>/`) tarafından tanımlanan derleme, tip kontrolü ve test koşturma işlemleri kiralık worktree (`<worktree-path>`) içinde icra edilir.
 > - Doğrulama ve inceleme tamamlandığında `brigade finish-slice <repo>` ile ana repodaki aktif entegrasyon dalına (Stack Profile `delivery.default_stage_branches.integration`, varsayılan `main`) fast-forward (`git merge --ff-only`) birleştirilir ve worktree havuza iade edilir.
 
 ---
@@ -72,27 +71,27 @@ Ajanlar çevre birimleriyle (Git, Tarayıcı, Görev Listesi) etkileşime girerk
 Ajanlar icra ettikleri görevin niteliğine göre ilgili kılavuzu referans almalıdır:
 
 * 🧭 **Bağlam Sistemi & Ontoloji Anayasası (Context System Constitution):**  
-  System Triad, Diátaxis mod ayrımı, `CONTEXT.md`, `docs/<domain>/DOMAIN.md` ve 1–3 satırlık kod ön-bilgisi kuralları için [**`rules/context-system.md`**](file:///C:/Users/oguz_/.gemini/config/plugins/edge/rules/context-system.md) belgesini oku.
+  System Triad, Diátaxis mod ayrımı, `CONTEXT.md`, `docs/<domain>/DOMAIN.md` ve 1–3 satırlık kod ön-bilgisi kuralları için [**`rules/context-system.md`**](rules/context-system.md) belgesini oku.
 
 * 🧬 **Refaktör Görevleri (Yapısal Değişim, Sıfır Davranış Değişimi):**  
-  Detaylı yönergeler için [**`rules/refactor.md`**](file:///C:/Users/oguz_/.gemini/config/plugins/edge/rules/refactor.md) el kitabını oku.  
+  Detaylı yönergeler için [**`rules/refactor.md`**](rules/refactor.md) el kitabını oku.  
   *(Özet: Davranış sabittir, önce karakterizasyon testi doğrulanır, içten dışa icra edilir, bütçe daralması aranır).*
 
 * 🌟 **Feature Görevleri (Yeni Yetenek, Davranış Değişimi):**  
-  Detaylı yönergeler için [**`rules/feature.md`**](file:///C:/Users/oguz_/.gemini/config/plugins/edge/rules/feature.md) el kitabını oku.  
+  Detaylı yönergeler için [**`rules/feature.md`**](rules/feature.md) el kitabını oku.  
   *(Özet: Dıştan içe icra edilir, kabul kriterleri ve spec-wise review esastır).*
 
 * ⏸️ **Oturum Duraklatma (Pause-Safely & Context Heat):**  
-  Bağlam sınırı yaklaştığında veya kullanıcı dur dediğinde [**`rules/playbooks/pause-safely.md`**](file:///C:/Users/oguz_/.gemini/config/plugins/edge/rules/playbooks/pause-safely.md) kılavuzunu uygula.
+  Bağlam sınırı yaklaştığında veya kullanıcı dur dediğinde [**`rules/playbooks/pause-safely.md`**](rules/playbooks/pause-safely.md) kılavuzunu uygula.
 
 * ▶️ **Oturum Devralma (Session-Pickup & Zero-Amnesia):**  
-  Yeni bir oturum açıldığında transkript okumadan durumu devralmak için [**`rules/playbooks/session-pickup.md`**](file:///C:/Users/oguz_/.gemini/config/plugins/edge/rules/playbooks/session-pickup.md) kılavuzunu uygula.
+  Yeni bir oturum açıldığında transkript okumadan durumu devralmak için [**`rules/playbooks/session-pickup.md`**](rules/playbooks/session-pickup.md) kılavuzunu uygula.
 
 * 📖 **Domain Operasyonel El Kitapçıkları (Distilled Playbooks):**  
   Belirli bir domain veya proje üzerinde çalışmaya başlamadan önce varsa `.edge/stations/<role>.md` yerel istasyon katmanını oku. Tamamlanan bilet sonrası `/edge-distill` ile güncel bilgi damıtılır.
 
 * 🐝 **Swarm vs. Brigade Playbook (Kolektif Çalışma & Yatay Bölümleme):**  
-  Detaylı yönergeler için [**`rules/playbooks/swarm-vs-brigade.md`**](file:///C:/Users/oguz_/.gemini/config/plugins/edge/rules/playbooks/swarm-vs-brigade.md) el kitabını oku.  
+  Detaylı yönergeler için [**`rules/playbooks/swarm-vs-brigade.md`**](rules/playbooks/swarm-vs-brigade.md) el kitabını oku.  
   *(Özet: Dikey özellikler ve kontrat değişimleri Brigade'de; yatay/sharded refaktör, A/B mimari denemeler ve çok açılı RCA Swarm'da icra edilir).*
 
 ---

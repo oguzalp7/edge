@@ -16,12 +16,12 @@ This document establishes the mandatory engineering standards, lifecycle invaria
 
 ---
 
-## 🐧 2. WSL2-First Execution & Path Normalization
+## 🌐 2. Cross-OS Execution & Path Normalization
 
-1. **WSL2 Runtime Environment:** All execution, build, and test steps run under Linux WSL2 (`/home/oguz/...`). Antigravity terminal execution must invoke WSL via `wsl bash -lc "cd <worktree-path> && ..."`.
+1. **Cross-OS Runtime Environment:** Execution, build, and test steps support native Windows, WSL2, macOS, and native Linux via `tools.common.env` and `~/.edge/machine.json`. Only when a Windows host targets a WSL2 repository should commands dispatch via `wsl --cd <linux_path> ...` (omitting `-d` when `get_wsl_distro()` is empty).
 2. **Path Normalization:**
-   - Use `tools.common.paths` (`normalize_target_path`, `to_wsl_path`, `is_wsl_path`) to translate transparently between Windows UNC paths (`\\wsl.localhost\Ubuntu-24.04\...`) and Linux WSL paths (`/home/oguz/...`).
-   - Tools must never assume a single OS path separator or drive format.
+   - Use `tools.common.env` (`resolve_host_path`, `detect_os_mode`, `get_wsl_distro`) and `tools.common.paths` (`normalize_target_path`, `to_wsl_path`, `is_wsl_path`) to translate transparently between Windows drive/UNC paths (`\\wsl.localhost\<distro>\...`) and POSIX paths (`/home/...`).
+   - Tools must never assume a single OS path separator, drive letter, or hardcoded user/distro name.
 
 ---
 
