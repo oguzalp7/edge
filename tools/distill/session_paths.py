@@ -8,12 +8,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 DEFAULT_BRAIN_ROOTS = [
-    Path(r"C:\Users\oguz_\.gemini\antigravity\brain"),
-    Path(r"C:\Users\oguz_\.gemini\antigravity-cli\brain"),
-    Path("/mnt/c/Users/oguz_/.gemini/antigravity/brain"),
-    Path("/mnt/c/Users/oguz_/.gemini/antigravity-cli/brain"),
-    Path.home() / ".gemini" / "antigravity" / "brain",
-    Path.home() / ".gemini" / "antigravity-cli" / "brain",
+    Path("~/.gemini/antigravity/brain"),
+    Path("~/.gemini/antigravity-cli/brain"),
 ]
 
 BRAIN_REGEX = re.compile(r"[/\\]\.gemini[/\\]antigravity(?:-cli)?[/\\]brain", re.IGNORECASE)

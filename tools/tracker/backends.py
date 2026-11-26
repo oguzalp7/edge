@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Protocol, Sequence, Tuple, Union
 
+from tools.common.env import get_wsl_distro
 from tools.common.paths import WSL_DISTRO, is_wsl_path, normalize_target_path, to_wsl_path
 from .models import TrackerAuthError, TrackerBackendKind, TrackerComment, TrackerError, TrackerIssue
 
@@ -48,12 +49,17 @@ def needs_wsl_dispatch(cwd: Optional[Union[str, Path]]) -> bool:
     return cwd is not None and is_wsl_path(cwd) and os.name == "nt"
 
 
+def _wsl_prefix() -> List[str]:
+    distro = get_wsl_distro() or WSL_DISTRO
+    return ["wsl", "-d", distro] if distro else ["wsl"]
+
+
 def binary_exists(name: str, cwd: Optional[Union[str, Path]] = None) -> bool:
     """Return True if ``name`` is available natively or inside WSL PATH."""
     if not needs_wsl_dispatch(cwd):
         return shutil.which(name) is not None
     try:
-        return subprocess.run(["wsl", "-d", WSL_DISTRO, "which", name], capture_output=True, text=True, timeout=10).returncode == 0
+        return subprocess.run([*_wsl_prefix(), "which", name], capture_output=True, text=True, timeout=10).returncode == 0
     except Exception:
         return False
 
@@ -129,7 +135,7 @@ def _redact_secret(text: str, token: Optional[str]) -> str:
 def _build_exec_args(cmd: Sequence[str], cwd: Union[str, Path]) -> Tuple[List[str], Optional[str]]:
     if needs_wsl_dispatch(cwd):
         wsl_cwd = to_wsl_path(cwd)
-        return ["wsl", "-d", WSL_DISTRO, "bash", "-c", f"cd {shlex.quote(wsl_cwd)} && {shlex.join(list(cmd))}"], None
+        return [*_wsl_prefix(), "bash", "-c", f"cd {shlex.quote(wsl_cwd)} && {shlex.join(list(cmd))}"], None
     norm = normalize_target_path(cwd)
     return list(cmd), str(norm) if norm.exists() else None
 

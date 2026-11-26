@@ -21,10 +21,12 @@ from tools.distill.harvester_signals import _gather_subsequent_result_list
 
 
 def default_brain_roots() -> List[Path]:
+    from tools.common.env import get_brain_dir
+
     home = Path.home()
     candidates = [
+        get_brain_dir(),
         home / ".gemini" / "antigravity" / "brain",
-        Path("/mnt/c/Users/oguz_/.gemini/antigravity/brain"),
     ]
     env_root = os.environ.get("GEMINI_BRAIN_ROOT")
     if env_root:
