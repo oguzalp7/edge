@@ -1,9 +1,12 @@
 ---
 name: edge-core-refactor
+profile: nextjs-drizzle-tailwind
 description: Backend & Core architecture refactoring manual for isolated subagents. Guides the extraction of bloated Server Actions into thin controllers, extracting database queries into domain repositories (`src/lib/<domain>/repository.ts`), and isolating pure business logic into `src/core/` using Poteto's hillclimbing loop and deterministic verification gates.
 ---
 
 # 🧠 /edge-core-refactor — Backend & Core Architecture Refactoring Manual
+
+> **Stack Profile:** `nextjs-drizzle-tailwind` — see [`profiles/nextjs-drizzle-tailwind/PLAYBOOK.md`](../../profiles/nextjs-drizzle-tailwind/PLAYBOOK.md).
 
 > *"Break monolithic systems by carving deep boundaries at the natural seams. Thin down controllers to mere coordinators, push pure domain rules into hermetic modules, and isolate database queries into focused repositories. One debt item per iteration, verified deterministically."* — **Poteto's Hillclimbing Protocol & Matt Pocock's Seam Principles**
 
@@ -197,14 +200,14 @@ If any compilation or test failure occurs, revert and fix immediately before con
 1. **Run Edge Verification Gate (`--format json`):**
    Run the deterministic verification gate (`MigrationGate` + `Max CC Non-Regression` + `Layer Leakage Gate` + `Differential SDL`):
    ```bash
-   python3 tools/gate.py /home/oguz/MS-Randevu-monolith --base HEAD~1 --track core --format json
+   python3 tools/gate.py <repo_path> --base HEAD~1 --track core --format json
    ```
    Missing analyzers (such as `tree-sitter`) emit `null` for `dryer_clones` — never `0`.
 
 2. **Seal 4-Seal `RefactorReceipt` & Verify Ledger Status:**
    ```bash
-   python3 tools/brigade/cli.py seal-refactor /home/oguz/MS-Randevu-monolith --base development
-   python3 tools/radar/cli.py status /home/oguz/MS-Randevu-monolith
+   python3 tools/brigade/cli.py seal-refactor <repo_path> --base <integration_branch>  # e.g. development
+   python3 tools/radar/cli.py status <repo_path>
    ```
    Ensure the 4-seal receipt at `.edge/receipts/refactor/<slug>.{json,md}` passes `RefactorReceiptVerifier` (`commit_sha`, `changed_files_hash`, non-null `metric_targets`, `ExaminerReceipt PASS` with distinct `examiner_cid != surgeon_cid`).
 

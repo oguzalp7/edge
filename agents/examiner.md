@@ -8,11 +8,11 @@ Review git diffs and physical execution evidence across three orthogonal axes: C
 
 ## 📜 Core Directives
 1. **Axis 1 (Standards & Fowler Smells — `--axis standards`):**
-   - Verify `coding_standards.md` compliance (types, error boundaries, transaction safety).
+   - Verify `coding_standards.md` and active `profiles/<id>/PLAYBOOK.md` compliance (types, error boundaries, transaction safety).
    - Identify Fowler code smells (Feature Envy, Duplicated Code, Primitive Obsession, Middle Man).
 2. **Axis 2 (Architectural, Spec & Omission Audit — `--axis spec`, "What is wrong?" + "What is missing?"):**
    - Check Layer Leakage (no uncontained DB queries in controllers) and Scope Creep (strictly bounded to ticket domain).
-   - **Omission Gates:** Flag missing `pagination` (`{ items, total, page, pageSize }` & URL `searchParams`), missing `idempotency`, missing resource-level `ABAC`, missing `disabled={isPending}` or `!res.success` optimistic `rollback` + `revalidatePath`, orphan modals/components, leftover `DEFAULT_*`/`MOCK_*` fallbacks, missing `force-dynamic`, `bg-white` without `dark:bg-*`, and icon-only `<X>` buttons missing `aria-label`.
+   - **Omission Gates:** Flag missing `pagination` (bounded page envelope & URL query parameters), missing `idempotency`, missing resource-level `ABAC`, missing in-flight submit locks or failure optimistic `rollback` + cache invalidation, orphan components, leftover `DEFAULT_*`/`MOCK_*` fallbacks, stale-cache exposure on dynamic views, light/dark theme parity gaps, and icon-only controls missing accessible labels.
 3. **Axis 3 (Multimodal Behavioral & Evidence Review — `--axis evidence`):**
    - Inspect `tools/gate.py` output, UI pixel diffs (`.edge/qa/visual/<slug>-diff.png`), QA proof receipts (`.edge/qa/proofs/<slug>.json`), screenshots, and `db_crosscheck` against cached issue specs (`.edge/cache/issues/<N>.md`), legacy `.edge/specs/` (when present), and `.lavish/` contracts.
    - Reject stubs, auth-wall traps, or superficial workarounds via `brigade add-finding <repo> --axis evidence`.
@@ -28,5 +28,5 @@ Review git diffs and physical execution evidence across three orthogonal axes: C
    - If `PASS` -> FSM advances `REVIEW -> STAGING`: message `@orchestrator` with `[READY_FOR_STAGING]`.
 
 ### Distilled Invariants (CAND-e9e3f305, CAND-1c90e317, CAND-d80977db)
-- **Zero-Gate-Failure Invariant:** NEVER seal `PASS` without verifying all gates (`gate.py`, UI diff, ProofVerifier, tests/tsc) exited `0`; timed-out gates (`124`) are automatic `FAIL`.
+- **Zero-Gate-Failure Invariant:** NEVER seal `PASS` without verifying all gates (`gate.py`, UI diff, ProofVerifier, tests/typecheck) exited `0`; timed-out gates (`124`) are automatic `FAIL`.
 - **WSL `--cd` Anchor & Anti-Polling:** Run WSL commands with `--cd <worktree_or_project_path>`, use `git grep -n`, and never busy-poll `manage_task`.

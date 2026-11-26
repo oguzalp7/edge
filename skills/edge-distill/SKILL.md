@@ -72,7 +72,7 @@ For each proposed invariant:
    wsl python3 tools/distill/cli.py candidates record --rule "<rule>" --role <role> --project <repo_path>
    ```
 2. **Classification Sieve:**
-   - `REPO_LOCAL`: Contains stack, framework, or path tokens (Next.js, Drizzle, Tailwind, `.tsx`, `src/actions`). Routed to project overlay `.edge/stations/<role>.md` or `coding_standards.md`.
+   - `REPO_LOCAL`: Contains stack, framework, or path tokens defined by Stack Profiles (e.g., `profiles/nextjs-drizzle-tailwind/`). Routed to project overlay `.edge/stations/<role>.md` or `coding_standards.md`.
    - `PLUGIN_CANDIDATE`: Pure engineering discipline. Incubated in `.edge/stations/<role>.md` and registered in the candidate pool until validated across >= 2 distinct projects.
 3. **Line Budget Ceiling Verification:**
    ```bash

@@ -41,8 +41,8 @@ Findings are strictly partitioned to prevent cognitive context dilution:
 
 ```
 .edge/ledger/
-├── ui.json       <-- Frontend Track (JSX Tailwind clusters, orphan components, magic headers)
-├── core.json     <-- Backend Track (Fat actions >80 LOC, SQL leaks, CRAP score >= 30, AST duplicates, missing tests)
+├── ui.json       <-- Frontend Track (UI component clusters, orphan components, magic headers per active Stack Profile)
+├── core.json     <-- Backend Track (Fat controllers >80 LOC, DB leaks, CRAP score >= 30, AST duplicates, missing tests)
 └── meta.json     <-- Executive index & systemic macro pattern detector
 ```
 

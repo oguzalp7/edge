@@ -1,9 +1,12 @@
 ---
 name: edge-ui-refactor
+profile: nextjs-drizzle-tailwind
 description: Front-end UI refactoring manual for isolated subagents. Guides the safe extraction of repetitive Tailwind JSX markup into centralized primitives under src/components/ui/ with visual parity verification via chrome-devtools-axi.
 ---
 
 # 🎨 /edge-ui-refactor — Frontend UI Primitive Consolidation Manual
+
+> **Stack Profile:** `nextjs-drizzle-tailwind` — see [`profiles/nextjs-drizzle-tailwind/PLAYBOOK.md`](../../profiles/nextjs-drizzle-tailwind/PLAYBOOK.md).
 
 This skill guides a bounded, single-purpose subagent through consolidating duplicate Tailwind JSX structures (modals, drawers, buttons, skeletons, cards) into centralized primitives under `src/components/ui/`.
 
@@ -85,8 +88,8 @@ uv run --with pillow python -m tools.ui_audit.diff_image <slice>-baseline.png <s
 ### Step 7: Edge Verification Gate, 4-Seal `RefactorReceipt` & PR Delivery
 Before submitting or creating a PR, run the deterministic Edge Verification Gate in JSON mode and seal the 4-seal `RefactorReceipt`:
 ```bash
-python3 /mnt/c/Users/oguz_/.gemini/config/plugins/edge/tools/gate.py /home/oguz/MS-Randevu-monolith --base HEAD~1 --track ui --format json
-python3 /mnt/c/Users/oguz_/.gemini/config/plugins/edge/tools/brigade/cli.py seal-refactor /home/oguz/MS-Randevu-monolith --base development
+python3 <plugin_root>/tools/gate.py <repo_path> --base HEAD~1 --track ui --format json
+python3 <plugin_root>/tools/brigade/cli.py seal-refactor <repo_path> --base <integration_branch>  # e.g. development
 ```
 All stages (`MigrationGate`, `Max CC Non-Regression`, `Mock Fallback`, `Type Escape`, `Dual-Theme & A11y`, `Zero-Wrapper`, `Domain Purity`, and `Hermetic Verification`) plus `RefactorReceiptVerifier` (`ExaminerReceipt PASS`, `examiner_cid != surgeon_cid`) must pass.
 Then deliver via Brigade PR flow (`brigade finish-slice <repo> --pr`, followed by `brigade confirm-merge <repo>` once Two-Way Door auto-merge completes).

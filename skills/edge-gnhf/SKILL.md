@@ -29,7 +29,7 @@ suggested_skills:
 
 3. **İzole Git Worktree Garantisi:**
    - Otonom koşular doğrudan ana çalışma ağacına dokunmaz; izole `gnhf/*` worktree dallarında koşar.
-   - Ana geliştirme dalı (`development` / `main`), sabah `tools/gate.py` kalite kapısı %100 yeşil olmadan birleştirilemez.
+   - Ana geliştirme dalı (`<integration_branch>`, ör. Pure Core/`typescript` için `main`, `nextjs-drizzle-tailwind` için `development`), sabah `tools/gate.py` kalite kapısı %100 yeşil olmadan birleştirilemez.
 
 4. **Çift Sinyalli Hook Zırhı (`EDGE_AFK`):**
    - Alt ajan çağrısı (`invoke_subagent`) kesin olarak engellenir (Single-Agent Invariant).
@@ -44,29 +44,29 @@ Kullanıcı, terminalinde `edge-gnhf` komutunu doğrudan çalıştırabilir:
 ### A. Otonom Koşu Başlatma (`run`)
 ```bash
 # Standart güvenli refaktör (strict mod - testler ve şemalar korunur)
-edge-gnhf run /home/oguz/next-enterprise "Decouple legacy Stripe webhook handlers into repository pattern"
+edge-gnhf run /home/oguz/<project> "Decouple legacy Stripe webhook handlers into repository pattern"
 
 # Test ve şema mutasyonuna izin veren koşu (yolo mod)
-edge-gnhf run /home/oguz/next-enterprise "Overhaul auth models and update integration tests" --yolo
+edge-gnhf run /home/oguz/<project> "Overhaul auth models and update integration tests" --yolo
 
 # Önizleme (dry-run - prompt ve çözümlenen komutu ekrana basar, alt-işlem başlatmaz)
-edge-gnhf run /home/oguz/next-enterprise "Decouple stripe webhook" --dry-run
+edge-gnhf run /home/oguz/<project> "Decouple stripe webhook" --dry-run
 
 # Özel kısıtlamalar ve komutlar ile
-edge-gnhf run /home/oguz/next-enterprise "Migrate server actions" \
+edge-gnhf run /home/oguz/<project> "Refactor domain controllers" \
   --mode strict \
   --track core \
   --max-iterations 20 \
   --max-tokens 300000 \
-  --test-cmd "npx vitest run src/billing.test.ts"
+  --test-cmd "<unit_test_cmd>"
 ```
 
 #### Mod Karşılaştırması:
 | Kural / Dizin | `strict` Mod (Varsayılan) | `yolo` Mod (`--yolo`) |
 |---|---|---|
-| `src/**`, `app/**`, `lib/**` | ✅ Serbest | ✅ Serbest |
+| `<source_roots>` (ör. `src/**`) | ✅ Serbest | ✅ Serbest |
 | `tests/**`, `*.test.*`, `*.spec.*` | ❌ **YASAK** (Test İmmutability) | ✅ İzin Verilir |
-| `db/schema/**`, `drizzle/**` | ❌ **YASAK** (MigrationGate) | ✅ İzin Verilir |
+| `<schema_globs>`, `<migration_globs>` (ör. `src/db/schema/*`, `drizzle/*`) | ❌ **YASAK** (MigrationGate) | ✅ İzin Verilir |
 | `invoke_subagent` (Alt ajan) | ❌ **YASAK** | ❌ **YASAK** |
 | `.edge/*.json` (HITL durum dosyaları) | ❌ **YASAK** | ❌ **YASAK** |
 
@@ -75,24 +75,24 @@ edge-gnhf run /home/oguz/next-enterprise "Migrate server actions" \
 ### B. Durum ve Blocker Takibi (`status`)
 Sabah terminale dönüldüğünde aktif veya tamamlanan worktree'lerin durumunu ve triaj notlarını görüntüler:
 ```bash
-edge-gnhf status /home/oguz/next-enterprise
+edge-gnhf status /home/oguz/<project>
 ```
 
 **Örnek Çıktı:**
 ```text
-🌙 Edge-GNHF Active Worktrees Status: /home/oguz/next-enterprise
+🌙 Edge-GNHF Active Worktrees Status: /home/oguz/<project>
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Worktree: /home/oguz/next-enterprise/.worktrees/gnhf-refactor-api
+Worktree: /home/oguz/<project>/.worktrees/gnhf-refactor-api
 Branch:   gnhf/refactor-api-routes
-Base:     development
-Commits:  14 commits ahead of development
+Base:     <integration_branch>
+Commits:  14 commits ahead of <integration_branch>
 Last Run: 2026-10-31 03:45:12 UTC ("refactor: decouple customer billing actions")
 
 ⚠️ Triaged Blockers ([SKIPPED-NEEDS-HITL]):
   1. src/server/auth.ts: Circular dependency with user-session repository.
-  2. src/db/schema/org.ts: Schema locked in strict mode; requires migration.
+  2. <schema_globs>/org: Schema locked in strict mode; requires migration.
 
-Status: READY FOR HARVEST (`edge-gnhf harvest /home/oguz/next-enterprise gnhf/refactor-api-routes`)
+Status: READY FOR HARVEST (`edge-gnhf harvest /home/oguz/<project> gnhf/refactor-api-routes`)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
@@ -102,10 +102,10 @@ Status: READY FOR HARVEST (`edge-gnhf harvest /home/oguz/next-enterprise gnhf/re
 Kalite kapısını (`gate.py`) doğrular, diff özetini çıkarır ve temiz fast-forward birleştirme yapar:
 ```bash
 # Önizleme (dry-run) - hiçbir şeyi değiştirmez
-edge-gnhf harvest /home/oguz/next-enterprise gnhf/refactor-api-routes --dry-run
+edge-gnhf harvest /home/oguz/<project> gnhf/refactor-api-routes --dry-run
 
-# Doğrula, development dalına fast-forward merge et ve worktree'yi temizle
-edge-gnhf harvest /home/oguz/next-enterprise gnhf/refactor-api-routes --base development --merge --cleanup
+# Doğrula, <integration_branch> dalına fast-forward merge et ve worktree'yi temizle
+edge-gnhf harvest /home/oguz/<project> gnhf/refactor-api-routes --base <integration_branch> --merge --cleanup
 ```
 
 ---
@@ -117,7 +117,7 @@ Sohbet ajanı `/edge-gnhf` komutunu aldığında aşağıdaki iki fazlı el sık
 ### 🌙 Faz 1: Akşam Hazırlığı (Evening Preparation)
 1. **Hedef Kapsam Belirleme:**
    - Eğer kullanıcı belirli bir hedef belirtmediyse:
-     - Salt-okunur olarak `python3 /mnt/c/Users/oguz_/.gemini/config/plugins/edge/tools/audit/cli.py` veya `python3 /mnt/c/Users/oguz_/.gemini/config/plugins/edge/tools/radar/scanner.py` çalıştırır.
+     - Salt-okunur olarak `python3 <plugin_root>/tools/audit/cli.py` veya `python3 <plugin_root>/tools/radar/scanner.py` çalıştırır.
      - En çok teknik borç barındıran (God files, yüksek cyclomatic complexity, CRAP skoru yüksek) Top-3 hedefi kullanıcıya sunar.
 2. **Güvenlik Modu Hizalaması:**
    - Kod kalitesi ve mimari refaktör için `--mode strict` önerir.

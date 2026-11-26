@@ -212,7 +212,7 @@ class TestContextSystemContracts(unittest.TestCase):
             "Examiner 3-Axis Seal",
             "Tier 1",
             "Tier 2",
-            "--base development",
+            "--base <integration_branch>",
             "smoke-routes",
             "--require-smoke",
             "TICK-PERF-",
@@ -223,6 +223,9 @@ class TestContextSystemContracts(unittest.TestCase):
             "Security & ABAC Audit",
         ):
             self.assertIn(preserved, text)
+
+        playbook = (self.repo_root / "profiles" / "nextjs-drizzle-tailwind" / "PLAYBOOK.md").read_text(encoding="utf-8")
+        self.assertIn("development -> staging", playbook)
 
 
 if __name__ == "__main__":

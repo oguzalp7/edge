@@ -38,16 +38,16 @@ Canonical domain deeds live at `docs/<domain>/DOMAIN.md` with pure abstract meta
 ---
 domain: bookings
 tracked_paths:
-  - src/lib/bookings/**
-  - src/actions/bookings.ts
-  - src/db/schema/bookings.ts
+  - src/bookings/**
+  - <action_or_controller_globs>
+  - <schema_globs>
 ---
 
 # Bookings Domain Contract
 
 ## Core Invariants
 1. Booking slots can never overlap for the same resource.
-2. Direct database mutations outside `src/lib/bookings/repository.ts` are strictly forbidden.
+2. Direct database mutations outside the domain repository boundary are strictly forbidden.
 
 ## Domain Boundaries
 - Owns: Reservations, cancellation policies, slot availability.
@@ -61,14 +61,14 @@ tracked_paths:
 ```yaml
 ---
 domain: orders
-tracked_paths: ["src/lib/orders/**", "src/actions/orders.ts"]
+tracked_paths: ["src/orders/**", "src/controllers/orders.ts"]
 ---
 ```
 
 ### Path Matching Rules
-- `src/lib/bookings/**`: Matches all files in `src/lib/bookings/` and all nested subdirectories.
-- `src/actions/bookings.ts`: Matches exact file.
-- `src/lib/**/*.ts`: Matches any TypeScript file under `src/lib/`.
+- `src/bookings/**`: Matches all files in `src/bookings/` and all nested subdirectories.
+- `src/controllers/bookings.ts`: Matches exact file (or `<action_globs>` / `<schema_globs>` configured in `profiles/<id>/profile.json`).
+- `src/**/*.ts`: Matches any TypeScript file under `src/`.
 
 ---
 
@@ -143,7 +143,7 @@ Distills scattered specs and live code into a domain deed (`docs/<domain>/DOMAIN
 ```bash
 python tools/drift/cli.py consolidate . \
   --domain bookings \
-  --paths "src/lib/bookings/**,src/actions/bookings.ts" \
+  --paths "src/bookings/**,src/controllers/bookings.ts" \
   --issue 10 \
   --archive-sources
 ```
@@ -169,6 +169,6 @@ If the live code took an illegal shortcut (e.g. bypassing repository boundary, i
 1. Review findings in `.edge/drift/latest-drift-report.md`.
 2. File an immediate remediation ticket via `tools/tracker/cli.py` (`tasks-axi` and `frontier-axi` are soft-deprecated):
    ```bash
-   python3 tools/tracker/cli.py create . --title "Fix DB leak in src/actions/bookings.ts" --label track:core --label status:ready
+   python3 tools/tracker/cli.py create . --title "Fix DB leak in bookings controller" --label track:core --label status:ready
    ```
 3. Run the slice through Edge Brigade to restore alignment with the contract.

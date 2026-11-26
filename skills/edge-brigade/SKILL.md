@@ -84,7 +84,7 @@ Instead of spawning disposable generalist agents that try to do everything and e
 8. **QA_ENGINEER (`qa_engineer` / Sommelier)**:
    - **Role:** End-to-end browser verification, visual quality assurance, and user journey testing.
    - **Protocol:** Receives translated user scenarios mapped to project ubiquitous domain vocabulary by the Orchestrator. Delegates physical browser interactions to the built-in `browser` subagent (`TypeName: "browser"`, `Model: "flash"`). Stages Lavish references to `<Artifact Directory>/browser_sandbox/references/`. Enforces state persistence via DOM reload and backend DB/state cross-checks (`run_command`). Synthesizes `ProofVerifier`-compliant Behavioral Proof Receipt (`.edge/qa/proofs/<slug>.json` with unique-SHA-256 screenshots, non-auth URLs, `host_facts_verified: true`, and `db_crosscheck`) before advancing to `REVIEW` (`EXAMINER`).
-   - **Constraint:** Strictly zero production code mutation (`src/**`, `app/**`, `lib/**`, `db/**`). Documents defects with reproduction steps, network payloads, console errors, and screenshots. Parks non-blocking UX issues via `qa-inspect --frontier` into `tools/tracker` (`type:frontier`, `track:ui`; `frontier-axi` soft-deprecated).
+   - **Constraint:** Strictly zero production code mutation (`<source_roots>`, e.g., `src/**`, `app/**`, `lib/**`, `db/**`). Documents defects with reproduction steps, network payloads, console errors, and screenshots. Parks non-blocking UX issues via `qa-inspect --frontier` into `tools/tracker` (`type:frontier`, `track:ui`; `frontier-axi` soft-deprecated).
 
 ### Station Memory Models: Elephant vs. Goldfish
 * 🐘 **Persistent Elephant Stations (`PERSISTENT_ELEPHANT_ROLES`):**  
@@ -124,7 +124,7 @@ Transitions are **stateless reducers** governed purely by process exit codes and
                                               │
                                               ▼
                                            VERIFY
-                                              │ (guard_verify_to_gate: tests exit==0, tsc exit==0)
+                                              │ (guard_verify_to_gate: tests exit==0, typecheck exit==0)
                                               ▼
                                             GATE
                                               │ (guard_gate_to_next: gate.py==0 + ui diff_image<=0.15%)
@@ -141,7 +141,7 @@ Transitions are **stateless reducers** governed purely by process exit codes and
                                               ├──[CRITICAL or FAIL]──► POLISH (re-enters GATE)
                                               ▼ [0 CRITICAL & ExaminerReceipt PASS]
                                            STAGING
-                                              │ (guard_staging: git merge --ff-only into development,
+                                              │ (guard_staging: git merge --ff-only into <integration_branch>,
                                               │  archives .edge/specs/<slice>.md to .edge/archive/specs/,
                                               │  returns Treehouse worktree, resets ExaminerReceipt)
                                               ▼
@@ -158,8 +158,8 @@ Transitions are **stateless reducers** governed purely by process exit codes and
 ### 1. Treehouse Worktree Pool Allocation (`treehouse get --lease`)
 - Every vertical slice (feature or refactor) runs in a dedicated, isolated git worktree leased from the Treehouse pool (`/home/oguz/.treehouse/pool/slot-N`).
 - In feature slices, `brigade start-slice --track feature` leases the worktree upfront, preserving the Zero-Touch Primary Invariant throughout test authoring, surgery, verification, and review.
-- The primary checkout stays on `development` completely untouched during surgery, verification, and review.
-- In `guard_staging_to_completed`, changes are fast-forward merged (`git merge --ff-only`) into `development`, and the worktree slot is returned cleanly to the pool.
+- The primary checkout stays on `<integration_branch>` (`main` in Pure Core/`typescript`; `development` in `nextjs-drizzle-tailwind`) completely untouched during surgery, verification, and review.
+- In `guard_staging_to_completed`, changes are fast-forward merged (`git merge --ff-only`) into `<integration_branch>`, and the worktree slot is returned cleanly to the pool.
 
 ### 2. Living Flight Recorder & Negative Constraints Ledger
 - Maintained under `.edge/flight-recorder/<ticket_id>.json` and `<ticket_id>-learnings.md`.
@@ -183,8 +183,8 @@ Transitions are **stateless reducers** governed purely by process exit codes and
 Run from target repository or plugin directory:
 
 ```bash
-# 1. Initialize Brigade state in target repository (Default base branch: development)
-brigade init /path/to/repo --base-branch development
+# 1. Initialize Brigade state in target repository (defaults to active profile integration branch)
+brigade init /path/to/repo --base-branch <integration_branch>
 
 # 2. Register persistent station workers (using their conversation_id and optional --model)
 brigade register /path/to/repo --role spec_writer --conversation-id <id> --name "Spec Writer" --model flash
@@ -207,7 +207,7 @@ brigade critique-spec --issue <parent_issue> /path/to/repo
 
 # 6. Dikey Dilim Başlat (Feature: Parent Issue cached to .edge/cache/issues/, Child Issue -> status:in-progress)
 brigade start-slice --issue <child_issue> --parent-issue <parent_issue> --name staff-allocation --track feature /path/to/repo
-brigade create-refactor-ticket /path/to/repo --slug bookings-leak --track core --rules RULE-ACTION-DB-LEAK --files src/actions/bookings.ts --targets db_leaks=0,max_cc=10 --parent-issue <parent_issue> --hold-captain
+brigade create-refactor-ticket /path/to/repo --slug bookings-leak --track core --rules RULE-ACTION-DB-LEAK --files <source_file> --targets db_leaks=0,max_cc=10 --parent-issue <parent_issue> --hold-captain
 
 # 7. Radar Bilet Triage (Refactor borç defterinden bilet alır ve worktree kiralar)
 brigade triage /path/to/repo --track core
@@ -217,17 +217,17 @@ brigade ticket /path/to/repo --prompt
 
 # 9. Examiner 3-Axis Seal (REVIEW durumunda zorunlu mühür) ve 4-Mühürlü RefactorReceipt
 brigade seal-review /path/to/repo --verdict PASS --summary "3-axis & evidence verified" --evidence-reviewed ".edge/qa/proofs/slug.json"
-brigade seal-refactor /path/to/repo --slug bookings-leak --base development
+brigade seal-refactor /path/to/repo --slug bookings-leak --base <integration_branch>
 
 # 10. Durum Makinesini İlerlet (Deterministik kapıları çalıştırır; GATE -> REVIEW/QA aşamasında RefactorReceipt sentezler)
 brigade advance /path/to/repo
 
-# 11. Dikey Dilimi Tamamla (development Dalına Fast-Forward Merge veya --pr ile AWAITING_MERGE / confirm-merge)
+# 11. Dikey Dilimi Tamamla (<integration_branch> Dalına Fast-Forward Merge veya --pr ile AWAITING_MERGE / confirm-merge)
 brigade finish-slice /path/to/repo
 brigade confirm-merge /path/to/repo
 
 # 12. Specs-to-PR Köprüsü (no-mistakes öncesi PR gövdesi, intent ve One-way/Two-way Door risk analizi)
-brigade prepare-ship /path/to/repo --base staging --format pr
+brigade prepare-ship /path/to/repo --base <staging_or_integration_branch> --format pr
 
 # 11. Yaşayan Alan Senetlerini Denetle (Drift Scanner)
 python3 tools/drift/cli.py check /path/to/repo

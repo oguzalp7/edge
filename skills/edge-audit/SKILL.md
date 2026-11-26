@@ -25,7 +25,7 @@ uv run python ~/.gemini/config/plugins/edge/tools/audit/cli.py <target-path> -o 
 ```
 
 ### 2. UI Component & JSX Duplication Track
-Audits Next.js/React TSX component DAG, orphan components, dead imports, and duplicate JSX clusters:
+Audits UI component DAG, orphan components, dead imports, and duplicate JSX clusters (active for UI-capable profiles such as `nextjs-drizzle-tailwind`):
 ```bash
 uv run python ~/.gemini/config/plugins/edge/tools/audit/cli.py <target-path> --track ui --format table
 uv run python ~/.gemini/config/plugins/edge/tools/audit/cli.py <target-path> --track ui --format markdown -o ui_rfc.md
@@ -94,7 +94,7 @@ uv run python ~/.gemini/config/plugins/edge/tools/audit/cli.py . --track all --f
     - `RULE-TS-UNSAFE-AS` (`-10p`, WARNING): `expr as <Type>` (excludes `as const`, `as any`, `as unknown as`, import/export aliases; recommends `satisfies` for object/array literals).
     - `RULE-TS-NON-NULL` (`-10p`, WARNING): Postfix non-null assertion `expr!`.
     - `RULE-TS-CONSOLE-LOG` (`-8p`, WARNING): `console.log(...)` in non-test production files.
-    - `RULE-TS-RECORD-UNKNOWN` (`-8p`, WARNING): `Record<string, unknown>` inside `src/core/` or `src/lib/` (allowed at perimeter).
+    - `RULE-TS-RECORD-UNKNOWN` (`-8p`, WARNING): `Record<string, unknown>` inside `<core_paths>` (e.g. `src/core/` or `src/lib/`, allowed at perimeter).
     - `RULE-TS-SWITCH-EXHAUSTIVE` (`-8p`, WARNING): `switch` lacking a `default:` branch with a `: never` exhaustiveness binding.
     - `RULE-TS-OPTIONAL-BAG` (`-6p`, ADVISORY): Interface/object type mixing status booleans (`loading`, `isLoading`, `error`, `hasError`, `success`, `isSuccess`, `pending`, `isPending`) with $\ge 2$ optional fields.
     - `RULE-TS-POSITIONAL-ARGS` (`-5p`, ADVISORY): $\ge 4$ positional parameters or $\ge 2$ plain `*Id: string` parameters in one signature.
