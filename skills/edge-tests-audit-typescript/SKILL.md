@@ -17,20 +17,20 @@ Bu beceri, `tests/unit/` dizini altındaki TypeScript birim testlerinin dış d�
 Hedef bir test dizinini veya dosyasını denetlemek için:
 
 ```bash
-# Renkli konsol tablosu (İnsan formatı)
-uv run python ~/.gemini/config/plugins/edge/tools/test_audit/cli.py <target-path>
+# Renkli konsol tablosu (İnsan formatı — macOS/Linux/WSL)
+python3 ~/.gemini/config/plugins/edge/tools/test_audit/cli.py <target-path>
 
 # Windows PowerShell:
-uv run python C:\Users\oguz_\.gemini\config\plugins\edge\tools\test_audit\cli.py tests/unit
+python "$env:USERPROFILE\.gemini\config\plugins\edge\tools\test_audit\cli.py" tests/unit
 
 # AXI / Ajan formatı (Token-Oriented Object Notation)
-uv run python C:\Users\oguz_\.gemini\config\plugins\edge\tools\test_audit\cli.py tests/unit --format toon
+python3 ~/.gemini/config/plugins/edge/tools/test_audit/cli.py tests/unit --format toon
 
 # Sıkı Kapı Doğrulaması (Herhangi bir toksik test varsa fail et)
-uv run python C:\Users\oguz_\.gemini\config\plugins\edge\tools\test_audit\cli.py tests/unit --strict-pure
+python3 ~/.gemini/config/plugins/edge/tools/test_audit/cli.py tests/unit --strict-pure
 
 # Raporu markdown dosyasına kaydetme
-uv run python C:\Users\oguz_\.gemini\config\plugins\edge\tools\test_audit\cli.py tests/unit -o test_health_report.md
+python3 ~/.gemini/config/plugins/edge/tools/test_audit/cli.py tests/unit -o test_health_report.md
 ```
 
 ---

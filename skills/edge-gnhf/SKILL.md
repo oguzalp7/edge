@@ -44,16 +44,16 @@ Kullanıcı, terminalinde `edge-gnhf` komutunu doğrudan çalıştırabilir:
 ### A. Otonom Koşu Başlatma (`run`)
 ```bash
 # Standart güvenli refaktör (strict mod - testler ve şemalar korunur)
-edge-gnhf run /home/oguz/<project> "Decouple legacy Stripe webhook handlers into repository pattern"
+edge-gnhf run <repo_path> "Decouple legacy Stripe webhook handlers into repository pattern"
 
 # Test ve şema mutasyonuna izin veren koşu (yolo mod)
-edge-gnhf run /home/oguz/<project> "Overhaul auth models and update integration tests" --yolo
+edge-gnhf run <repo_path> "Overhaul auth models and update integration tests" --yolo
 
 # Önizleme (dry-run - prompt ve çözümlenen komutu ekrana basar, alt-işlem başlatmaz)
-edge-gnhf run /home/oguz/<project> "Decouple stripe webhook" --dry-run
+edge-gnhf run <repo_path> "Decouple stripe webhook" --dry-run
 
 # Özel kısıtlamalar ve komutlar ile
-edge-gnhf run /home/oguz/<project> "Refactor domain controllers" \
+edge-gnhf run <repo_path> "Refactor domain controllers" \
   --mode strict \
   --track core \
   --max-iterations 20 \
@@ -75,14 +75,14 @@ edge-gnhf run /home/oguz/<project> "Refactor domain controllers" \
 ### B. Durum ve Blocker Takibi (`status`)
 Sabah terminale dönüldüğünde aktif veya tamamlanan worktree'lerin durumunu ve triaj notlarını görüntüler:
 ```bash
-edge-gnhf status /home/oguz/<project>
+edge-gnhf status <repo_path>
 ```
 
 **Örnek Çıktı:**
 ```text
-🌙 Edge-GNHF Active Worktrees Status: /home/oguz/<project>
+🌙 Edge-GNHF Active Worktrees Status: <repo_path>
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Worktree: /home/oguz/<project>/.worktrees/gnhf-refactor-api
+Worktree: <repo_path>/.worktrees/gnhf-refactor-api
 Branch:   gnhf/refactor-api-routes
 Base:     <integration_branch>
 Commits:  14 commits ahead of <integration_branch>
@@ -92,7 +92,7 @@ Last Run: 2026-10-31 03:45:12 UTC ("refactor: decouple customer billing actions"
   1. src/server/auth.ts: Circular dependency with user-session repository.
   2. <schema_globs>/org: Schema locked in strict mode; requires migration.
 
-Status: READY FOR HARVEST (`edge-gnhf harvest /home/oguz/<project> gnhf/refactor-api-routes`)
+Status: READY FOR HARVEST (`edge-gnhf harvest <repo_path> gnhf/refactor-api-routes`)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
@@ -102,10 +102,10 @@ Status: READY FOR HARVEST (`edge-gnhf harvest /home/oguz/<project> gnhf/refactor
 Kalite kapısını (`gate.py`) doğrular, diff özetini çıkarır ve temiz fast-forward birleştirme yapar:
 ```bash
 # Önizleme (dry-run) - hiçbir şeyi değiştirmez
-edge-gnhf harvest /home/oguz/<project> gnhf/refactor-api-routes --dry-run
+edge-gnhf harvest <repo_path> gnhf/refactor-api-routes --dry-run
 
 # Doğrula, <integration_branch> dalına fast-forward merge et ve worktree'yi temizle
-edge-gnhf harvest /home/oguz/<project> gnhf/refactor-api-routes --base <integration_branch> --merge --cleanup
+edge-gnhf harvest <repo_path> gnhf/refactor-api-routes --base <integration_branch> --merge --cleanup
 ```
 
 ---
@@ -123,9 +123,9 @@ Sohbet ajanı `/edge-gnhf` komutunu aldığında aşağıdaki iki fazlı el sık
    - Kod kalitesi ve mimari refaktör için `--mode strict` önerir.
    - Şema değişikliği veya test yazımı gerekiyorsa insan onaylı `--mode yolo` mutabakatı sağlar.
 3. **Komut Üretimi ve Teslimi:**
-   - Kullanıcının doğrudan WSL2 terminaline yapıştıracağı tam komutu kod bloğu olarak sunar:
+   - Kullanıcının doğrudan terminaline yapıştıracağı tam komutu kod bloğu olarak sunar:
      ```bash
-     edge-gnhf run /home/oguz/<project> "<synthesized-objective>" --mode strict --track all
+     edge-gnhf run <repo_path> "<synthesized-objective>" --mode strict --track all
      ```
 4. **Kullanıcıya Yönlendirme:**
    - Kullanıcıya terminali açık bırakarak uyumasını tavsiye eder. İhtiyaç halinde `/schedule` komutunu hatırlatır.
@@ -135,13 +135,13 @@ Sohbet ajanı `/edge-gnhf` komutunu aldığında aşağıdaki iki fazlı el sık
 ### ☀️ Faz 2: Sabah Hasadı (Morning Reconnaissance)
 Kullanıcı sabah sohbete dönüp `/edge-gnhf status` veya `/edge-gnhf harvest` dediğinde:
 1. **Durum Taraması:**
-   - Ajan `edge-gnhf status /home/oguz/<project>` komutunu `run_command` ile çalıştırır.
+   - Ajan `edge-gnhf status <repo_path>` komutunu `run_command` ile çalıştırır.
    - Gece atılan commit sayısını, son commit mesajını ve triaj edilen `[SKIPPED-NEEDS-HITL]` engellerini kullanıcıya raporlar.
 2. **Kalite Kapısı & Diff Özeti:**
-   - `edge-gnhf harvest /home/oguz/<project> --dry-run` çalıştırarak kalite kapısının durumunu ve diff istatistiklerini kontrol eder.
+   - `edge-gnhf harvest <repo_path> --dry-run` çalıştırarak kalite kapısının durumunu ve diff istatistiklerini kontrol eder.
 3. **İsteğe Bağlı EXAMINER İncelemesi:**
    - Kullanıcı detaylı mimari inceleme isterse:
      - `EXAMINER` istasyon çalışanını (`Model: "flash"`) göreve çağırarak diff üzerinde standart denetimi yaptırır.
 4. **İnsan Onayı ile Birleştirme:**
    - Ajan asla onay almadan merge yapmaz.
-   - İnsan onayının ardından `edge-gnhf harvest /home/oguz/<project> --merge --cleanup` komutunu çalıştırır ve nihai entegrasyonu raporlar.
+   - İnsan onayının ardından `edge-gnhf harvest <repo_path> --merge --cleanup` komutunu çalıştırır ve nihai entegrasyonu raporlar.

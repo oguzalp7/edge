@@ -17,7 +17,7 @@ Unlike `/edge-ship` (the Brigade-native `1 Spec = 1 PR` delivery engine), `/edge
 ### Mode 1: Fast Docs + CI Sync (`--skip review,test`)
 When Brigade (`GATE`, `QA_ENGINEER`, `EXAMINER`) has already verified code and tests, skip redundant review/test steps and sync docs + CI quickly:
 ```bash
-wsl -e /bin/bash -lc "cd /home/oguz/<project> && no-mistakes axi run --base-branch staging --skip review,test --intent '<intent>' -y"
+cd <repo_path> && no-mistakes axi run --base-branch staging --skip review,test --intent '<intent>' -y
 ```
 
 ### Mode 2: Full External Audit (Non-Blocking Issue Hunter)

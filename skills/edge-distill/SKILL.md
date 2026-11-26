@@ -27,17 +27,17 @@ suggested_skills:
   - Triggered when targeting the `edge` plugin itself (`target_repo == plugin_root`) or explicitly via `--mode factory`.
   - Drains pending harness signals from `edge_factory_inbox.json` alongside multi-project candidate rules.
   - Channel A modifies plugin agent rubrics `agents/<role>.md` (budget `<= 60` lines) and `skills/**`.
-  - All improvements must pass verification gates (`wsl python3 tools/distill/cli.py check-budget .` and pytest suite) and be sealed in an `atomic git commit`: `chore(distill): apply factory improvements`.
+  - All improvements must pass verification gates (`python3 tools/distill/cli.py check-budget .` and pytest suite) and be sealed in an `atomic git commit`: `chore(distill): apply factory improvements`.
 
 ---
 
 ## 🔄 5-Step Operational Protocol
 
 ### Step 1: Zero-Token Harvest (Phase 1)
-Execute the deterministic CLI harvester in WSL:
+Execute the deterministic CLI harvester in the active shell (use `wsl --cd <linux_path>` only when targeting a WSL2 repo from Windows):
 ```bash
-wsl python3 tools/distill/cli.py harvest --project <repo_path> --format toon --mode auto
-wsl python3 tools/distill/cli.py candidates list
+python3 tools/distill/cli.py harvest --project <repo_path> --format toon --mode auto
+python3 tools/distill/cli.py candidates list
 ```
 - Optional flags: `--mode {auto,project,factory}`, `--all-projects`, `--current <cid>`, `--reprocess`.
 - **Zero-Friction Exit Condition:** If `harvest` finds zero unharvested sessions and `candidates list` has no pending promotions, print:
@@ -69,14 +69,14 @@ If unprocessed sessions or ready candidates exist, spawn an isolated subagent wi
 For each proposed invariant:
 1. Run `LexicalStackGate` classification:
    ```bash
-   wsl python3 tools/distill/cli.py candidates record --rule "<rule>" --role <role> --project <repo_path>
+   python3 tools/distill/cli.py candidates record --rule "<rule>" --role <role> --project <repo_path>
    ```
 2. **Classification Sieve:**
    - `REPO_LOCAL`: Contains stack, framework, or path tokens defined by Stack Profiles (e.g., `profiles/nextjs-drizzle-tailwind/`). Routed to project overlay `.edge/stations/<role>.md` or `coding_standards.md`.
    - `PLUGIN_CANDIDATE`: Pure engineering discipline. Incubated in `.edge/stations/<role>.md` and registered in the candidate pool until validated across >= 2 distinct projects.
 3. **Line Budget Ceiling Verification:**
    ```bash
-   wsl python3 tools/distill/cli.py check-budget
+   python3 tools/distill/cli.py check-budget
    ```
    Strict physical line budgets enforced: `<= 60` lines for `agents/*.md` and `<= 40` lines for `.edge/stations/*.md`.
 
@@ -93,7 +93,7 @@ Present each proposal to the human captain as a **4-Line Commander Decision Card
 **Delivery Channels:**
 - **Channel A (Prose, Rubrics & Context Pointers):** Apply approved diffs directly to `.edge/stations/<role>.md`, `coding_standards.md`, `docs/<domain>/DOMAIN.md`, or plugin `agents/<role>.md`. When promoting a candidate, execute:
   ```bash
-  wsl python3 tools/distill/cli.py promote --candidate <id>
+  python3 tools/distill/cli.py promote --candidate <id>
   ```
   which appends to `agents/<role>.md` and cleans up duplicate local entries from `.edge/stations/<role>.md`.
 - **Channel B (Structural Code & Tooling — Frontier-First Parking Gate):**
@@ -109,11 +109,11 @@ Present each proposal to the human captain as a **4-Line Commander Decision Card
 1. Mark analyzed sessions as processed:
    - In `PROJECT_MODE`:
      ```bash
-     wsl python3 tools/distill/cli.py mark-processed --session <cid> --mode project
+     python3 tools/distill/cli.py mark-processed --session <cid> --mode project
      ```
    - In `FACTORY_MODE`:
      ```bash
-     wsl python3 tools/distill/cli.py mark-processed --session <cid> --mode factory --clear-factory-inbox
+     python3 tools/distill/cli.py mark-processed --session <cid> --mode factory --clear-factory-inbox
      ```
 2. **Unattended Execution Mode (`/schedule`):**
    When running unattended on a recurring schedule (e.g. via `/schedule` weekly cron), do NOT block on `ask_question`. Instead, write the distilled proposals and evidence report to `.edge/distill/weekly-report.md` (or `<appDataDir>/edge_distill_weekly_report.md`) and notify the Captain without unapproved mutations.

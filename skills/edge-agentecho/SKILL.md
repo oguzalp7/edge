@@ -23,13 +23,12 @@ suggested_skills:
    - Kullanıcının chat üzerinden dosya adı, bileşen ismi veya yapılması gerekenleri tekrar anlatmasına **asla gerek yoktur**.
    - `/edge-agentecho` çağrıldığında doğrudan hedef projenin `.edge/specs/` dizinindeki ve `tasks-axi` kuyruğundaki tüm aktif `ae-*` biletlerini otomatik olarak tarar ve sırayla eritir.
 
-2. **🐧 WSL2-First Doktrini:**
-   - Tüm işlemler **istisnasız** WSL2 ortamında (`/home/oguz/...`) yürütülür.
-   - Komutlar `wsl bash -c "cd /home/oguz/<project> && ..."` veya WSL kabuğu üzerinden koşturulur.
+2. **🌐 Cross-OS Çalıştırma Doktrini:**
+   - İşlemler hedef projenin bulunduğu platformda (`macos`, `linux`, `windows`, `wsl`) yerel olarak yürütülür; yalnızca Windows ana makinesinden bir WSL2 deposu hedeflendiğinde `wsl --cd <linux_path> ...` kullanılır.
 
 3. **🌳 Zero-Touch Primary Working Tree İnvaryantı:**
-   - Ana proje çalışma ağacında (`/home/oguz/<project>`) **asla doğrudan kod düzenlenemez**.
-   - Her bilet için Treehouse havuzundan izole bir worktree kiralanır:
+   - Ana proje çalışma ağacında (`<repo_path>`) **asla doğrudan kod düzenlenemez**.
+   - Her bilet için `treehouse` havuzundan veya native `git worktree` fallback üzerinden (`brigade worktree <repo_path> --action lease --branch feat/<slug>`) izole bir worktree kiralanır:
      ```bash
      WORKTREE_PATH=$(treehouse get --lease -b feat/<slug>)
      ```
@@ -121,14 +120,14 @@ Ajan `/edge-agentecho` komutunu aldığında aşağıdaki durum makinesini kuyru
 ### Adım 1: Kuyruğu Keşfetme
 ```bash
 # Proje dizininde bekleyen biletleri listele
-cd /home/oguz/<project>
+cd <repo_path>
 tasks-axi list | grep "ae-"
 ls -la .edge/specs/ae-*.md 2>/dev/null
 ```
 
 ### Adım 2: Worktree Kiralama
 ```bash
-cd /home/oguz/<project>
+cd <repo_path>
 WORKTREE_DIR=$(treehouse get --lease -b feat/<slug>)
 echo "Leased worktree at: $WORKTREE_DIR"
 ```
@@ -155,7 +154,7 @@ treehouse return "$WORKTREE_DIR"
 
 ### Adım 5: Ana Dalda Fast-Forward Merge & Bilet Kapatma
 ```bash
-cd /home/oguz/<project>
+cd <repo_path>
 git merge --ff-only feat/<slug>
 git branch -d feat/<slug>
 tasks-axi done <slug>

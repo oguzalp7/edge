@@ -38,7 +38,7 @@ suggested_skills:
 
 4. **Kadro Yönetimi & İstasyon Yeniden Kullanım Protokolü (Station Dispatcher):**
    > [!IMPORTANT]
-   > İstasyon kuralları ve durum makinesi için doğrudan [**`skills/edge-brigade/SKILL.md`**](file:///C:/Users/oguz_/.gemini/config/plugins/edge/skills/edge-brigade/SKILL.md) ve yatay swarm kuralları için [**`rules/playbooks/swarm-vs-brigade.md`**](file:///C:/Users/oguz_/.gemini/config/plugins/edge/rules/playbooks/swarm-vs-brigade.md) el kitaplarını referans al.
+   > İstasyon kuralları ve durum makinesi için doğrudan [**`skills/edge-brigade/SKILL.md`**](../edge-brigade/SKILL.md) ve yatay swarm kuralları için [**`rules/playbooks/swarm-vs-brigade.md`**](../../rules/playbooks/swarm-vs-brigade.md) el kitaplarını referans al.
    
    - **Fil ve Japon Balığı Bellek Modeli (Elephant vs. Goldfish):**
      - 🐘 **Kalıcı Fil İstasyonları (`PERSISTENT_ELEPHANT_ROLES`):** `SPEC_WRITER`, `RESEARCHER`, `SEAM_ARCHITECT`, `CODER`, `SURGEON`, `QA_ENGINEER` — alan bağlamını biriktirir ve YEŞİL bölgede (`< 45k` token) `send_message` ile sürekli yeniden kullanılır.

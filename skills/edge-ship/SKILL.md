@@ -32,12 +32,12 @@ user-invocable: true
 
 ---
 
-## 🐧 Critical Execution Environment: WSL2 Protocol
+## 🌐 Cross-OS Execution Environment
 
-> [!CRITICAL]
-> All `brigade` and `gh` shipping commands MUST run inside **WSL2** (`/home/oguz/...`):
+> [!IMPORTANT]
+> Run `brigade` and `gh` shipping commands in the target repository's native runtime (`macos`, `linux`, `windows`, or `wsl`; prefix with `wsl --cd <linux_path>` only when targeting a WSL2 repository from a Windows host):
 > ```bash
-> wsl --cd /home/oguz/<project> python3 tools/brigade/cli.py prepare-ship . --base <integration_branch> --split-branches --format json
+> brigade prepare-ship <repo_path> --base <integration_branch> --split-branches --format json
 > ```
 
 ---

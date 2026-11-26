@@ -45,7 +45,7 @@ The Edge engineering engine supports two distinct multi-agent paradigms:
 | **Topology** | Deep, vertical, sequential dependencies (DB $\rightarrow$ Core $\rightarrow$ API $\rightarrow$ UI). | Wide, horizontal, independent files or parallel explorations. |
 | **Contract Stability** | Mutating contracts, new schemas, new API surfaces. | Fixed, behavior-preserving transformations across N files. |
 | **Quality Control** | Strict FSM state transitions (`RED_TEST` $\rightarrow$ `SURGERY` $\rightarrow$ `VERIFY` $\rightarrow$ `REVIEW` $\rightarrow$ `GATE`). | Parallel workers reporting to shared board; terminal gate verification on merge. |
-| **Workspace Mode** | Dedicated Treehouse isolated worktree (`/home/oguz/.treehouse/pool/slot-N`). | `workspace:"share"` for parallel branches or `workspace:"inherit"` for read-only workers. |
+| **Workspace Mode** | Dedicated isolated worktree (`treehouse` pool slot or native `~/.edge/worktrees/<repo>-<hash6>/<branch>`). | `workspace:"share"` for parallel branches or `workspace:"inherit"` for read-only workers. |
 | **Primary Use Cases** | Vertical Slice features, core architectural refactors, database schema expansions. | Sharded mass refactors (AST/regex updates across N files), competing A/B architectural spikes, multi-angle RCA. |
 
 ---

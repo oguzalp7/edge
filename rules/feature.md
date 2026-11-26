@@ -76,7 +76,7 @@ Bu doküman, `edge` eklentisi bünyesinde **Yeni Davranış & Feature Ekleme** o
 
 ### 🛑 2.1 Visual Approval Gate İnvaryantları (No-Bypass Kuralı)
 1. **Asla Varsayılan Onay Yoktur:** `.lavish/` prototipi insan tarafından Lavish Editör üzerinden incelenip `Send & End` ile mühürlenmeden onaylanmış sayılamaz.
-2. **Spec Writer'ın Doğrudan Döngü Sahipliği:** `SPEC_WRITER`, UI işlerinde prototipi/varyantları `.lavish/` altında üretir, `wsl bash -c "lavish-axi <html-file>"` ile oturum açar, `lavish-axi poll <html-file>` ile kullanıcı notlarını (`--agent-reply`) dinler ve yalnızca `session_ended: true` olduğunda Orkestratör'e teslim eder.
+2. **Spec Writer'ın Doğrudan Döngü Sahipliği:** `SPEC_WRITER`, UI işlerinde prototipi/varyantları `.lavish/` altında üretir, `brigade prototype <repo_path> --action serve --file <html-file>` (`lavish-axi` $\rightarrow$ `npx --yes lavish-axi` $\rightarrow$ HTML artifact fallback) ile oturum açar, `brigade prototype <repo_path> --action poll --file <html-file>` ile kullanıcı notlarını (`--agent-reply`) dinler ve yalnızca `session_ended: true` (veya onaylı artifact) olduğunda Orkestratör'e teslim eder.
 3. **Orkestratör Yeşil Alan İnvaryantı:** Orkestratör yalnızca `session_ended: true` olmuş nihai paketi teslim alır.
 
 ### 🛑 2.2 Danışman Şartname Eleştirisi (`brigade critique-spec`)
@@ -84,10 +84,10 @@ Bu doküman, `edge` eklentisi bünyesinde **Yeni Davranış & Feature Ekleme** o
 2. Sıfır bağlamlı `claude-opus-5-5-high` (kota aşımında `gemini-3.8-flash-high`) raporu `.edge/cache/issues/<P>-critique.md` dosyasına yazar ve `--no-post-comment` yoksa Issue yorumuna ekler.
 3. Danışman niteliklidir; Orkestratör eksik kararları ve yeniden kullanım fırsatlarını kaptana sunar.
 
-### 🛑 2.3 Deterministik Treehouse Worktree & RED_TEST Kapısı (Zero-Touch Invariant)
-1. **Peşin Worktree Kiralama:** Test yazımından önce izole worktree kiralanır:
+### 🛑 2.3 Deterministik Worktree & RED_TEST Kapısı (Zero-Touch Invariant)
+1. **Peşin Worktree Kiralama:** Test yazımından önce izole worktree kiralanır (`treehouse` birincil veya cross-OS native `git worktree` fallback):
    ```bash
-   python3 tools/brigade/cli.py start-slice --issue <C> --parent-issue <P> --name <feature-name> --track feature /home/oguz/<project> [--expected-files ...]
+   brigade start-slice --issue <C> --parent-issue <P> --name <feature-name> --track feature <repo_path> [--expected-files ...]
    ```
 2. **Kırmızı Test & İzole Kodlama:** `SEAM_ARCHITECT` testleri kiralık worktree'de yazar; `brigade advance` hakiki non-zero assertion hatasını doğrulayıp `SURGERY` durumuna geçirir. `CODER` ana repoda tek bir dosya dahi değiştiremez.
 

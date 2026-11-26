@@ -14,10 +14,12 @@ Switches the active Edge Brigade execution environment to **Pro Tier** (branchle
 
 ## 🛠️ Execution Protocol
 
-When this skill is invoked, run the tier switcher CLI via WSL2:
+When this skill is invoked, run the tier switcher CLI in the active environment (Windows, WSL2, macOS, or Linux):
 
 ```bash
-wsl --cd /mnt/c/Users/oguz_/.gemini/config/plugins/edge python3 tools/brigade/tier.py switch pro
+brigade tier switch pro
+# or directly from the plugin root:
+python3 tools/brigade/tier.py switch pro
 ```
 
 Optional commands:

@@ -100,7 +100,7 @@ Instead of spawning disposable generalist agents that try to do everything and e
 * ⚡ **Configurable Station Model (`model: str = "flash"` SSOT):**  
   Stations default to `model: "flash"` across registration, FSM storage (`.edge/brigade.json`), and prompt dispatch. Explicit model pinning is supported via `brigade register --model <model>`.
 * 🐝 **Swarm vs. Brigade Guidance:**  
-  For comparing deterministic Brigade state machines with native horizontal swarms and lightweight guardrails, refer to [**`rules/playbooks/swarm-vs-brigade.md`**](file:///C:/Users/oguz_/.gemini/config/plugins/edge/rules/playbooks/swarm-vs-brigade.md).
+  For comparing deterministic Brigade state machines with native horizontal swarms and lightweight guardrails, refer to [**`rules/playbooks/swarm-vs-brigade.md`**](../../rules/playbooks/swarm-vs-brigade.md).
 
 ---
 

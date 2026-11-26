@@ -14,9 +14,9 @@ Bu doküman, otonom ve yarı-otonom refaktör görevlerini icra eden tüm alt-aj
 
 ## 🛑 Altın Kurallar (Non-Negotiable)
 
-0. **Zorunlu Treehouse Worktree İzolasyonu (Zero-Touch Primary Invariant):**
-   * `SURGEON` ameliyata başlamadan önce İSTİSNASIZ olarak Treehouse üzerinden izole bir worktree kiralanır (`python3 tools/brigade/cli.py start-slice <repo> --name <slice> --track <core|ui>` veya `treehouse get --lease -b refactor/<slice>`).
-   * Ana repo çalışma kopyasında (`/home/oguz/<project>`) doğrudan kod düzenlenemez; tüm ameliyat kiralık worktree (`/home/oguz/.treehouse/pool/slot-N/...`) içinde icra edilir.
+0. **Zorunlu İzole Worktree İzolasyonu (Zero-Touch Primary Invariant):**
+   * `SURGEON` ameliyata başlamadan önce İSTİSNASIZ olarak izole bir worktree kiralanır (`brigade start-slice <repo> --name <slice> --track <core|ui>` — `treehouse` birincil veya cross-OS native `git worktree` fallback).
+   * Ana repo çalışma kopyasında (`<repo_path>`) doğrudan kod düzenlenemez; tüm ameliyat kiralık worktree (`~/.edge/worktrees/<repo>-<hash6>/<branch>` veya Treehouse slotu) içinde icra edilir.
    * Doğrulama tamamlandığında `python3 tools/brigade/cli.py finish-slice <repo>` ile ana depodaki aktif entegrasyon dalına (Stack Profile `integration` dalı, varsayılan `main`) fast-forward (`git merge --ff-only`) birleştirilir ve worktree havuza iade edilir.
 
 1. **Davranış Değiştirme Yasağı:**
