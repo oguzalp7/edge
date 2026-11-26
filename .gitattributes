@@ -1,2 +1,5 @@
 hooks/dispatch.cmd text eol=lf
+bin/brigade text eol=lf
+bin/edge-doctor text eol=lf
+bin/*.cmd text eol=crlf
 *.sh text eol=lf

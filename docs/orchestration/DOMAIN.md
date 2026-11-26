@@ -1,7 +1,7 @@
 # Domain: orchestration
 
 - **Owner / DRI:** @edge-orchestration
-- **Concepts:** `zero-handoff-guard`, `elephant-station-reuse`, `goldfish-ephemeral-review`, `strategic-context-fork`, `session-gated-hooks`, `fail-open-dispatch`
+- **Concepts:** `zero-handoff-guard`, `elephant-station-reuse`, `goldfish-ephemeral-review`, `strategic-context-fork`, `session-gated-hooks`, `fail-open-dispatch`, `native-station-critic`
 
 ## Living Invariants
 - **[INV-ORCH-HOOK-LATENCY]** Orchestrator guards execute deterministically without model calls and block direct orchestrator source or test edits.
@@ -14,6 +14,7 @@
 ## Adopted Patterns
 - **[PAT-ORCH-ZERO-HANDOFF]** The orchestrator delegates all code inspection and editing to canonical stations while keeping Phase 0 glossary alignment and intake in the green zone.
 - **[PAT-ORCH-STRATEGIC-FORK]** Reviewers (`EXAMINER`) inherit domain vocabulary from `SPEC_WRITER` or `RESEARCHER`, never from `CODER` or `SURGEON`.
+- **[PAT-ORCH-NATIVE-DISPATCH]** Station critique and review routing normalize execution model enums and fall back transparently from external CLI runners to native swarm or subagent directives across platforms.
 
 ```mermaid
 flowchart LR

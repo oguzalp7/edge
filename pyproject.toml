@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "edge-plugin"
+version = "0.1.0"
+description = "Cross-OS multi-station engineering orchestrator and deterministic Brigade FSM for Antigravity"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+brigade = "tools.brigade.cli:main"
+edge-doctor = "tools.doctor.cli:main"
+edge-drift = "tools.drift.cli:main"
+edge-audit = "tools.audit.cli:main"
+edge-tracker = "tools.tracker.cli:main"
+edge-radar = "tools.radar.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tools*"]
+
+[tool.setuptools.package-data]
+"tools.brigade" = ["station_models.json"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[tool.uv]
+managed = false

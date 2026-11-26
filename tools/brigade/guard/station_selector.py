@@ -14,8 +14,6 @@ from tools.brigade.guard.station_candidates import (
 from tools.brigade.guard.station_models import GREEN_HEAT_THRESHOLD
 from tools.brigade.guard.station_store import StationStore, effective_stations_file
 from tools.brigade.guard.transcript_scanner import TranscriptStationScanner
-from tools.brigade.station_dispatch import resolve_default_station_model
-from tools.brigade.tier_ssot import resolve_subagent_model
 
 _VALID_SUBAGENT_ENUMS = frozenset({"inherit", "flash", "flash_lite", "pro"})
 
@@ -72,6 +70,9 @@ def _normalize_subagent_model(args: Dict[str, Any], role: str, overwritten: Dict
     raw_model = str(args.get(model_key) or "").strip()
     if raw_model.lower() in _VALID_SUBAGENT_ENUMS:
         return False
+    from tools.brigade.station_dispatch import resolve_default_station_model
+    from tools.brigade.tier_ssot import resolve_subagent_model
+
     fallback_model = raw_model or resolve_default_station_model(role, tier="pro")
     overwritten[model_key] = resolve_subagent_model(fallback_model)
     return True

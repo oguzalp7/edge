@@ -27,6 +27,7 @@ PROBE_BINARIES: Tuple[str, ...] = (
     "gh-axi",
     "treehouse",
     "lavish-axi",
+    "npx",
     "chrome-devtools-axi",
     "chrome-dev-tools-axi",
     "wsl",
@@ -204,16 +205,41 @@ def _status_for_tools(
     return "native" if _has(probes, *tools) else missing_status
 
 
+def _worktree_capability(probes: Dict[str, ToolProbeResult]) -> Tuple[str, str]:
+    if _has(probes, "treehouse"):
+        return "native", "Treehouse worktree pool (native git worktree fallback available)"
+    if _has(probes, "git"):
+        return "native", "Native git worktree fallback (Treehouse optional)"
+    return "unavailable", "Requires git (or Treehouse) for isolated worktrees"
+
+
+def _visual_capability(probes: Dict[str, ToolProbeResult]) -> Tuple[str, str]:
+    if _has(probes, "lavish-axi"):
+        return "native", "UI mockup gate via lavish-axi"
+    if _has(probes, "npx"):
+        return "passive", "npx --yes lavish-axi fallback (HTML artifact preview available)"
+    return "passive", "HTML artifact fallback (lavish-axi/npx absent)"
+
+
+def _browser_capability(probes: Dict[str, ToolProbeResult]) -> Tuple[str, str]:
+    if _has(probes, "chrome-devtools-axi", "chrome-dev-tools-axi"):
+        return "native", "Headless Chrome verification via chrome-devtools-axi"
+    return "passive", "Built-in browser subagent / chrome-devtools-mcp fallback"
+
+
 def build_capability_matrix(probes: Dict[str, ToolProbeResult]) -> Tuple[List[CapabilityEntry], str]:
     """Compute Edge capability statuses and recommended install profile."""
     py_ok = _has(probes, "python")
     git_ok = _has(probes, "git")
+    wt_status, wt_detail = _worktree_capability(probes)
+    vis_status, vis_detail = _visual_capability(probes)
+    br_status, br_detail = _browser_capability(probes)
     specs = (
         ("core_hooks", "native" if (py_ok and git_ok) else "unavailable", "Session-gated lifecycle hooks and git operations", ["python", "git"]),
         ("github_tracker", _status_for_tools(probes, ("gh-axi", "gh")), "GitHub Issues SSOT (falls back to local .edge/issues/)", ["gh-axi", "gh"]),
-        ("isolated_worktrees", "native" if _has(probes, "treehouse") else ("passive" if git_ok else "unavailable"), "Treehouse worktree pool (falls back to git worktree)", ["treehouse", "git"]),
-        ("visual_gate", _status_for_tools(probes, ("lavish-axi",)), "UI mockup gate via lavish-axi (skipped passively when absent)", ["lavish-axi"]),
-        ("browser_qa", _status_for_tools(probes, ("chrome-devtools-axi", "chrome-dev-tools-axi")), "Headless Chrome verification via chrome-devtools-axi", ["chrome-devtools-axi", "chrome-dev-tools-axi"]),
+        ("isolated_worktrees", wt_status, wt_detail, ["treehouse", "git"]),
+        ("visual_gate", vis_status, vis_detail, ["lavish-axi", "npx"]),
+        ("browser_qa", br_status, br_detail, ["chrome-devtools-axi", "chrome-dev-tools-axi"]),
         ("python_tooling", _status_for_tools(probes, ("uv",)), "Ephemeral Python runner via uv", ["uv"]),
         ("node_runtime", _status_for_tools(probes, ("node",)), "Node.js tooling support", ["node"]),
         ("wsl_bridge", _status_for_tools(probes, ("wsl",)), "Optional Windows-to-WSL2 path/command bridge", ["wsl"]),
