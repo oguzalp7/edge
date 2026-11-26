@@ -25,7 +25,7 @@ from tools.brigade.guard.station_models import (
     TokenHeatRecord,
 )
 from tools.brigade.guard.station_selector import StationSelector
-from tools.brigade.guard.station_store import ACTIVE_STATIONS_FILE, StationStore
+from tools.brigade.guard.station_store import StationStore
 
 __all__ = [
     "ACTIVE_STATIONS_FILE",
@@ -45,6 +45,7 @@ __all__ = [
 _LAZY_SUBMODULE_ATTRS = {
     "TokenHeat": "tools.brigade.guard.station_models",
     "StationStoreEnvelope": "tools.brigade.guard.station_models",
+    "ACTIVE_STATIONS_FILE": "tools.brigade.guard.station_store",
     "get_active_stations_path": "tools.brigade.guard.station_store",
     "load_active_stations": "tools.brigade.guard.station_store",
     "save_active_stations": "tools.brigade.guard.station_store",
@@ -72,6 +73,7 @@ _LAZY_SUBMODULE_ATTRS = {
     "apply_afk_guard": "tools.brigade.guard.afk_guard",
     "_is_schema_target": "tools.brigade.guard.afk_guard",
     "is_no_mistakes_invocation": "tools.brigade.guard.no_mistakes",
+    "_check_no_mistakes_transcript": "tools.brigade.guard.no_mistakes",
     "_handle_swarm_guard": "tools.brigade.guard.swarm_guard",
     "_resolve_swarm_ssot_preload": "tools.brigade.guard.swarm_guard",
     "_handle_swarm_post_tool": "tools.brigade.guard.swarm_guard",

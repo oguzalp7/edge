@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
-from tools.brigade.guard.role_detection import EPHEMERAL_GOLDFISH_ROLES, extract_requested_roles, normalize_role
+from tools.brigade.guard.role_detection import EPHEMERAL_GOLDFISH_ROLES, attach_station_token, extract_requested_roles, normalize_role
 from tools.brigade.guard.station_candidates import (
     collect_repo_candidates,
     collect_session_candidates,
@@ -68,8 +68,15 @@ def _handle_invoke_subagent_guard(args: Dict[str, Any], parent_cid: str) -> Dict
         return {"decision": "allow", "reason": "AUXILIARY_TOOL_AGENT: Browser subagent invocation permitted"}
     st_file = effective_stations_file()
     store, scanner = StationStore(st_file), TranscriptStationScanner(st_file.parent / "brain")
-    for req_role in extract_requested_roles(args):
+    roles = extract_requested_roles(args)
+    for req_role in roles:
         res = StationSelector.evaluate_spawn_request(store=store, scanner=scanner, parent_cid=parent_cid, requested_role=req_role)
         if res.get("decision") == "deny":
             return res
+    if roles and ("Prompt" in args or "prompt" in args):
+        prompt_key = "Prompt" if "Prompt" in args else "prompt"
+        canonical = normalize_role(roles[0]) or roles[0].strip().upper()
+        overwritten = dict(args)
+        overwritten[prompt_key] = attach_station_token(str(args.get(prompt_key) or ""), canonical)
+        return {"decision": "allow", "overwrite": overwritten}
     return {"decision": "allow"}

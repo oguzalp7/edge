@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "wsl --cd /home/oguz python3 /home/oguz/.gemini/config/plugins/edge/tools/brigade/orchestrator_guard.py pre_tool",
+            "command": "\"hooks/dispatch.cmd\" pre_tool",
             "timeout": 30
           }
         ]
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "wsl --cd /home/oguz python3 /home/oguz/.gemini/config/plugins/edge/tools/brigade/orchestrator_guard.py post_tool",
+            "command": "\"hooks/dispatch.cmd\" post_tool",
             "timeout": 30
           }
         ]
@@ -27,7 +27,7 @@
     "PreInvocation": [
       {
         "type": "command",
-        "command": "wsl --cd /home/oguz python3 /home/oguz/.gemini/config/plugins/edge/tools/brigade/orchestrator_guard.py pre_invocation",
+        "command": "\"hooks/dispatch.cmd\" pre_invocation",
         "timeout": 30
       }
     ]

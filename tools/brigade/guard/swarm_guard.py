@@ -5,6 +5,7 @@ import re
 import sys
 from typing import Any, Dict, Optional
 
+from tools.brigade.guard.role_detection import attach_station_token, normalize_role
 from tools.brigade.guard.station_candidates import is_active_station_for_role
 from tools.brigade.guard.station_store import load_active_stations, register_station, save_active_stations
 from tools.brigade.guard.swarm_ssot import (
@@ -20,9 +21,15 @@ def _handle_swarm_guard(args: Dict[str, Any], parent_cid: str) -> Optional[Dict[
     if str(args.get("action", "")).strip().lower() != "add":
         return {"decision": "allow"}
     raw_name = str(args.get("name", "")).strip().lower()
-    if re.sub(r"-\d+$", "", raw_name) in ("narrator", "monitor"):
+    base_name = re.sub(r"-\d+$", "", raw_name)
+    if base_name in ("narrator", "monitor"):
         return {"decision": "deny", "reason": "❌ [EDGE SWARM DAEMON BAN]: Spawning narrator or monitor daemons is strictly prohibited to conserve quota."}
     overwritten = _resolve_swarm_ssot_preload(raw_name, args)
+    canonical = normalize_role(base_name) or base_name.upper()
+    if "brief" in args and canonical:
+        merged = dict(overwritten) if overwritten is not None else dict(args)
+        merged["brief"] = attach_station_token(str(merged.get("brief") or ""), canonical)
+        return {"decision": "allow", "overwrite": merged}
     return {"decision": "allow", "overwrite": overwritten} if overwritten is not None else {"decision": "allow"}
 
 

@@ -89,3 +89,11 @@ def detect_session_role(payload: dict) -> Tuple[str, str]:
         except Exception:
             pass
     return "UNKNOWN", "default"
+
+
+def attach_station_token(text: str, role: str) -> str:
+    """Prefix spawn prompts or briefs with [edge-station:<ROLE>] idempotently."""
+    token = f"[edge-station:{role}]"
+    if "[edge-station:" in text.lower():
+        return text
+    return f"{token} {text}".strip()

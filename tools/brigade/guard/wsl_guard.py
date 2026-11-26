@@ -105,6 +105,10 @@ def evaluate_wsl_command_guard(command_line: str, cwd: str = "") -> Optional[Dic
 
 
 def _handle_run_command_wsl_guard(tool_name: str, args: dict) -> Optional[dict]:
+    from tools.common import env as _edge_env
+
+    if _edge_env.detect_os_mode() in ("macos", "linux"):
+        return None
     cmd_key = "CommandLine" if "CommandLine" in args else ("command" if "command" in args else None)
     if not ((tool_name == "run_command" or cmd_key is not None) and cmd_key):
         return None
