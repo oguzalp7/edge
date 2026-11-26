@@ -1639,54 +1639,54 @@ class TestPersonaCompletenessAndLineBudget(unittest.TestCase):
             for tok in forbidden_tokens:
                 self.assertNotIn(tok, lowered, f"{p_path.name} contains forbidden token '{tok}'")
 
-        # 1. agents/spec-writer.md
+        next_agents_dir = self.repo_root / "profiles" / "nextjs-drizzle-tailwind" / "agents"
+
+        # 1. agents/spec-writer.md (core) + profile overlay (stack-bound)
         sw_text = (agents_dir / "spec-writer.md").read_text(encoding="utf-8")
         sw_lower = sw_text.lower()
-        for tok in ("200", "value sourcing", "pagination", "idempotency", "abac", "4-state", "force-dynamic"):
+        for tok in ("200", "value sourcing", "pagination", "idempotency", "abac", "4-state"):
             self.assertIn(tok, sw_lower, f"agents/spec-writer.md missing required rubric token '{tok}'")
-        self.assertTrue(
-            "DEFAULT_" in sw_text or "MOCK_" in sw_text,
-            "agents/spec-writer.md must contain 'DEFAULT_' or 'MOCK_'",
-        )
+        self.assertTrue("DEFAULT_" in sw_text or "MOCK_" in sw_text)
+        self.assertIn("force-dynamic", (next_agents_dir / "spec-writer.md").read_text(encoding="utf-8").lower())
 
         # 2. agents/spec-critic.md
         sc_lower = (agents_dir / "spec-critic.md").read_text(encoding="utf-8").lower()
         for tok in ("pagination", "idempotency", "abac", "rollback", "mock"):
             self.assertIn(tok, sc_lower, f"agents/spec-critic.md missing required rubric token '{tok}'")
 
-        # 3. agents/seam-architect.md
+        # 3. agents/seam-architect.md + profile overlay
         sa_lower = (agents_dir / "seam-architect.md").read_text(encoding="utf-8").lower()
-        for tok in ("idempotency", "pagination", "abac", "rollback", "revalidatepath"):
+        for tok in ("idempotency", "pagination", "abac", "rollback"):
             self.assertIn(tok, sa_lower, f"agents/seam-architect.md missing required rubric token '{tok}'")
+        self.assertIn("revalidatepath", (next_agents_dir / "seam-architect.md").read_text(encoding="utf-8").lower())
 
-        # 4. agents/coder.md
+        # 4. agents/coder.md + profile overlay
         cd_text = (agents_dir / "coder.md").read_text(encoding="utf-8")
         cd_lower = cd_text.lower()
-        self.assertIn("disabled={isPending}", cd_text, "agents/coder.md missing 'disabled={isPending}'")
         self.assertIn("rollback", cd_lower, "agents/coder.md missing 'rollback'")
-        self.assertTrue(
-            "DEFAULT_" in cd_text or "MOCK_" in cd_text,
-            "agents/coder.md must contain 'DEFAULT_' or 'MOCK_'",
-        )
+        self.assertTrue("DEFAULT_" in cd_text or "MOCK_" in cd_text)
+        next_cd_text = (next_agents_dir / "coder.md").read_text(encoding="utf-8")
+        self.assertIn("disabled={isPending}", next_cd_text)
         for tok in ("force-dynamic", "dark:", "aria-label"):
-            self.assertIn(tok, cd_lower, f"agents/coder.md missing '{tok}'")
+            self.assertIn(tok, next_cd_text.lower(), f"nextjs-drizzle-tailwind coder overlay missing '{tok}'")
 
-        # 5. agents/surgeon.md
+        # 5. agents/surgeon.md + profile overlay
         sg_text = (agents_dir / "surgeon.md").read_text(encoding="utf-8")
         sg_lower = sg_text.lower()
-        self.assertIn("disabled={isPending}", sg_text, "agents/surgeon.md missing 'disabled={isPending}'")
         self.assertIn("rollback", sg_lower, "agents/surgeon.md missing 'rollback'")
-        self.assertTrue(
-            "DEFAULT_" in sg_text or "MOCK_" in sg_text,
-            "agents/surgeon.md must contain 'DEFAULT_' or 'MOCK_'",
-        )
+        self.assertTrue("DEFAULT_" in sg_text or "MOCK_" in sg_text)
+        next_sg_text = (next_agents_dir / "surgeon.md").read_text(encoding="utf-8")
+        self.assertIn("disabled={isPending}", next_sg_text)
         for tok in ("force-dynamic", "dark:", "aria-label"):
-            self.assertIn(tok, sg_lower, f"agents/surgeon.md missing '{tok}'")
+            self.assertIn(tok, next_sg_text.lower(), f"nextjs-drizzle-tailwind surgeon overlay missing '{tok}'")
 
-        # 6. agents/examiner.md
+        # 6. agents/examiner.md + profile overlay
         ex_lower = (agents_dir / "examiner.md").read_text(encoding="utf-8").lower()
-        for tok in ("pagination", "idempotency", "abac", "rollback", "bg-white", "aria-label"):
+        for tok in ("pagination", "idempotency", "abac", "rollback"):
             self.assertIn(tok, ex_lower, f"agents/examiner.md missing required rubric token '{tok}'")
+        next_ex_lower = (next_agents_dir / "examiner.md").read_text(encoding="utf-8").lower()
+        for tok in ("bg-white", "aria-label"):
+            self.assertIn(tok, next_ex_lower, f"nextjs-drizzle-tailwind examiner overlay missing '{tok}'")
 
         # 7. agents/qa-engineer.md
         qa_lower = (agents_dir / "qa-engineer.md").read_text(encoding="utf-8").lower()
@@ -1698,10 +1698,7 @@ class TestPersonaCompletenessAndLineBudget(unittest.TestCase):
         rs_lower = rs_text.lower()
         for tok in ("pagination", "abac", "idempotency"):
             self.assertIn(tok, rs_lower, f"agents/researcher.md missing required rubric token '{tok}'")
-        self.assertTrue(
-            "DEFAULT_" in rs_text or "MOCK_" in rs_text,
-            "agents/researcher.md must contain 'DEFAULT_' or 'MOCK_'",
-        )
+        self.assertTrue("DEFAULT_" in rs_text or "MOCK_" in rs_text)
 
 
 class TestBrigadePromptCLI(unittest.TestCase):
@@ -6690,11 +6687,13 @@ class TestEvidenceFirstReviewAndShipBridge(unittest.TestCase):
             self.assertFalse(ok_slice_blk)
             self.assertIn("Branch topology violation", err_slice_blk)
 
-        # IC-4: skills/edge-ship/SKILL.md documents Tier 1, Tier 2, and --base development
+        # IC-4: skills/edge-ship/SKILL.md documents Tier 1, Tier 2, and --base <integration_branch> (with development -> staging in nextjs profile)
         skill_text = (self.repo_root / "skills" / "edge-ship" / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("Tier 1", skill_text)
         self.assertIn("Tier 2", skill_text)
-        self.assertIn("--base development", skill_text)
+        self.assertIn("--base <integration_branch>", skill_text)
+        pb_text = (self.repo_root / "profiles" / "nextjs-drizzle-tailwind" / "PLAYBOOK.md").read_text(encoding="utf-8")
+        self.assertIn("development -> staging", pb_text)
 
     # ------------------------------------------------------------------
     # SPEC-EDGE-BRIGADE-007 (IC-1 .. IC-5): Tier 2 Route Smoke Scanner, Auto-Triage & Staging Gate

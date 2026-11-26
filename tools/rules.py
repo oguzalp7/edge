@@ -45,3 +45,22 @@ ICON_X_BUTTON_NO_ARIA_PATTERN = re.compile(
     r"<button\b(?P<attrs>[^>]*?)>\s*<X\b[^>]*/?>\s*(?:</X>\s*)?</button>",
     re.DOTALL,
 )
+
+RULE_PACKS = {
+    "core": (
+        "MOCK_FALLBACK_PATTERN",
+    ),
+    "typescript": (
+        "TYPE_ESCAPE_PATTERN",
+        "TS_EXPLICIT_ANY_PATTERN",
+        "TS_CONSOLE_LOG_PATTERN",
+    ),
+    "nextjs-drizzle-tailwind": (
+        "SQL_LEAK_PATTERN",
+        "RAW_TH_PATTERN",
+        "CANONICAL_ARRAY_PATTERN",
+        "SHALLOW_WRAPPER_PATTERN",
+        "BG_WHITE_NO_DARK_PATTERN",
+        "ICON_X_BUTTON_NO_ARIA_PATTERN",
+    ),
+}

@@ -514,7 +514,7 @@ class TestBrigadeGuard(unittest.TestCase):
         self.assertEqual(res["decision"], "allow")
         self.assertIn("AUXILIARY_TOOL_AGENT", res.get("reason", ""))
 
-    def test_browser_subagent_not_hijacked_by_antigraveyard(self):
+    def test_browser_subagent_not_hijacked_by_station_guard(self):
         # Register persistent QA_ENGINEER
         guard.register_station(
             conversation_id="conv-qa-123",

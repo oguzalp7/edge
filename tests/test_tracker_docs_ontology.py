@@ -165,8 +165,10 @@ class TestTrackerDocsOntologyAlignment:
         assert "tools/tracker" in spec_writer
         assert "spec:draft" in spec_writer and "spec:approved" in spec_writer
         assert ".edge/cache/issues/" in spec_writer
-        for tok in ("200", "value sourcing", "pagination", "idempotency", "abac", "4-state", "force-dynamic"):
+        for tok in ("200", "value sourcing", "pagination", "idempotency", "abac", "4-state"):
             assert tok in spec_writer.lower()
+        next_sw = _read_utf8("profiles/nextjs-drizzle-tailwind/agents/spec-writer.md")
+        assert "force-dynamic" in next_sw.lower()
 
         examiner = _read_utf8("agents/examiner.md")
         assert ".edge/cache/issues/" in examiner

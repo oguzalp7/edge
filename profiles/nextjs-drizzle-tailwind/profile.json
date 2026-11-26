@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "id": "nextjs-drizzle-tailwind",
+  "extends": ["typescript"],
+  "detect": {
+    "any_files": ["next.config.*", "drizzle.config.*", "tailwind.config.*"],
+    "package_json_deps": ["next", "drizzle-orm"]
+  },
+  "capabilities": [
+    "typescript",
+    "vitest",
+    "nextjs_app_router",
+    "drizzle_orm",
+    "tailwind_dual_theme",
+    "lucide_a11y",
+    "server_actions",
+    "coolify_two_tier"
+  ],
+  "paths": {
+    "source_roots": ["src/", "app/", "lib/", "db/"],
+    "action_globs": ["src/actions/**", "app/actions/**", "*/actions/*.ts*"],
+    "schema_globs": ["src/db/schema/*"],
+    "migration_globs": ["drizzle/*"],
+    "ui_globs": ["src/components/**/*.tsx", "src/app/**/*.tsx", "app/**/*.tsx"],
+    "test_globs": ["tests/**", "**/*.test.ts*", "**/*.spec.ts*"]
+  },
+  "commands": {
+    "typecheck": ["npx", "tsc", "--noEmit"],
+    "unit_test": ["npm", "run", "test:unit"]
+  },
+  "delivery": {
+    "topology": "two_tier",
+    "default_stage_branches": {
+      "integration": "development",
+      "staging": "staging",
+      "production": "production"
+    }
+  },
+  "rules": {
+    "enabled_patterns": [
+      "TYPE_ESCAPE_PATTERN",
+      "TS_EXPLICIT_ANY_PATTERN",
+      "TS_CONSOLE_LOG_PATTERN",
+      "SQL_LEAK_PATTERN",
+      "RAW_TH_PATTERN",
+      "CANONICAL_ARRAY_PATTERN",
+      "SHALLOW_WRAPPER_PATTERN",
+      "BG_WHITE_NO_DARK_PATTERN",
+      "ICON_X_BUTTON_NO_ARIA_PATTERN"
+    ]
+  },
+  "skills": [
+    "edge-tests-audit-typescript",
+    "edge-core-refactor",
+    "edge-ui-refactor",
+    "edge-ui-audit"
+  ]
+}

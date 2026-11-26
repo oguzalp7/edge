@@ -1,9 +1,12 @@
 ---
 name: edge-ui-audit
+profile: nextjs-drizzle-tailwind
 description: Deterministic UI component graph analyzer, orphan component detector, and pure Tailwind JSX structural duplicate clusterer. Recommends centralized UI primitives and guides visual parity verification via chrome-devtools-axi.
 ---
 
 # 🎨 /edge-ui-audit — Frontend UI Component & Duplicate JSX Audit
+
+> **Stack Profile:** `nextjs-drizzle-tailwind` — see [`profiles/nextjs-drizzle-tailwind/PLAYBOOK.md`](../../profiles/nextjs-drizzle-tailwind/PLAYBOOK.md).
 
 This skill deterministically audits front-end React/Next.js codebases (`src/app` and `src/components`), specifically tailored for **pure Tailwind CSS** architectures without external component library bloat.
 

@@ -11,7 +11,7 @@ Edge is a deterministic codebase health, architectural quality gate, and autonom
 1. [Core Architectural Doctrines](#1-core-architectural-doctrines)
 2. [The Michelin Kitchen Brigade (Brigade de Cuisine)](#2-the-michelin-kitchen-brigade-brigade-de-cuisine)
 3. [The Orchestrator & Green-Zone Protection](#3-the-orchestrator--green-zone-protection)
-4. [Antigraveyard Station Persistence & Rotation Engine](#4-antigraveyard-station-persistence--rotation-engine)
+4. [Station Persistence & Rotation Engine](#4-station-persistence--rotation-engine)
 5. [The Zero-Handoff Invariant](#5-the-zero-handoff-invariant)
 6. [AXI-First Tool Hierarchy & Fallback Protocol](#6-axi-first-tool-hierarchy--fallback-protocol)
 7. [Deterministic Quality Gates & Hook Architecture](#7-deterministic-quality-gates--hook-architecture)
@@ -107,7 +107,7 @@ The **Edge Orchestrator** (`/edge-orchestrator`) serves as the Sovereign Command
 
 ---
 
-## 4. Antigraveyard Station Persistence & Rotation Engine
+## 4. Station Persistence & Rotation Engine
 
 To prevent **Subagent Graveyard Sprawl** (where dozens of disposable subagents are repeatedly spawned), Edge embeds a deterministic discovery and rotation engine in `tools/brigade/orchestrator_guard.py`.
 
@@ -219,7 +219,7 @@ Transitions in Edge are never decided by LLM self-assessment. They are enforced 
 flowchart TD
     User([User / Developer]) <-->|Natural Language / /edge-orchestrator| Orch["Orchestrator (Green Zone)"]
     
-    subgraph AntigraveyardGuard ["Station Persistence Guard (PreToolUse)"]
+    subgraph StationGuard ["Station Persistence Guard (PreToolUse)"]
         Store[("StationStore (v1.0 Envelope)")]
         Scanner["TranscriptStationScanner"]
         Selector{"StationSelector"}
@@ -260,11 +260,11 @@ flowchart TD
 ├── skills/             # Registered Antigravity skills
 │   ├── edge-orchestrator/ # Primary entrypoint & intake commander
 │   ├── edge-brigade/      # Michelin FSM state machine
-│   ├── edge-antigraveyard/ # Station persistence & rotation engine
 │   ├── edge-ship/         # Milestone release & no-mistakes gate
 │   └── ...
 ├── specs/              # Formal engineering specifications
-│   └── antigraveyard_station_persistence.md
+│   ├── edge_gnhf.md
+│   └── ub_quality_suite.md
 ├── tests/              # Comprehensive automated test suite (246 unit tests)
 │   ├── test_brigade.py
 │   ├── test_brigade_guard.py

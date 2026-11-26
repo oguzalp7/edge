@@ -26,8 +26,8 @@ Bu kurallar, `edge` eklentisini kullanan tüm çalışma alanlarında geçerli e
 > treehouse get --lease -b feat/<slice-adi>
 > ```
 > - Ana repo dizini (`/home/oguz/<project>`) sadece koordinasyon, biletleme ve git branch takibi içindir; doğrudan üretim kodu mutasyonuyla KİRLETİLEMEZ.
-> - Tüm dosya düzenleme (`write_file`, `edit_file`), `tsc` derleme ve test koşturma işlemleri kiralık worktree (`/home/oguz/.treehouse/pool/slot-N/...`) içinde icra edilir.
-> - Doğrulama ve inceleme tamamlandığında `brigade finish-slice <repo>` ile ana repodaki `development` dalına fast-forward (`git merge --ff-only`) birleştirilir ve worktree havuza iade edilir.
+> - Tüm dosya düzenleme (`write_file`, `edit_file`) ile aktif **Stack Profile** (`profiles/<id>/`) tarafından tanımlanan derleme, tip kontrolü ve test koşturma işlemleri kiralık worktree (`/home/oguz/.treehouse/pool/slot-N/...`) içinde icra edilir.
+> - Doğrulama ve inceleme tamamlandığında `brigade finish-slice <repo>` ile ana repodaki aktif entegrasyon dalına (Stack Profile `delivery.default_stage_branches.integration`, varsayılan `main`) fast-forward (`git merge --ff-only`) birleştirilir ve worktree havuza iade edilir.
 
 ---
 

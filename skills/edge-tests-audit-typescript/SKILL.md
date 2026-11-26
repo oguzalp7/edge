@@ -1,9 +1,12 @@
 ---
 name: edge-tests-audit-typescript
+profile: typescript
 description: Deterministic TypeScript test purity, external I/O leakage, and test isolation health auditor. Detects live database imports, direct DML/DDL executions, uncontained seeds, missing teardowns, and static data collisions in unit tests.
 ---
 
 # 🧪 /edge-tests-audit-typescript — TypeScript Test Purity & Isolation Health Auditor
+
+> **Stack Profile:** `typescript` (extends cleanly to `nextjs-drizzle-tailwind`) — see [`profiles/typescript/PLAYBOOK.md`](../../profiles/typescript/PLAYBOOK.md).
 
 Bu beceri, `tests/unit/` dizini altındaki TypeScript birim testlerinin dış dünya (veritabanı, DDL/DML, seed betikleri, ağ) bağımlılıklarını deterministik olarak analiz eder ve testlerin hermetiklik (saflık) puanını hesaplar.
 
@@ -60,6 +63,6 @@ Her test dosyası **100 puan** ile başlar. Aşağıdaki ihlaller puanı düşü
 1. **Entegrasyon Testine Taşı:**  
    Veritabanı bağlantısı zorunlu olan ve gerçek SQL davranışını test eden dosyaları `tests/integration/<domain>/` dizinine taşıyın.
 2. **Repository Mocking:**  
-   Server Action veya orkestratör testlerinde `vi.mock("@/lib/<domain>/repository")` kullanarak DB katmanını sanallaştırın.
+   Controller / Server Action (`nextjs-drizzle-tailwind` profili) veya orkestratör testlerinde `vi.mock("@/lib/<domain>/repository")` kullanarak DB katmanını sanallaştırın.
 3. **In-Memory Driver:**  
    Domain repository'sinin `In-Memory Driver` desteğini kullanarak bellekte sıfır I/O ile testleri koşturun.

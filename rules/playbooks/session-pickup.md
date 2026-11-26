@@ -42,7 +42,7 @@ Devralma sonrası ajan derhal şu adımları atar:
 1. `brigade resume <repo>` çıktısını incele.
 2. `next_action` yönergesini oku.
 3. Eğer `SURGERY` durumunda kaldıysan:
-   * Test seam komutunu çalıştır (`npm run test:unit` veya `vitest`).
+   * Aktif Stack Profile'ın (`profiles/<id>/`) test komutunu çalıştır.
    * Gerekli cerrahi adımı tamamla.
    * `brigade advance` ile `VERIFY` aşamasına geç.
 4. Eğer `GATE` veya `STAGING` durumunda kaldıysan:

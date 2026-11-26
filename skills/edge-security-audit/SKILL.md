@@ -14,10 +14,10 @@ user-invocable: true
 
 ```bash
 # Scoped audit (repeatable --scope or comma-separated)
-python3 tools/brigade/cli.py security-audit . --scope src/actions --scope src/core/modules/portal --format toon
+python3 tools/brigade/cli.py security-audit . --scope <controller_or_domain_paths> --format toon
 
 # Differential audit against base ref (also runs automatically in Tier 2 prepare-ship)
-python3 tools/brigade/cli.py security-audit . --diff-only --base origin/staging
+python3 tools/brigade/cli.py security-audit . --diff-only --base origin/<staging_or_integration_branch>
 
 # Full recursive codebase audit
 python3 tools/brigade/cli.py security-audit . --recursive --profile deep --format toon
@@ -30,7 +30,7 @@ python3 tools/brigade/cli.py security-audit . --recursive --profile deep --forma
 1. **Shared Ledger (`.edge/security/coverage-ledger.json`):**
    - Keyed by `file_sha256`. Unchanged `"covered"` files preserve their audited status across separate `--scope` and `--diff-only` runs; modified covered files are automatically re-audited; unscanned files stay `"out_of_scope"`.
 2. **4 Attack Classes:**
-   - `ACCESS_CONTROL_ABAC`: Unauthenticated Server Action / API Route mutations (`db.insert`, `db.update`, `db.delete`, `Repository.*`, `.upsert`) and privilege bypasses (`system-caller`, `bypassAuth`, `skipAuth`).
+   - `ACCESS_CONTROL_ABAC`: Unauthenticated Controller / Server Action / API Route mutations (per active Stack Profile, e.g., `db.insert`, `db.update`, `db.delete`, `Repository.*`, `.upsert`) and privilege bypasses (`system-caller`, `bypassAuth`, `skipAuth`).
    - `DATA_ISOLATION`: Unscoped `db.update` / `db.delete` mutations missing `.where(...)`.
    - `INJECTION_AND_SINKS`: `sql.raw(${...})`, `dangerouslySetInnerHTML`, shell exec, and `eval` sinks.
    - `CRYPTO_AND_SECRETS`: `Math.random()` in auth/token contexts and hardcoded secret literals.

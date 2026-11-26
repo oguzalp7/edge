@@ -9,7 +9,7 @@ Bu kılavuz, Edge eklentisini kullanan geliştiriciler ve ajanlar için operasyo
 ## 📑 İçindekiler
 1. [Hızlı Başlangıç: Tek Komut Doktrini](#1-hızlı-başlangıç-tek-komut-doktrini)
 2. [İstasyonlar Arası Gezinme ve İş Akışları](#2-istasyonlar-arası-gezinme-ve-iş-akışları)
-3. [Antigraveyard & Otomatik Vardiya Değişimi](#3-antigraveyard--otomatik-vardiya-değişimi)
+3. [Station Persistence & Otomatik Vardiya Değişimi](#3-station-persistence--otomatik-vardiya-değişimi)
 4. [UI Onay Kapısı (`lavish-axi`)](#4-ui-onay-kapısı-lavish-axi)
 5. [TDD ve Test İntizamı (Test Immutability)](#5-tdd-ve-test-intizamı-test-immutability)
 6. [CLI Araçları ve Teşhis Komutları](#6-cli-araçları-ve-teşhis-komutları)
@@ -84,7 +84,7 @@ Orkestratör, görevin türüne göre istasyonları sırayla devreye sokar:
 
 ---
 
-## 3. Antigraveyard & Otomatik Vardiya Değişimi
+## 3. Station Persistence & Otomatik Vardiya Değişimi
 
 Geliştiricinin veya ajanın "bu ajanı kapatıp yenisini mi açayım?" diye düşünmesine gerek yoktur. Arka planda çalışan **`orchestrator_guard.py`** bunu matematiksel olarak yönetir:
 

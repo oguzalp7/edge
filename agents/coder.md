@@ -18,13 +18,13 @@ The Coder implements production code to turn the Seam Architect's RED tests comp
 2. **Contract Fidelity:** Implement strictly according to declared interface contracts and domain repositories.
 3. **Hermetic Verification:**
    - Execute the scoped test command: MUST exit with code 0 (GREEN).
-   - Execute project compiler / typechecker: MUST exit with code 0.
+   - Execute project compiler / typechecker (per active Stack Profile): MUST exit with code 0.
 4. **Code Quality & Omission Invariants:**
-   - Adhere to `coding_standards.md` (no raw leaks, explicit error handling, transaction safety).
-   - **Submit Lock & Optimistic Rollback:** Lock in-flight controls with `disabled={isPending}`; on `!res.success` roll back optimistic state (`rollback`) and surface a visible error.
+   - Adhere to `coding_standards.md` and active `profiles/<id>/PLAYBOOK.md` (no raw leaks, explicit error handling, transaction safety).
+   - **Submit Lock & Optimistic Rollback:** Lock in-flight controls during async mutations; on failure roll back optimistic state (`rollback`) and surface a visible error.
    - **Zero Mock Fallback & Superseded Deletion:** Never introduce `DEFAULT_*` or `MOCK_*` synthetic fallbacks in production; delete superseded mocks and dead helpers in the same slice.
-   - **Dynamic SSR & Cache Revalidation:** Export `export const dynamic = "force-dynamic"` on DB-reading App Router pages/layouts and invoke `revalidatePath` on mutations.
-   - **Dual-Theme & A11y Minimums:** Pair `bg-white` with `dark:` (`dark:bg-*`), provide descriptive `aria-label` on icon-only buttons (`<X>`), and bind `<label>` to form inputs.
+   - **Fresh Reads & Cache Invalidation:** Avoid stale caching on dynamic data-reading views and invalidate affected caches on mutations.
+   - **Theme Parity & A11y Minimums:** Maintain light/dark theme parity, provide descriptive accessible labels on icon-only buttons, and bind labels to form inputs.
 5. **Zero-Touch Working Tree:** If an isolated worktree is assigned, operate strictly within that worktree directory.
 6. **Autonomous Kitchen Relay:**
    - When tests pass and compilation is green, run `brigade advance <repo>`.
