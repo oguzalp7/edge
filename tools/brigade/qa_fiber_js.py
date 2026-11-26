@@ -1,10 +1,12 @@
 """React Fiber JS inspection snippet and headless browser evaluator."""
 
 import json
+import shutil
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
+from tools.brigade.prototype import resolve_safe_node_argv
 from tools.common import normalize_target_path
 
 
@@ -111,11 +113,31 @@ def _parse_eval_json(raw: str) -> Dict[str, Any]:
         return {"error": f"Failed to parse eval JSON output: {e}", "raw": raw}
 
 
+def _unavailable_browser_eval(clean_js: str) -> Dict[str, Any]:
+    return {
+        "error": "CHROME_DEVTOOLS_AXI_UNAVAILABLE",
+        "fallback": "chrome-devtools-mcp",
+        "alternative": "browser_subagent",
+        "js_snippet": clean_js,
+        "instruction": "chrome-devtools-axi is unavailable. Run js_snippet via chrome-devtools-mcp evaluate_script or the built-in browser subagent.",
+    }
+
+
+def _resolve_browser_eval_cmd(clean_js: str) -> List[str]:
+    bin_path = shutil.which("chrome-devtools-axi") or shutil.which("chrome-dev-tools-axi")
+    if bin_path:
+        return [*resolve_safe_node_argv(bin_path, shutil.which), "eval", clean_js]
+    return ["chrome-devtools-axi", "eval", clean_js]
+
+
 def execute_browser_eval(js_code: str) -> Optional[Dict[str, Any]]:
-    """Runs a JavaScript snippet in the active browser using chrome-devtools-axi eval."""
+    """Run a JavaScript snippet via chrome-devtools-axi eval with Windows shim unwrap and MCP/browser fallback."""
     clean_js = " ".join(js_code.strip().splitlines())
+    cmd = _resolve_browser_eval_cmd(clean_js)
     try:
-        proc = subprocess.run(["chrome-devtools-axi", "eval", clean_js], capture_output=True, text=True, timeout=10, check=False)
+        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", shell=False, timeout=10, check=False)
+    except FileNotFoundError:
+        return _unavailable_browser_eval(clean_js)
     except Exception as e:
         return {"error": f"Exception executing chrome-devtools-axi: {str(e)}"}
     if proc.returncode != 0:

@@ -132,6 +132,8 @@ def register_worktree_slice_parsers(subparsers: Any) -> None:
     p_crit.add_argument("--model", default=PRIMARY_CRITIC_MODEL, help=f"Primary critic model (default: {PRIMARY_CRITIC_MODEL})")
     p_crit.add_argument("--fallback-model", default=FALLBACK_CRITIC_MODEL, help=f"Fallback critic model (default: {FALLBACK_CRITIC_MODEL})")
     p_crit.add_argument("--timeout", type=int, default=180, help="Critique timeout in seconds (default: 180)")
+    p_crit.add_argument("--native", "--dispatch", dest="native", action="store_true", help="Emit native Swarm/subagent dispatch directive without invoking agy CLI")
+    p_crit.add_argument("--json", action="store_true", help="Output SpecCritiqueResult as JSON")
 
     p_fin = subparsers.add_parser("finish-slice", help="Fast-forward merge slice, release worktree, and resolve ticket")
     p_fin.add_argument("repo", help="Path to target repository")

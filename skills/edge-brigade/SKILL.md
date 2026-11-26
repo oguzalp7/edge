@@ -61,10 +61,10 @@ Instead of spawning disposable generalist agents that try to do everything and e
 ### The 8 Brigade Stations (Kadro Yapılanması):
 1. **SPEC_WRITER (`spec_writer`)**:
    - **Role:** Ubiquitous language translator & N-Spec slicer.
-   - **Constraint:** Condenses user story into 3-4 plain English sentences. Enforces Pocock/Dexter Horthy vertical slice completeness (DB -> Core -> API -> UI). **Visual Approval Gate (`lavish-axi`):** If UI is touched, MUST author interactive HTML in `.lavish/<feature>.html` and obtain user approval before coding.
+   - **Constraint:** Condenses user story into 3-4 plain English sentences. Enforces Pocock/Dexter Horthy vertical slice completeness (DB -> Core -> API -> UI). **Visual Approval Gate (`lavish-axi`):** If UI is touched, MUST author interactive HTML in `.lavish/<feature>.html` and obtain user approval via `brigade prototype` (`lavish-axi` -> `npx --yes lavish-axi` -> HTML `file://` artifact + `ask_question` fallback) before coding.
 2. **SPEC_CRITIC (`spec_critic`)**:
    - **Role:** Cross-provider zero-context specification critic & anti-debt auditor.
-   - **Execution:** Runs via `brigade critique-spec <repo> --spec <path>` using `claude-opus-5-5-high` (automatic quota fallback to `gemini-3.8-flash-high`) and writes `.edge/specs/<stem>-critique.md`.
+   - **Execution:** Runs via `brigade critique-spec <repo> --spec <path> [--native]` (or automatic fallback when `agy` CLI is absent): dispatches as native `native_swarm` (`claude-opus-5-5-high`) in Ultra or `invoke_subagent` (`Model: "pro"`) in Pro, or runs `agy` CLI (`claude-opus-5-5-high` -> `gemini-3.8-flash-high`) and writes `.edge/specs/<stem>-critique.md`.
    - **Constraint:** Advisory gate (< 400 words plain English); surfaces reusable utilities and unstated edge cases without hard-locking FSM.
 3. **RESEARCHER (`researcher`)**:
    - **Role:** Deep codebase exploration, AST tracing, external documentation verification, and root cause analysis.
@@ -83,7 +83,7 @@ Instead of spawning disposable generalist agents that try to do everything and e
    - **Constraint:** Strictly read-only. Must seal verdict via `brigade seal-review <repo> --verdict PASS|FAIL --summary "..."` before `REVIEW -> STAGING` can pass; skips deterministic checks already enforced by `gate.py`.
 8. **QA_ENGINEER (`qa_engineer` / Sommelier)**:
    - **Role:** End-to-end browser verification, visual quality assurance, and user journey testing.
-   - **Protocol:** Receives translated user scenarios mapped to project ubiquitous domain vocabulary by the Orchestrator. Delegates physical browser interactions to the built-in `browser` subagent (`TypeName: "browser"`, `Model: "flash"`). Stages Lavish references to `<Artifact Directory>/browser_sandbox/references/`. Enforces state persistence via DOM reload and backend DB/state cross-checks (`run_command`). Synthesizes `ProofVerifier`-compliant Behavioral Proof Receipt (`.edge/qa/proofs/<slug>.json` with unique-SHA-256 screenshots, non-auth URLs, `host_facts_verified: true`, and `db_crosscheck`) before advancing to `REVIEW` (`EXAMINER`).
+   - **Protocol:** Receives translated user scenarios mapped to project ubiquitous domain vocabulary by the Orchestrator. E2E QA runs primary via Antigravity's built-in `browser` subagent (`TypeName: "browser"`, `Model: "flash"`); visual parity & Fiber eval use `chrome-devtools-axi` -> `chrome-devtools-mcp` -> `browser` fallback. Stages Lavish references to `<Artifact Directory>/browser_sandbox/references/`. Enforces state persistence via DOM reload and backend DB/state cross-checks (`run_command`). Synthesizes `ProofVerifier`-compliant Behavioral Proof Receipt (`.edge/qa/proofs/<slug>.json` with unique-SHA-256 screenshots, non-auth URLs, `host_facts_verified: true`, and `db_crosscheck`) before advancing to `REVIEW` (`EXAMINER`).
    - **Constraint:** Strictly zero production code mutation (`<source_roots>`, e.g., `src/**`, `app/**`, `lib/**`, `db/**`). Documents defects with reproduction steps, network payloads, console errors, and screenshots. Parks non-blocking UX issues via `qa-inspect --frontier` into `tools/tracker` (`type:frontier`, `track:ui`; `frontier-axi` soft-deprecated).
 
 ### Station Memory Models: Elephant vs. Goldfish

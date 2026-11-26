@@ -3,11 +3,10 @@
 import argparse
 import json
 from pathlib import Path
-import shlex
 import sys
-from typing import Optional
 
 from tools.brigade.cli_ops._facade import resolve_symbol
+from tools.brigade.prototype import execute_prototype_action
 from tools.common import normalize_target_path
 
 
@@ -56,44 +55,18 @@ def cmd_qa_inspect(args: argparse.Namespace) -> int:
     return 0
 
 
-def _resolve_proto_wsl(repo_path: Path, raw_file: Optional[str], must_exist: bool) -> Optional[str]:
-    if not raw_file:
-        print("❌ --file is required. Example: --file .lavish/feature.html")
-        return None
-    html_file = Path(raw_file) if Path(raw_file).is_absolute() else (repo_path / raw_file)
-    if must_exist and not html_file.exists():
-        print(f"❌ HTML file not found: {html_file}")
-        return None
-    from tools.common.paths import to_wsl_path
-    return str(to_wsl_path(html_file))
-
-
 def cmd_prototype(args: argparse.Namespace) -> int:
     """Run lavish-axi interactive UI prototype bridge actions."""
-    repo_path, action = normalize_target_path(args.repo), args.action
-    run_cmd = resolve_symbol("run_command", "tools.common")
-    if action == "serve":
-        wsl_path = _resolve_proto_wsl(repo_path, args.file, must_exist=True)
-        if wsl_path is None:
-            return 1
-        ret, stdout, stderr = run_cmd(f"lavish-axi {wsl_path}", cwd=repo_path)
-    elif action == "poll":
-        wsl_path = _resolve_proto_wsl(repo_path, args.file, must_exist=False)
-        if wsl_path is None:
-            return 1
-        cmd = f"lavish-axi poll {wsl_path}"
-        if getattr(args, "agent_reply", None):
-            cmd += f" --agent-reply {shlex.quote(args.agent_reply)}"
-        ret, stdout, stderr = run_cmd(cmd, cwd=repo_path, timeout=3600)
-    elif action == "stop":
-        ret, stdout, stderr = run_cmd("lavish-axi stop", cwd=repo_path)
-    elif action == "status":
-        cmd = "python3 -c \"import json, os; p=os.path.expanduser('~/.lavish-axi/state.json'); s=json.load(open(p)) if os.path.exists(p) else {}; print(json.dumps([{'id': k, 'file': v.get('file'), 'status': v.get('status'), 'endedAt': v.get('endedAt'), 'endedBy': v.get('endedBy')} for k, v in s.get('sessions', {}).items()], indent=2))\""
-        ret, stdout, stderr = run_cmd(cmd, cwd=repo_path)
-    else:
-        return 0
-    print(stdout)
-    if stderr and action in ("serve", "poll", "stop"):
+    repo_path = normalize_target_path(args.repo)
+    ret, stdout, stderr = execute_prototype_action(
+        repo_path=repo_path,
+        action=args.action,
+        raw_file=getattr(args, "file", None),
+        agent_reply=getattr(args, "agent_reply", None),
+    )
+    if stdout:
+        print(stdout)
+    if stderr:
         print(stderr, file=sys.stderr)
     return ret
 

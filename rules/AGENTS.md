@@ -49,9 +49,8 @@ Ajanlar çevre birimleriyle (Git, Tarayıcı, Görev Listesi) etkileşime girerk
 3. **`github-mcp-server` (Fallback 2):** Doğrudan API çağrıları için MCP araç seti.
 
 ### 🌐 C. Tarayıcı Otomasyonu ve Görsel Doğrulama (Visual QA)
-1. **`chrome-dev-tools-axi` (Birincil):** Headless ve token-tasarruflu görsel regresyon / snapshot aracı.
-2. **`chrome-devtools-mcp` (Fallback 1):** Antigravity bünyesindeki MCP araç seti (`navigate_page`, `take_screenshot` vb.).
-3. **Sistem CLI / Puppeteer (Fallback 2):** Linux/WSL ortamında çalışan yerel tarayıcı betikleri.
+1. **E2E QA Birincil (`browser` Subagent):** Uçtan uca (E2E) etkileşimli tarayıcı doğrulaması tüm platformlarda Antigravity'nin yerleşik **`browser`** alt-ajanı (`TypeName: "browser"`) üzerinden yürütülür.
+2. **Deterministik Görsel Eşlik (`chrome-devtools-axi` $\rightarrow$ `chrome-devtools-mcp` $\rightarrow$ `browser`):** Görsel piksel eşliği (`diff_image`) ve Fiber incelemesi için önce cross-OS `chrome-devtools-axi` (veya `chrome-dev-tools-axi`, Windows `.cmd` shim güvenli sarmalayıcı ile) denenir; kurulu değilse sırasıyla **`chrome-devtools-mcp`** (`evaluate_script`, `take_screenshot`, `navigate_page`) veya yerleşik **`browser`** alt-ajanına düşülür.
 
 ---
 

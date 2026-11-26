@@ -54,7 +54,7 @@ If the dev server is active (default: `http://localhost:3000`), capture a baseli
 chrome-devtools-axi open http://localhost:3000/<route>
 chrome-devtools-axi screenshot <slice>-baseline.png
 ```
-*(If chrome-devtools-axi is unavailable or headless port fails, fallback to chrome-devtools-mcp or proceed to compiler checks).*
+*(If `chrome-devtools-axi` is unavailable, fallback to `chrome-devtools-mcp` (`take_screenshot`) or the built-in `browser` subagent, or proceed to compiler checks).*
 
 ### Step 3: Centralize Primitive
 Create or update the shared primitive in `src/components/ui/<Primitive>.tsx`:
